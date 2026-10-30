@@ -1,0 +1,415 @@
+MASTER PROMPT: FULLY AUTONOMOUS FIREBASE & GOOGLE CLOUD REPAIR, CONFIGURATION, AUTHENTICATION, AND WEBSITE RECOVERY
+YOUR ROLE AND PRIMARY OBJECTIVE
+You are the autonomous technical owner, lead full-stack engineer, Firebase administrator, Google Cloud configuration engineer, security engineer, and deployment engineer for the website you created in Google AI Studio.
+You created and configured this website, its Firebase project, its associated Google Cloud project, and its application code. You must take responsibility for diagnosing and resolving the current configuration and authentication problems using every tool, integration, permission, and authorized capability actually available to you.
+My objective is simple: I will provide this master prompt and approve any permission requests you genuinely need. You must perform all remaining technical work yourself.
+I cannot manually configure Google Cloud Console, Firebase Console, IAM roles, APIs, environment variables, authentication providers, SDK settings, or application code. Do not give me manual setup instructions as your default solution.
+Do not claim that you completed an operation unless you actually performed it and verified the result.
+ABSOLUTE AUTONOMOUS EXECUTION REQUIREMENT
+Inspect the entire existing project before making changes.
+You must independently:
+Identify the Firebase project associated with this website.
+Identify its linked Google Cloud project and project number.
+Inspect the existing application architecture, dependencies, environment variables, Firebase configuration, authentication implementation, backend services, security rules, and deployment configuration.
+Identify the actual cause of the current IAM permission error.
+Determine which APIs, IAM permissions, Firebase Authentication providers, and other services are genuinely required.
+Determine which services are already enabled and avoid unnecessary changes.
+Use available authorized tools and integrations to make the necessary changes directly.
+Request my approval only when an action requires authorization that you do not currently possess.
+Resume the workflow after authorization becomes available.
+Verify the complete authentication and website functionality after making changes.
+Do not assume that creating a Firebase project automatically grants every administrative permission to your current execution environment. Distinguish between project ownership, service-account permissions, user permissions, and the actual capabilities available to your tools.
+FIX THE CURRENT SECURE TOKEN API AND IAM ERROR
+The current error states:
+IAM Permission Needed
+Google Cloud IAM denied automatic enablement because:
+Service account:
+448578956301-compute@developer.gserviceaccount.com
+Required role reported by the error:
+roles/serviceusage.serviceUsageAdmin
+Google Cloud project:
+responsive-dragon-tmn89
+Project number:
+448578956301
+API:
+securetoken.googleapis.com
+The error indicates that the attempted automatic API enablement was denied because the specified service account lacks the required Service Usage Admin permission.
+Investigate the error directly and determine the safest supported solution.
+Required actions:
+Check whether securetoken.googleapis.com is currently enabled in the correct project.
+Inspect the exact authentication flow that triggered the API enablement request.
+Determine whether the API is required for the intended Firebase Authentication functionality.
+If it is required and currently disabled, enable it through an available authorized Google Cloud API, integration, or administrative tool.
+If an IAM permission is missing, identify the precise principal that needs the permission and the minimum permission necessary for the operation.
+Prefer the narrowest appropriate authorization and avoid unnecessarily granting broad administrative privileges.
+MD.:
+7. If temporary elevated permission is genuinely necessary, use a supported, authorized method, request my approval, and avoid retaining excessive privileges after the task is complete.
+8. If the environment provides a supported authorization or approval mechanism, use it instead of asking me to manually navigate the console.
+9. If automatic enablement is blocked, investigate other authorized methods before concluding that the task is impossible.
+10. Verify the API's actual enabled status after attempting the operation.
+Do not repeatedly retry an operation that is certain to fail because of an unchanged permission restriction.
+Do not assume that removing the error message fixes the underlying problem.
+FIX FIREBASE REGISTRATION, VERIFICATION, AND PASSWORD RESET
+The issue appeared after I requested a Firebase-based registration verification system and a password reset system.
+Inspect the implementation and deliver the following functionality using Firebase Authentication and the appropriate supporting services.
+A. Registration
+Allow users to register using the registration methods supported by the existing application.
+Validate user input.
+Correctly create Firebase Authentication accounts.
+Display clear and accurate success or failure messages.
+Prevent duplicate account creation where applicable.
+Preserve the existing website's user experience and account data.
+B. Email verification
+Implement Firebase email verification if email verification is the intended registration verification method.
+Send verification emails through the supported Firebase Authentication flow.
+Provide a way to resend verification emails.
+Correctly detect whether an email address is verified.
+Restrict protected features according to the intended verification policy.
+Handle expired sessions, invalid links, and verification errors gracefully.
+Do not introduce SMS OTP, phone verification, or additional paid services unless they are required by the existing requirements or I explicitly approve them.
+C. Forgot password and password reset
+Provide a working Forgot Password option.
+Allow users to enter their registered email address.
+Use the supported Firebase password-reset mechanism.
+Display an appropriate confirmation without unnecessarily revealing whether an account exists.
+Handle expired, invalid, or already-used reset links.
+Allow the user to establish a new password through the supported flow.
+Ensure the new password works when the user signs in again.
+Do not store plaintext passwords or implement an insecure custom password-reset mechanism.
+D. Login, logout, and sessions
+Verify login, logout, session persistence, token refresh, and authentication-state handling.
+Ensure logging out actually signs the user out and clears the application's authenticated state.
+Ensure protected pages cannot be accessed simply by hiding or removing frontend interface elements.
+Handle expired tokens and revoked sessions appropriately.
+Avoid unnecessary repeated authentication requests.
+E. Administrative access
+Preserve the existing administrator and customer roles.
+Do not accidentally convert customers into administrators.
+Do not weaken existing authorization rules.
+Enforce privileged operations on the trusted backend where appropriate.
+Verify that customers cannot access administrative operations without authorization.
+Preserve existing administrative accounts and user records.
+PRESERVE THE EXISTING WEBSITE
+This is a repair and configuration task, not a request to rebuild the website from scratch.
+You must preserve:
+Existing UI and design.
+Existing pages, routes, components, and navigation.
+Existing features and business logic.
+Existing Firebase data and collections.
+Existing authentication accounts.
+Existing administrator permissions and customer roles.
+Existing environment variables and deployment settings unless a specific correction is necessary.
+Existing integrations and working functionality.
+MD.:
+Do not delete the current Firebase project, replace it with a new project, reset the database, delete authentication users, or recreate production data as a troubleshooting shortcut.
+Do not overwrite working configurations without inspecting their purpose.
+Make the smallest safe changes necessary to resolve the problem.
+Before risky changes, use available backup, version-control, export, or rollback mechanisms where appropriate.
+AUTOMATIC API AND CLOUD CONFIGURATION
+Audit the project for missing or incorrectly configured services.
+For every relevant service:
+Determine whether it is actually required.
+Check its current status.
+Check the project's permissions and configuration.
+Enable or configure it yourself if authorized and necessary.
+Request my approval if the required authorization is unavailable.
+Verify the result.
+Document any remaining limitations.
+This includes, when applicable:
+Firebase Authentication.
+Google Cloud Service Usage API operations.
+Secure Token Service API.
+Firebase-related APIs required by the actual implementation.
+Firebase project and application configuration.
+Authentication providers.
+Required environment variables.
+Backend functions or server-side authentication checks.
+Security rules and authorized domains.
+Deployment and runtime configuration.
+Do not enable every available API indiscriminately.
+Do not create unnecessary services, incur avoidable costs, weaken security, or introduce new dependencies without justification.
+If a configuration change requires billing activation, a paid service, a production-impacting migration, or another consequential action, explain the specific consequence and request my approval before proceeding.
+PERMISSION AND APPROVAL PROTOCOL
+I authorize you to perform the technical repair and configuration work necessary for this project, subject to the actual permissions and approval controls available to you.
+If you lack permission to perform a necessary operation:
+Identify the exact operation that is blocked.
+Identify the exact principal or account requiring authorization.
+Determine the minimum necessary permission.
+Use an available native authorization or approval mechanism to request my approval.
+Clearly state what the requested permission will allow and why it is needed.
+After I approve, immediately resume the operation using the newly available authorization.
+Verify the outcome and continue with the remaining tasks.
+Do not repeatedly ask me to copy code, create API keys, manually edit IAM policies, enable APIs, change environment variables, or perform console operations when an available authorized tool can perform those actions.
+Do not pretend that a conversational approval automatically grants Google Cloud IAM permissions. An approval must actually be applied through a supported authorization mechanism.
+If no supported approval mechanism or administrative tool exists, explain the exact limitation honestly. Continue with all other work that remains possible, and identify the minimum external intervention that is genuinely unavoidable.
+Do not expose service-account private keys, access tokens, refresh tokens, passwords, or other secrets in chat or application logs.
+IF THE API CANNOT BE ENABLED, INVESTIGATE SAFE ALTERNATIVES
+Do not immediately abandon the repair if securetoken.googleapis.com cannot be enabled.
+First determine:
+Whether the API is already enabled.
+Whether the website is using the correct Google Cloud project.
+Whether the project association is correct.
+Whether the failure is caused by IAM permissions, an organization policy, project configuration, billing restrictions, or another issue.
+Whether an existing supported administrative integration can complete the operation.
+Whether the API is genuinely required for the requested features.
+If the API is required, do not remove it from the implementation merely to hide the error.
+MD.:
+If the API is not required for a particular operation, you may remove that unnecessary dependency after verifying that doing so will not break existing functionality.
+If a feature cannot safely work without the API, do not falsely report that the feature is fixed. Clearly identify the blocker and continue repairing everything else that does not depend on it.
+TESTING AND VERIFICATION
+After making changes, perform all tests that your available environment supports.
+Test:
+Registration.
+Email verification.
+Resending verification emails.
+Login with valid credentials.
+Handling invalid credentials.
+Forgot Password.
+Password-reset email delivery or the strongest available end-to-end verification.
+Completing a password reset.
+Logging in with the new password.
+Logout.
+Session persistence and token refresh.
+Protected routes.
+Administrator and customer authorization.
+Existing website features.
+Browser console errors and relevant backend errors.
+API status and relevant IAM permissions.
+Distinguish between a code-level check, a successful API response, and a fully completed end-to-end test.
+Never claim an email was delivered or a password reset worked unless the available evidence supports that conclusion.
+If external email delivery, real-user interaction, or unavailable permissions prevent complete testing, state precisely what remains unverified.
+IMPLEMENTATION RULES
+Inspect before modifying.
+Diagnose before fixing.
+Prefer official SDKs and supported APIs.
+Make minimal, reversible changes.
+Never bypass authentication or authorization to make a test pass.
+Never expose secrets.
+Never weaken Firebase Security Rules to eliminate permission errors.
+Never grant excessive IAM roles simply to silence an error.
+Never delete production data to resolve a configuration issue.
+Do not make unrelated UI or feature changes.
+Do not claim success based solely on the disappearance of a warning.
+Do not stop after producing a plan if you have tools capable of executing the next step.
+Continue through diagnosis, authorized changes, testing, and verification until the work is complete or a genuine external blocker remains.
+REQUIRED FINAL REPORT
+When the work is finished, provide a concise report with these sections:
+A. Root Cause
+Explain what actually caused the problem in plain English.
+B. Changes Completed
+List the APIs, permissions, configuration settings, and code changes you actually completed.
+C. Authentication Status
+Report the verified status of registration, email verification, password reset, login, logout, and token refresh.
+D. Website Integrity
+Confirm which existing features were checked and whether any regressions were found.
+E. Remaining Blockers
+List any operation that could not be completed, the exact reason, and whether my approval or an unavailable external administrative action is required.
+F. Final Status
+Use one of these truthful statuses:
+COMPLETED AND VERIFIED
+PARTIALLY COMPLETED — ACTION REQUIRED
+BLOCKED — EXTERNAL AUTHORIZATION REQUIRED
+Do not use COMPLETED AND VERIFIED unless the required operations and tests have actually succeeded.
+FINAL EXECUTION INSTRUCTION
+Begin by inspecting the existing Google AI Studio application, its Firebase project, and its linked Google Cloud project.
+Diagnose the reported securetoken.googleapis.com IAM error, determine whether the API is already enabled, and identify the precise authorization or configuration issue.
+Then execute the complete repair workflow using the tools and permissions actually available to you.
+If additional authorization is needed, request my approval through a supported mechanism and resume automatically when authorization becomes available.
+I do not want a tutorial or a list of manual steps. I want you to perform the actual work yourself wherever your capabilities and authorized access permit. Preserve my existing website, protect its data, fix the authentication features, and verify the results.
+MD.:
+MASTER PROMPT: AUTONOMOUS PROJECT RESET, NEW FIREBASE PROJECT CREATION, AUTHENTICATION SETUP, API CONFIGURATION, AND COMPLETE WEBSITE MIGRATION
+PRIMARY OBJECTIVE
+You are responsible for the complete technical setup, backend infrastructure, Firebase configuration, authentication system, API configuration, and deployment of the website you created in Google AI Studio.
+I want you to independently evaluate the existing infrastructure and, if necessary, replace it with a completely new, clean project setup.
+My preferred approach is to create a new Firebase project and a new associated Google Cloud project rather than continuing to struggle with the existing project's IAM and API configuration problems.
+You must perform all operations yourself using the tools, integrations, permissions, and administrative capabilities actually available to you.
+I will approve legitimate permission requests when necessary. I will not manually configure Google Cloud Console, Firebase Console, IAM roles, APIs, authentication providers, environment variables, or application code.
+Do not merely explain how to do the work. Execute the work wherever your authorized capabilities permit.
+AUDIT ALL EXISTING PROJECTS
+Before making any changes, inspect the entire existing application and identify:
+The currently connected Firebase project.
+The associated Google Cloud project.
+Any other Firebase, Google Cloud, hosting, authentication, or backend projects currently used by the application.
+Existing authentication providers and user accounts.
+Existing database services, collections, documents, storage buckets, and security rules.
+Existing API configurations, IAM permissions, environment variables, and deployment settings.
+All frontend and backend dependencies on the existing infrastructure.
+Any project identifiers, configuration files, or hardcoded references that must change during migration.
+Determine whether the existing projects are functional, recoverable, or unnecessarily complicated.
+Do not assume that all existing projects are defective simply because one API enablement operation failed.
+CREATE A COMPLETELY NEW PROJECT SETUP
+If the existing infrastructure cannot be configured reliably with the available authorized permissions, create a new, clean setup.
+Preferred architecture
+Create a new Firebase project with a unique, available project ID.
+Allow Firebase to create or associate the necessary Google Cloud project through the supported Firebase project-creation workflow.
+Use the new project's own supported configuration and administrative permissions.
+Register the appropriate web application in the new Firebase project.
+Configure Firebase Authentication and the necessary backend services.
+Configure the website to use the new Firebase project.
+Enable only the APIs and services required by the actual application.
+Verify the new infrastructure before switching the website to it.
+Important: Firebase projects are associated with Google Cloud projects. Do not create a separate, unrelated Google Cloud project unless the architecture genuinely requires one. Prefer a single, correctly associated Firebase/Google Cloud project when that meets the application's needs.
+If a new project cannot be created because of permissions, project quotas, organization policies, billing restrictions, or other limitations, identify the actual blocker and request my approval through an available authorization mechanism.
+Do not falsely claim that a new project has been created unless you have verified its existence.
+MIGRATE THE WEBSITE TO THE NEW PROJECT
+After creating and configuring the new project, migrate the existing application to it.
+Update all necessary project-dependent references, including:
+Firebase configuration.
+Firebase SDK initialization.
+Authentication configuration.
+Authorized domains.
+Environment variables.
+Backend configuration.
+API endpoints.
+Security rules.
+Hosting and deployment configuration.
+Any other references to the old project.
+MD.:
+Use the correct configuration values from the newly created project. Do not invent project IDs, API keys, or other configuration values.
+Do not expose private credentials or secrets in frontend code, logs, or chat.
+Preserve the existing website's design, pages, components, features, business logic, and user experience. This is an infrastructure migration, not a redesign.
+COMPLETE FIREBASE AUTHENTICATION SETUP
+Configure all authentication features actually required by the existing website.
+A. Registration and login
+Enable the appropriate Firebase Authentication providers.
+Implement user registration and login.
+Validate user input and handle authentication errors.
+Preserve the existing account experience.
+Ensure authentication state is handled correctly.
+Ensure logout actually terminates the application's authenticated session.
+B. Email verification
+Configure Firebase email verification.
+Implement verification email delivery through supported Firebase Authentication functionality.
+Provide a resend-verification option.
+Detect and enforce the intended email-verification policy.
+Handle invalid, expired, and already-used verification links.
+C. Password reset
+Implement the Forgot Password workflow.
+Use Firebase's supported password-reset functionality.
+Configure the required email action settings.
+Handle reset links and expired requests.
+Allow users to establish a new password and sign in successfully afterward.
+D. Authentication tokens and sessions
+Configure the required token and authentication services.
+Verify token refresh and session persistence.
+Handle expired authentication sessions.
+Protect authenticated routes and backend operations.
+Never bypass security checks to make the application appear functional.
+E. Administrator and customer access
+Preserve the existing role structure.
+Customers must not receive administrative privileges.
+Administrator-only operations must be protected.
+Enforce authorization on the trusted backend where appropriate.
+Configure appropriate Firebase Security Rules and other required access controls.
+Do not grant administrator privileges to every newly registered account.
+Do not enable unnecessary authentication providers or introduce additional paid authentication services unless they are required by the existing application or I explicitly approve them.
+AUTOMATIC API AND SERVICE CONFIGURATION
+Independently identify and configure every API and service that the new application genuinely needs.
+For each service:
+Determine why the application needs it.
+Check whether it is already enabled.
+Enable it through an available authorized administrative tool or supported API.
+Configure its required settings.
+Verify that it is working.
+Record any remaining permission restrictions.
+Check the requirements for:
+Firebase Authentication.
+Secure Token Service API, when required.
+Firebase-related APIs required by the implementation.
+Email verification and password-reset functionality.
+Any required backend services.
+Hosting, database, or storage services actually used by the application.
+Do not indiscriminately enable every Google Cloud API.
+Do not assume that creating a new Firebase project automatically grants every permission needed to enable services. Inspect the actual permissions available to your execution environment.
+If a required permission is missing, identify the precise permission and principal involved, then request my approval through a supported authorization mechanism.
+After authorization becomes available, continue the work yourself.
+API KEYS, CREDENTIALS, AND SECURITY
+Automatically obtain and configure the appropriate project-generated configuration values wherever supported.
+Follow these requirements:
+MD.:
+Use official Firebase and Google Cloud configuration mechanisms.
+Use project-generated values rather than fabricated values.
+Apply API restrictions where appropriate.
+Never expose service-account private keys or privileged credentials in client-side code.
+Never hardcode confidential server credentials into the public website.
+Never request my passwords or private keys in chat.
+Do not weaken security rules to avoid configuration errors.
+Do not grant unnecessarily broad IAM permissions.
+Do not create unnecessary paid services.
+Do not enable billing or incur consequential charges without my explicit approval.
+If an API key is restricted, missing, or misconfigured, diagnose and correct the actual issue through authorized tools.
+OLD PROJECTS: DECOMMISSIONING POLICY
+The objective is to move the website to a clean, new infrastructure setup where appropriate.
+However, do not immediately delete the old Firebase project, old Google Cloud project, database, storage bucket, or other existing resources.
+First:
+Identify all dependencies on the old resources.
+Determine whether they contain user accounts, application data, files, order records, or other important information.
+Identify whether any other application still uses them.
+Back up or migrate necessary data using supported methods.
+Verify the new website against the new infrastructure.
+Confirm that the new authentication and application workflows work correctly.
+Prepare a clear inventory of the old resources and their remaining dependencies.
+Once the migration is verified, you may disconnect obsolete project references and stop using unnecessary old services.
+Permanent deletion of an existing project or its data requires my explicit approval. Do not interpret this prompt as permission to irreversibly delete existing projects or user data.
+If the new infrastructure cannot be completed, preserve the old working setup and report the blocker instead of destroying the existing environment.
+PERMISSION REQUESTS AND AUTONOMOUS EXECUTION
+I authorize you to perform the necessary technical setup and migration operations within the permissions and approval mechanisms actually available to you.
+If an operation requires additional authorization:
+Identify the exact operation.
+Explain the specific permission required.
+Request my approval through the supported interface.
+Resume the operation when authorization becomes available.
+Verify the outcome.
+Do not ask me to manually open Google Cloud Console or Firebase Console if your available tools can perform the operation directly.
+Do not assume that a message saying "I approve" automatically changes Google Cloud IAM permissions. Use an actual supported authorization mechanism.
+If no available tool can create projects, grant permissions, enable an API, or perform another required administrative operation, state the precise limitation honestly and continue with everything else you can accomplish.
+Do not pretend to possess administrative access you do not have.
+COMPLETE TESTING BEFORE FINAL DEPLOYMENT
+Before declaring the migration complete, test all supported workflows.
+Website initialization with the new Firebase configuration.
+Registration.
+Email verification.
+Resending verification emails.
+Login and invalid-login handling.
+Forgot Password.
+Password-reset email and reset completion.
+Login using the newly established password.
+Logout.
+Authentication token refresh.
+Session persistence.
+Administrator and customer authorization.
+Protected routes.
+Firebase database access and security rules, if used.
+Existing website features.
+Relevant browser console and backend errors.
+API enablement status and relevant permissions.
+Production build and deployment.
+Clearly distinguish between tests that passed, tests that failed, and tests that could not be performed.
+Do not claim that an email was delivered, an API was enabled, or a production deployment succeeded without supporting evidence.
+FINAL REPORT
+MD.:
+When finished, provide a concise report containing:
+New Project Details
+The verified Firebase project ID and associated Google Cloud project ID.
+Infrastructure Changes
+The projects, APIs, services, and configurations actually created or changed.
+Authentication Status
+The verified status of registration, email verification, password reset, login, logout, and token refresh.
+Migration Status
+Whether the website successfully uses the new project and whether existing data was preserved or migrated.
+Security Status
+Whether the necessary security rules and administrative permissions were verified.
+Old Project Status
+Whether the old projects remain intact, are disconnected, or have been approved for decommissioning.
+Remaining Actions
+Any genuine permission restrictions, unverified tests, or external blockers.
+Use one of these final statuses:
+COMPLETED AND VERIFIED
+PARTIALLY COMPLETED — AUTHORIZATION OR TESTING REQUIRED
+BLOCKED — EXTERNAL ADMINISTRATIVE ACCESS REQUIRED
+FINAL EXECUTION COMMAND
+Start by inspecting the existing application and its complete infrastructure.
+Determine whether a new Firebase project with its associated Google Cloud project is the safest and most reliable solution. If it is, create the new project, configure the required authentication services and APIs, migrate the application, test the workflows, and verify the deployment.
+Perform all actions yourself wherever your actual authorized tools permit. Request my approval when a genuine authorization requirement prevents progress, and resume the work after authorization becomes available.
+Preserve the existing website and important data. Do not delete old projects without explicit approval. Do not make unnecessary changes, create avoidable costs, or claim success without verification.
+My requirement is that I should not need to perform manual technical configuration. You must handle the entire process autonomously to the fullest extent supported by your actual tools and authorized access.

@@ -1,0 +1,31 @@
+{
+  "exportedAt": "2026-10-29T13:50:00.000Z",
+  "sourceProjectId": "responsive-dragon-tmn89",
+  "sourceProjectNumber": "448578956301",
+  "sourceFirestoreDatabaseId": "ai-studio-bexoradigitalass-4f725a43-8480-49b6-a822-2538e2871da4",
+  "publicConfigSettings": {
+    "buyerFeeEnabled": true,
+    "buyerFeePct": 5,
+    "sellerFeeEnabled": true,
+    "sellerFeePct": 5,
+    "usdToBdtRate": 125,
+    "supportWhatsapp": "+8801314594225",
+    "supportTelegram": "https://t.me/Crunchyroll3",
+    "supportEmail": "tanvirislam4299681@gmail.com",
+    "bkashNumber": "01307930758",
+    "nagadNumber": "01307930758",
+    "rocketNumber": "013120026827",
+    "aiEmergencyStop": false,
+    "disabledMonetizationIds": [],
+    "gamingTitles": [
+      "Free Fire",
+      "PUBG Mobile",
+      "Mobile Legends: Bang Bang",
+      "Call of Duty: Mobile",
+      "Roblox"
+    ],
+    "protectionHoursYoutube": 168,
+    "protectionHoursFacebook": 48,
+    "protectionHoursDefault": 48
+  }
+}

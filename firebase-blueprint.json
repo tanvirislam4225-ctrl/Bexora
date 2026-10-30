@@ -1,0 +1,707 @@
+{
+  "entities": {
+    "PublicProfile": {
+      "title": "PublicProfile",
+      "description": "Publicly visible user profile data without PII.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "displayName": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "username": { "type": "string", "minLength": 3, "maxLength": 24, "pattern": "^[a-z0-9_]+$" },
+        "bio": { "type": "string", "maxLength": 500 },
+        "avatarUrl": { "type": "string", "maxLength": 250000 },
+        "coverUrl": { "type": "string", "maxLength": 300000 },
+        "location": { "type": "string", "maxLength": 80 },
+        "nidVerified": { "type": "boolean" },
+        "completedTrader": { "type": "boolean" },
+        "completedSales": { "type": "integer" },
+        "completedPurchases": { "type": "integer" },
+        "ratingSum": { "type": "integer" },
+        "ratingCount": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "displayName", "username", "bio", "nidVerified", "completedTrader", "completedSales", "completedPurchases", "ratingSum", "ratingCount", "createdAt", "updatedAt"]
+    },
+    "PrivateUser": {
+      "title": "PrivateUser",
+      "description": "Strictly private user account details, contact verification status, and wallet balance.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "maxLength": 160 },
+        "phone": { "type": "string", "maxLength": 32 },
+        "emailVerified": { "type": "boolean" },
+        "phoneVerified": { "type": "boolean" },
+        "nidStatus": { "type": "string", "enum": ["not_verified", "pending_review", "verified", "rejected"] },
+        "nidRejectionReason": { "type": "string", "maxLength": 500 },
+        "walletBalanceMinor": { "type": "integer" },
+        "reservedBalanceMinor": { "type": "integer" },
+        "preferredLanguage": { "type": "string", "enum": ["en", "bn", "hi", "ar", "ur"] },
+        "preferredCurrency": { "type": "string", "enum": ["BDT", "USD"] },
+        "notificationPrefs": { "type": "object", "$ref": "UserNotificationPreferences" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "phone", "emailVerified", "phoneVerified", "nidStatus", "walletBalanceMinor", "reservedBalanceMinor", "createdAt", "updatedAt"]
+    },
+    "UserNotificationPreferences": {
+      "title": "UserNotificationPreferences",
+      "description": "Per-user sound chime, vibration, and lock-screen privacy preferences.",
+      "type": "object",
+      "properties": {
+        "inAppSoundEnabled": { "type": "boolean" },
+        "dealAlertSoundEnabled": { "type": "boolean" },
+        "adminAlertSoundEnabled": { "type": "boolean" },
+        "vibrationEnabled": { "type": "boolean" },
+        "vibrationStrength": { "type": "string", "enum": ["standard", "strong"] },
+        "lockScreenPrivacyMode": { "type": "string", "enum": ["minimal", "standard"] },
+        "normalSoundId": { "type": "string", "enum": ["01_soft_normal", "02_crisp_normal", "03_premium_deal", "04_urgent_deal"] },
+        "dealAlertSoundId": { "type": "string", "enum": ["01_soft_normal", "02_crisp_normal", "03_premium_deal", "04_urgent_deal"] },
+        "adminAlertSoundId": { "type": "string", "enum": ["01_soft_normal", "02_crisp_normal", "03_premium_deal", "04_urgent_deal"] }
+      },
+      "required": [
+        "inAppSoundEnabled",
+        "dealAlertSoundEnabled",
+        "adminAlertSoundEnabled",
+        "vibrationEnabled",
+        "lockScreenPrivacyMode",
+        "normalSoundId",
+        "dealAlertSoundId",
+        "adminAlertSoundId"
+      ]
+    },
+    "UsernameReservation": {
+      "title": "UsernameReservation",
+      "description": "Atomic global username uniqueness reservation mapping normalized username to uid.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "username": { "type": "string", "minLength": 3, "maxLength": 24, "pattern": "^[a-z0-9_]+$" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "username", "updatedAt"]
+    },
+    "AdminRecord": {
+      "title": "AdminRecord",
+      "description": "Trusted administrator and superadmin authorization record.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "role": { "type": "string", "enum": ["admin", "superadmin"] },
+        "permissions": { "type": "array", "maxLength": 20 },
+        "grantedBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "role", "grantedBy", "createdAt"]
+    },
+    "IdentityVerification": {
+      "title": "IdentityVerification",
+      "description": "Private NID front and back verification submission.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "frontImageData": { "type": "string", "maxLength": 350000 },
+        "backImageData": { "type": "string", "maxLength": 350000 },
+        "status": { "type": "string", "enum": ["pending_review", "verified", "rejected"] },
+        "rejectionReason": { "type": "string", "maxLength": 500 },
+        "reviewedBy": { "type": "string", "maxLength": 128 },
+        "submittedAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "frontImageData", "backImageData", "status", "submittedAt", "updatedAt"]
+    },
+    "Listing": {
+      "title": "Listing",
+      "description": "Digital asset marketplace listing with category-specific fields and monetization claims.",
+      "type": "object",
+      "properties": {
+        "sellerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "sellerName": { "type": "string", "maxLength": 80 },
+        "sellerUsername": { "type": "string", "maxLength": 24 },
+        "sellerVerified": { "type": "boolean" },
+        "platform": { "type": "string", "enum": ["youtube", "facebook", "instagram", "tiktok", "telegram", "website", "domain", "gaming"] },
+        "subcategory": { "type": "string", "maxLength": 60 },
+        "title": { "type": "string", "minLength": 8, "maxLength": 120 },
+        "description": { "type": "string", "minLength": 20, "maxLength": 4000 },
+        "priceMinor": { "type": "integer" },
+        "currency": { "type": "string", "enum": ["BDT", "USD"] },
+        "monetizationStatus": { "type": "string", "enum": ["monetized", "non-monetized", "not_applicable"] },
+        "claimedOptions": { "type": "array", "maxLength": 15 },
+        "verifiedOptions": { "type": "array", "maxLength": 15 },
+        "verificationState": { "type": "string", "enum": ["not_claimed", "submitted_for_verification", "in_review", "active_verified", "eligible_not_active", "rejected", "unable_to_verify"] },
+        "ageYears": { "type": "integer" },
+        "ageMonths": { "type": "integer" },
+        "metricValue": { "type": "integer" },
+        "monthlyRevenueMinor": { "type": "integer" },
+        "accountUrl": { "type": "string", "maxLength": 300 },
+        "urlValidationStatus": { "type": "string", "enum": ["domain_matched", "not_applicable"] },
+        "gameName": { "type": "string", "maxLength": 60 },
+        "gameUid": { "type": "string", "maxLength": 64 },
+        "gameLevel": { "type": "integer" },
+        "images": { "type": "array", "maxLength": 5 },
+        "activeDealId": { "type": "string", "maxLength": 128 },
+        "acceptedBidAmountMinor": { "type": "integer" },
+        "reservedBuyerId": { "type": "string", "maxLength": 128 },
+        "status": { "type": "string", "enum": ["draft", "pending", "active", "reserved", "sold", "rejected", "archived"] },
+        "rejectionReason": { "type": "string", "maxLength": 500 },
+        "views": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["sellerId", "sellerName", "sellerUsername", "sellerVerified", "platform", "subcategory", "title", "description", "priceMinor", "currency", "monetizationStatus", "claimedOptions", "verifiedOptions", "verificationState", "ageYears", "ageMonths", "metricValue", "monthlyRevenueMinor", "accountUrl", "urlValidationStatus", "images", "status", "views", "createdAt", "updatedAt"]
+    },
+    "ListingEvidence": {
+      "title": "ListingEvidence",
+      "description": "Private monetization evidence screenshots and AI/admin verification audit.",
+      "type": "object",
+      "properties": {
+        "listingId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "sellerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "evidenceImages": { "type": "array", "maxLength": 5 },
+        "aiSummary": { "type": "string", "maxLength": 2000 },
+        "aiMethod": { "type": "string", "maxLength": 80 },
+        "reviewerNotes": { "type": "string", "maxLength": 1000 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["listingId", "sellerId", "evidenceImages", "createdAt", "updatedAt"]
+    },
+    "Bid": {
+      "title": "Bid",
+      "description": "Buyer bid on a marketplace listing with role-based state transitions.",
+      "type": "object",
+      "properties": {
+        "listingId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "sellerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "buyerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "buyerName": { "type": "string", "maxLength": 80 },
+        "buyerUsername": { "type": "string", "maxLength": 24 },
+        "buyerVerified": { "type": "boolean" },
+        "amountMinor": { "type": "integer" },
+        "currency": { "type": "string", "enum": ["BDT", "USD"] },
+        "status": { "type": "string", "enum": ["pending", "accepted_pending_payment", "accepted", "paid", "rejected", "withdrawn", "expired", "cancelled"] },
+        "dealId": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["listingId", "sellerId", "buyerId", "buyerName", "buyerUsername", "buyerVerified", "amountMinor", "currency", "status", "createdAt", "updatedAt"]
+    },
+    "Conversation": {
+      "title": "Conversation",
+      "description": "Pre-deal Messenger-style conversation between buyer and seller.",
+      "type": "object",
+      "properties": {
+        "buyerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "sellerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "buyerName": { "type": "string", "maxLength": 80 },
+        "sellerName": { "type": "string", "maxLength": 80 },
+        "listingId": { "type": "string", "maxLength": 128 },
+        "listingTitle": { "type": "string", "maxLength": 120 },
+        "lastMessage": { "type": "string", "maxLength": 300 },
+        "safetyAcceptedByBuyer": { "type": "boolean" },
+        "safetyAcceptedBySeller": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["buyerId", "sellerId", "buyerName", "sellerName", "listingId", "listingTitle", "lastMessage", "safetyAcceptedByBuyer", "safetyAcceptedBySeller", "createdAt", "updatedAt"]
+    },
+    "ChatMessage": {
+      "title": "ChatMessage",
+      "description": "Individual text, image, or voice message inside a conversation or deal room.",
+      "type": "object",
+      "properties": {
+        "senderId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "senderName": { "type": "string", "maxLength": 80 },
+        "senderRole": { "type": "string", "enum": ["buyer", "seller", "admin", "system"] },
+        "kind": { "type": "string", "enum": ["text", "image", "voice", "system"] },
+        "text": { "type": "string", "maxLength": 1500 },
+        "mediaData": { "type": "string", "maxLength": 350000 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["senderId", "senderName", "kind", "text", "createdAt"]
+    },
+    "Deal": {
+      "title": "Deal",
+      "description": "Escrow deal group with immutable fee snapshot, accepted bid linkage, transfer tracking, and immutable original protection deadline.",
+      "type": "object",
+      "properties": {
+        "listingId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "listingTitle": { "type": "string", "maxLength": 120 },
+        "platform": { "type": "string", "maxLength": 32 },
+        "acceptedBidId": { "type": "string", "maxLength": 128 },
+        "originalListingPriceMinor": { "type": "integer" },
+        "buyerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "buyerName": { "type": "string", "maxLength": 80 },
+        "sellerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "sellerName": { "type": "string", "maxLength": 80 },
+        "baseAmountMinor": { "type": "integer" },
+        "buyerFeePct": { "type": "number" },
+        "sellerFeePct": { "type": "number" },
+        "buyerFeeMinor": { "type": "integer" },
+        "sellerFeeMinor": { "type": "integer" },
+        "buyerTotalMinor": { "type": "integer" },
+        "sellerPayoutMinor": { "type": "integer" },
+        "platformCommissionMinor": { "type": "integer" },
+        "refundBuyerMinor": { "type": "integer" },
+        "refundPlatformRetainedMinor": { "type": "integer" },
+        "currency": { "type": "string", "enum": ["BDT", "USD"] },
+        "protectionDurationHours": { "type": "integer" },
+        "confirmedAtMs": { "type": "integer" },
+        "originalDeadlineMs": { "type": "integer" },
+        "unresolvedReportCount": { "type": "integer" },
+        "paymentLedgerId": { "type": "string", "maxLength": 128 },
+        "paidAtMs": { "type": "integer" },
+        "transferSubmissionCount": { "type": "integer" },
+        "latestTransferSubmissionId": { "type": "string", "maxLength": 128 },
+        "latestRejectionReason": { "type": "string", "maxLength": 1000 },
+        "refundLedgerId": { "type": "string", "maxLength": 128 },
+        "settlementLedgerId": { "type": "string", "maxLength": 128 },
+        "adminHoldNote": { "type": "string", "maxLength": 1000 },
+        "settledAtMs": { "type": "integer" },
+        "refundedAtMs": { "type": "integer" },
+        "status": {
+          "type": "string",
+          "enum": [
+            "accepted_pending_payment",
+            "awaiting_payment",
+            "payment_pending_verification",
+            "paid_deal_room_active",
+            "paid",
+            "transfer_in_progress",
+            "transfer_submitted",
+            "awaiting_buyer_confirmation",
+            "transfer_rejected",
+            "security_period_active",
+            "protection_active",
+            "reported_under_review",
+            "protection_expired",
+            "refunded",
+            "settled",
+            "cancelled"
+          ]
+        },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "listingId",
+        "listingTitle",
+        "platform",
+        "buyerId",
+        "buyerName",
+        "sellerId",
+        "sellerName",
+        "baseAmountMinor",
+        "buyerFeePct",
+        "sellerFeePct",
+        "buyerFeeMinor",
+        "sellerFeeMinor",
+        "buyerTotalMinor",
+        "sellerPayoutMinor",
+        "platformCommissionMinor",
+        "currency",
+        "protectionDurationHours",
+        "confirmedAtMs",
+        "originalDeadlineMs",
+        "unresolvedReportCount",
+        "status",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "DealTransferSubmission": {
+      "title": "DealTransferSubmission",
+      "description": "Immutable versioned seller asset-transfer evidence submission with 2 to 3 screenshots and checklist.",
+      "type": "object",
+      "properties": {
+        "dealId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "sellerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "sellerName": { "type": "string", "maxLength": 80 },
+        "version": { "type": "integer" },
+        "screenshots": { "type": "array", "maxLength": 3 },
+        "transferNote": { "type": "string", "minLength": 5, "maxLength": 1500 },
+        "completedSteps": { "type": "array", "maxLength": 10 },
+        "status": { "type": "string", "enum": ["submitted", "approved", "rejected"] },
+        "buyerDecisionBy": { "type": "string", "maxLength": 128 },
+        "buyerDecisionReason": { "type": "string", "maxLength": 1000 },
+        "decidedAtMs": { "type": "integer" },
+        "submittedAtMs": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["dealId", "sellerId", "sellerName", "version", "screenshots", "transferNote", "completedSteps", "status", "submittedAtMs", "createdAt", "updatedAt"]
+    },
+    "DealAuditEvent": {
+      "title": "DealAuditEvent",
+      "description": "Immutable chronological event log inside a 3-party private deal room.",
+      "type": "object",
+      "properties": {
+        "dealId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "actorId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "actorRole": { "type": "string", "enum": ["buyer", "seller", "admin", "system"] },
+        "actorName": { "type": "string", "maxLength": 80 },
+        "eventType": { "type": "string", "maxLength": 64 },
+        "summary": { "type": "string", "minLength": 2, "maxLength": 600 },
+        "createdAtMs": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["dealId", "actorId", "actorRole", "actorName", "eventType", "summary", "createdAtMs", "createdAt"]
+    },
+    "DealReport": {
+      "title": "DealReport",
+      "description": "Dispute or issue report submitted on an active deal without extending its original deadline.",
+      "type": "object",
+      "properties": {
+        "dealId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "reporterId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "reporterName": { "type": "string", "maxLength": 80 },
+        "reporterRole": { "type": "string", "enum": ["buyer", "seller"] },
+        "category": { "type": "string", "enum": ["credentials_invalid", "ownership_not_transferred", "monetization_mismatch", "account_recovered_by_seller", "buyer_unresponsive", "invalid_or_revoked_access", "asset_mismatch", "unauthorized_recovery_attempt", "counterparty_unresponsive", "other"] },
+        "dealReference": { "type": "string", "maxLength": 140 },
+        "reason": { "type": "string", "minLength": 5, "maxLength": 1500 },
+        "evidenceImages": { "type": "array", "maxLength": 3 },
+        "status": { "type": "string", "enum": ["open", "evidence_requested", "rejected_resumed", "resolved_refund", "resolved_release"] },
+        "adminDecisionNote": { "type": "string", "maxLength": 1000 },
+        "decidedBy": { "type": "string", "maxLength": 128 },
+        "decidedAtMs": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["dealId", "reporterId", "reporterRole", "reason", "status", "createdAt", "updatedAt"]
+    },
+    "DepositRequest": {
+      "title": "DepositRequest",
+      "description": "Manual bKash, Nagad, or Rocket wallet deposit request awaiting admin verification.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userName": { "type": "string", "maxLength": 80 },
+        "method": { "type": "string", "enum": ["bkash", "nagad", "rocket"] },
+        "amountMinor": { "type": "integer" },
+        "currency": { "type": "string", "enum": ["BDT"] },
+        "senderNumber": { "type": "string", "minLength": 6, "maxLength": 24 },
+        "transactionId": { "type": "string", "minLength": 4, "maxLength": 64 },
+        "screenshotData": { "type": "string", "maxLength": 300000 },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
+        "rejectionReason": { "type": "string", "maxLength": 500 },
+        "reviewedBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "userName", "method", "amountMinor", "currency", "senderNumber", "transactionId", "status", "createdAt", "updatedAt"]
+    },
+    "WithdrawalRequest": {
+      "title": "WithdrawalRequest",
+      "description": "Manual seller payout withdrawal request.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userName": { "type": "string", "maxLength": 80 },
+        "method": { "type": "string", "enum": ["bkash", "nagad", "rocket", "bank"] },
+        "payoutAccount": { "type": "string", "minLength": 5, "maxLength": 120 },
+        "amountMinor": { "type": "integer" },
+        "currency": { "type": "string", "enum": ["BDT", "USD"] },
+        "status": { "type": "string", "enum": ["pending", "paid", "rejected"] },
+        "referenceId": { "type": "string", "maxLength": 80 },
+        "rejectionReason": { "type": "string", "maxLength": 500 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "userName", "method", "payoutAccount", "amountMinor", "currency", "status", "createdAt", "updatedAt"]
+    },
+    "WalletLedgerEntry": {
+      "title": "WalletLedgerEntry",
+      "description": "Immutable append-only financial ledger entry.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "kind": { "type": "string", "enum": ["deposit_approved", "escrow_debit", "escrow_release", "escrow_refund", "withdrawal_reserved", "withdrawal_paid", "withdrawal_restored"] },
+        "amountMinor": { "type": "integer" },
+        "currency": { "type": "string", "enum": ["BDT", "USD"] },
+        "referenceId": { "type": "string", "maxLength": 128 },
+        "note": { "type": "string", "maxLength": 300 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "kind", "amountMinor", "currency", "referenceId", "note", "createdAt"]
+    },
+    "Review": {
+      "title": "Review",
+      "description": "Authentic buyer-to-seller review linked to a settled marketplace deal.",
+      "type": "object",
+      "properties": {
+        "dealId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "sellerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "reviewerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "reviewerName": { "type": "string", "maxLength": 80 },
+        "score": { "type": "integer" },
+        "comment": { "type": "string", "minLength": 3, "maxLength": 600 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["dealId", "sellerId", "reviewerId", "reviewerName", "score", "comment", "createdAt"]
+    },
+    "PublicSettings": {
+      "title": "PublicSettings",
+      "description": "Publicly readable marketplace settings configured by authorized administrators.",
+      "type": "object",
+      "properties": {
+        "buyerFeeEnabled": { "type": "boolean" },
+        "buyerFeePct": { "type": "number" },
+        "sellerFeeEnabled": { "type": "boolean" },
+        "sellerFeePct": { "type": "number" },
+        "usdToBdtRate": { "type": "number" },
+        "supportWhatsapp": { "type": "string", "maxLength": 32 },
+        "supportTelegram": { "type": "string", "maxLength": 160 },
+        "supportEmail": { "type": "string", "maxLength": 160 },
+        "bkashNumber": { "type": "string", "maxLength": 32 },
+        "nagadNumber": { "type": "string", "maxLength": 32 },
+        "rocketNumber": { "type": "string", "maxLength": 32 },
+        "aiEmergencyStop": { "type": "boolean" },
+        "disabledMonetizationIds": { "type": "array", "maxLength": 50 },
+        "gamingTitles": { "type": "array", "maxLength": 20 },
+        "protectionHoursYoutube": { "type": "integer" },
+        "protectionHoursFacebook": { "type": "integer" },
+        "protectionHoursDefault": { "type": "integer" },
+        "customProtectionWindowsEnabled": { "type": "boolean" },
+        "fcmVapidPublicKey": { "type": "string", "maxLength": 100, "pattern": "^$|^[A-Za-z0-9_\\-]{84,92}$" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "buyerFeeEnabled",
+        "buyerFeePct",
+        "sellerFeeEnabled",
+        "sellerFeePct",
+        "usdToBdtRate",
+        "supportWhatsapp",
+        "supportTelegram",
+        "supportEmail",
+        "bkashNumber",
+        "nagadNumber",
+        "rocketNumber",
+        "aiEmergencyStop",
+        "disabledMonetizationIds",
+        "gamingTitles",
+        "protectionHoursYoutube",
+        "protectionHoursFacebook",
+        "protectionHoursDefault",
+        "updatedAt"
+      ]
+    },
+    "AiProposal": {
+      "title": "AiProposal",
+      "description": "AI Developer proposed change awaiting human Approve, Reject, or Review.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "maxLength": 140 },
+        "category": { "type": "string", "enum": ["bugfix", "security", "feature", "performance"] },
+        "severity": { "type": "string", "enum": ["low", "medium", "high", "critical"] },
+        "summary": { "type": "string", "maxLength": 2000 },
+        "affectedFiles": { "type": "array", "maxLength": 20 },
+        "proposedDiff": { "type": "string", "maxLength": 8000 },
+        "status": { "type": "string", "enum": ["awaiting_review", "in_review", "approved", "rejected", "deployed"] },
+        "decidedBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "category", "severity", "summary", "affectedFiles", "proposedDiff", "status", "createdAt", "updatedAt"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Append-only immutable administrative and security audit log.",
+      "type": "object",
+      "properties": {
+        "actorId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "action": { "type": "string", "maxLength": 80 },
+        "targetType": { "type": "string", "maxLength": 40 },
+        "targetId": { "type": "string", "maxLength": 128 },
+        "details": { "type": "string", "maxLength": 1000 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["actorId", "action", "targetType", "targetId", "details", "createdAt"]
+    },
+    "Notification": {
+      "title": "Notification",
+      "description": "User-scoped marketplace, security, verification, bid, escrow deal, dispute, wallet, or announcement notification.",
+      "type": "object",
+      "properties": {
+        "recipientId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "actorId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "actorRole": { "type": "string", "enum": ["user", "admin", "system"] },
+        "category": {
+          "type": "string",
+          "enum": ["account", "security", "verification", "listing", "bid", "deal", "dispute", "wallet", "announcement", "system"]
+        },
+        "severity": { "type": "string", "enum": ["info", "success", "warning", "critical"] },
+        "alertKind": { "type": "string", "enum": ["normal", "deal_room_created", "admin_alert"] },
+        "title": { "type": "string", "minLength": 1, "maxLength": 140 },
+        "preview": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "body": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "refType": { "type": "string", "enum": ["none", "listing", "deal", "wallet", "profile", "announcement"] },
+        "refId": { "type": "string", "maxLength": 128 },
+        "referenceLabel": { "type": "string", "maxLength": 140 },
+        "destination": { "type": "string", "maxLength": 160 },
+        "read": { "type": "boolean" },
+        "readAt": { "type": "string", "format": "date-time" },
+        "createdAtMs": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "recipientId",
+        "actorId",
+        "actorRole",
+        "category",
+        "severity",
+        "title",
+        "preview",
+        "body",
+        "refType",
+        "refId",
+        "referenceLabel",
+        "destination",
+        "read",
+        "createdAtMs",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "PushToken": {
+      "title": "PushToken",
+      "description": "Strictly owner-private Firebase Cloud Messaging Web Push registration token.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "token": { "type": "string", "minLength": 20, "maxLength": 1024 },
+        "userAgent": { "type": "string", "maxLength": 240 },
+        "platform": { "type": "string", "enum": ["web", "ios_pwa"] },
+        "deviceLabel": { "type": "string", "maxLength": 80 },
+        "enabled": { "type": "boolean" },
+        "createdAtMs": { "type": "integer" },
+        "lastRefreshedAtMs": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "token", "userAgent", "enabled", "createdAtMs", "createdAt", "updatedAt"]
+    },
+    "Announcement": {
+      "title": "Announcement",
+      "description": "Publicly readable active platform announcement created exclusively by authorized administrators.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "minLength": 1, "maxLength": 140 },
+        "preview": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "body": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "severity": { "type": "string", "enum": ["info", "success", "warning", "critical"] },
+        "destination": { "type": "string", "maxLength": 160 },
+        "active": { "type": "boolean" },
+        "authorId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAtMs": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "preview", "body", "severity", "destination", "active", "authorId", "createdAtMs", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/publicProfiles/{userId}": {
+      "schema": "PublicProfile",
+      "description": "Publicly readable user profiles isolated from PII."
+    },
+    "/privateUsers/{userId}": {
+      "schema": "PrivateUser",
+      "description": "Owner/Admin-only private user PII, verification statuses, and wallet balance."
+    },
+    "/usernames/{username}": {
+      "schema": "UsernameReservation",
+      "description": "Global case-insensitive username uniqueness index."
+    },
+    "/admins/{userId}": {
+      "schema": "AdminRecord",
+      "description": "Trusted administrator and superadmin registry."
+    },
+    "/identityVerifications/{userId}": {
+      "schema": "IdentityVerification",
+      "description": "Private NID front and back images restricted to owner and admin."
+    },
+    "/listings/{listingId}": {
+      "schema": "Listing",
+      "description": "Marketplace asset listings."
+    },
+    "/listingEvidence/{listingId}": {
+      "schema": "ListingEvidence",
+      "description": "Private monetization verification screenshots."
+    },
+    "/bids/{bidId}": {
+      "schema": "Bid",
+      "description": "Role-governed buyer bids on marketplace listings."
+    },
+    "/conversations/{convId}": {
+      "schema": "Conversation",
+      "description": "Pre-deal buyer-seller conversations."
+    },
+    "/conversations/{convId}/messages/{msgId}": {
+      "schema": "ChatMessage",
+      "description": "Messages inside a pre-deal conversation."
+    },
+    "/deals/{dealId}": {
+      "schema": "Deal",
+      "description": "Escrow deals with immutable protection deadlines and fee snapshots."
+    },
+    "/deals/{dealId}/messages/{msgId}": {
+      "schema": "ChatMessage",
+      "description": "Protected messages inside an active 3-party deal room."
+    },
+    "/deals/{dealId}/transfers/{submissionId}": {
+      "schema": "DealTransferSubmission",
+      "description": "Seller asset-transfer evidence submissions with 2 to 3 screenshots and buyer review state."
+    },
+    "/deals/{dealId}/reports/{reportId}": {
+      "schema": "DealReport",
+      "description": "Dispute reports on an active deal."
+    },
+    "/deals/{dealId}/events/{eventId}": {
+      "schema": "DealAuditEvent",
+      "description": "Append-only chronological audit events inside a deal room."
+    },
+    "/deposits/{depositId}": {
+      "schema": "DepositRequest",
+      "description": "Manual payment deposit requests."
+    },
+    "/withdrawals/{withdrawalId}": {
+      "schema": "WithdrawalRequest",
+      "description": "Seller payout withdrawal requests."
+    },
+    "/walletLedger/{entryId}": {
+      "schema": "WalletLedgerEntry",
+      "description": "Append-only wallet ledger entries."
+    },
+    "/reviews/{reviewId}": {
+      "schema": "Review",
+      "description": "Transaction-verified seller reviews."
+    },
+    "/publicConfig/{docId}": {
+      "schema": "PublicSettings",
+      "description": "Publicly readable platform configuration managed by admins."
+    },
+    "/aiProposals/{proposalId}": {
+      "schema": "AiProposal",
+      "description": "AI Developer proposals governed by human approval."
+    },
+    "/auditLogs/{logId}": {
+      "schema": "AuditLog",
+      "description": "Append-only administrative audit logs."
+    },
+    "/privateUsers/{userId}/pushTokens/{tokenId}": {
+      "schema": "PushToken",
+      "description": "Strictly owner-private FCM browser Web Push tokens."
+    },
+    "/notifications/{notificationId}": {
+      "schema": "Notification",
+      "description": "Recipient-scoped notifications with immutable content and mark-as-read state updates."
+    },
+    "/announcements/{announcementId}": {
+      "schema": "Announcement",
+      "description": "Admin-managed platform announcements."
+    }
+  }
+}

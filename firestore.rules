@@ -1,0 +1,1649 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Pillar 1: Global Default-Deny Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Hardened Global Primitives
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+    function incoming() {
+      return request.resource.data;
+    }
+    function existing() {
+      return resource.data;
+    }
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    function isBootstrappedSuperAdmin() {
+      return isSignedIn()
+        && request.auth.token.email_verified == true
+        && request.auth.token.email == 'tanvirislam7574@gmail.com';
+    }
+    function isSuperAdmin() {
+      return isBootstrappedSuperAdmin() || (
+        isSignedIn()
+        && exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+        && get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.role == 'superadmin'
+      );
+    }
+    function isAdmin() {
+      return isBootstrappedSuperAdmin() || (
+        isSignedIn()
+        && exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    // Validation Blueprints
+    function isValidPublicProfile(data, uid) {
+      return data.keys().hasAll([
+          'uid', 'displayName', 'username', 'bio',
+          'nidVerified', 'completedTrader', 'completedSales', 'completedPurchases',
+          'ratingSum', 'ratingCount', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid', 'displayName', 'username', 'bio', 'avatarUrl', 'coverUrl', 'location',
+          'nidVerified', 'completedTrader', 'completedSales', 'completedPurchases',
+          'ratingSum', 'ratingCount', 'createdAt', 'updatedAt'
+        ])
+        && data.uid == uid
+        && data.displayName is string && data.displayName.size() >= 2 && data.displayName.size() <= 80
+        && data.username is string && data.username.size() >= 3 && data.username.size() <= 24 && data.username.matches('^[a-z0-9_]+$')
+        && data.bio is string && data.bio.size() <= 500
+        && (!('avatarUrl' in data) || (data.avatarUrl is string && data.avatarUrl.size() <= 250000))
+        && (!('coverUrl' in data) || (data.coverUrl is string && data.coverUrl.size() <= 300000))
+        && (!('location' in data) || (data.location is string && data.location.size() <= 80))
+        && data.nidVerified is bool
+        && data.completedTrader is bool
+        && data.completedSales is int && data.completedSales >= 0
+        && data.completedPurchases is int && data.completedPurchases >= 0
+        && data.ratingSum is int && data.ratingSum >= 0
+        && data.ratingCount is int && data.ratingCount >= 0
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidNotificationPrefs(prefs) {
+      return prefs is map
+        && prefs.keys().hasAll([
+          'inAppSoundEnabled', 'dealAlertSoundEnabled', 'adminAlertSoundEnabled',
+          'vibrationEnabled', 'lockScreenPrivacyMode',
+          'normalSoundId', 'dealAlertSoundId', 'adminAlertSoundId'
+        ])
+        && prefs.keys().hasOnly([
+          'inAppSoundEnabled', 'dealAlertSoundEnabled', 'adminAlertSoundEnabled',
+          'vibrationEnabled', 'vibrationStrength', 'lockScreenPrivacyMode',
+          'normalSoundId', 'dealAlertSoundId', 'adminAlertSoundId'
+        ])
+        && prefs.inAppSoundEnabled is bool
+        && prefs.dealAlertSoundEnabled is bool
+        && prefs.adminAlertSoundEnabled is bool
+        && prefs.vibrationEnabled is bool
+        && (!('vibrationStrength' in prefs) || prefs.vibrationStrength in ['standard', 'strong'])
+        && prefs.lockScreenPrivacyMode in ['minimal', 'standard']
+        && prefs.normalSoundId in ['01_soft_normal', '02_crisp_normal', '03_premium_deal', '04_urgent_deal']
+        && prefs.dealAlertSoundId in ['01_soft_normal', '02_crisp_normal', '03_premium_deal', '04_urgent_deal']
+        && prefs.adminAlertSoundId in ['01_soft_normal', '02_crisp_normal', '03_premium_deal', '04_urgent_deal'];
+    }
+
+    function isValidPrivateUser(data, uid) {
+      return data.keys().hasAll([
+          'uid', 'email', 'phone', 'emailVerified', 'phoneVerified',
+          'nidStatus', 'walletBalanceMinor', 'reservedBalanceMinor', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid', 'email', 'phone', 'emailVerified', 'phoneVerified',
+          'nidStatus', 'nidRejectionReason', 'walletBalanceMinor', 'reservedBalanceMinor',
+          'preferredLanguage', 'preferredCurrency', 'notificationPrefs', 'createdAt', 'updatedAt'
+        ])
+        && data.uid == uid
+        && data.email is string && data.email.size() <= 160
+        && data.phone is string && data.phone.size() <= 32
+        && data.emailVerified is bool
+        && data.phoneVerified is bool
+        && data.nidStatus in ['not_verified', 'pending_review', 'verified', 'rejected']
+        && (!('nidRejectionReason' in data) || (data.nidRejectionReason is string && data.nidRejectionReason.size() <= 500))
+        && data.walletBalanceMinor is int && data.walletBalanceMinor >= 0
+        && data.reservedBalanceMinor is int && data.reservedBalanceMinor >= 0
+        && (!('preferredLanguage' in data) || data.preferredLanguage in ['en', 'bn', 'hi', 'ar', 'ur'])
+        && (!('preferredCurrency' in data) || data.preferredCurrency in ['BDT', 'USD'])
+        && (!('notificationPrefs' in data) || isValidNotificationPrefs(data.notificationPrefs))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidUsernameReservation(data, uname) {
+      return data.keys().hasAll(['uid', 'username', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'username', 'updatedAt'])
+        && data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128
+        && data.username == uname
+        && data.username is string && data.username.size() >= 3 && data.username.size() <= 24 && data.username.matches('^[a-z0-9_]+$')
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidAdminRecord(data, uid) {
+      return data.keys().hasAll(['uid', 'role', 'grantedBy', 'createdAt'])
+        && data.keys().hasOnly(['uid', 'role', 'permissions', 'grantedBy', 'createdAt'])
+        && data.uid == uid
+        && data.role in ['admin', 'superadmin']
+        && (!('permissions' in data) || (data.permissions is list && data.permissions.size() <= 20 && (data.permissions.size() == 0 || (data.permissions[0] is string && data.permissions[0].size() <= 64))))
+        && data.grantedBy is string && data.grantedBy.size() <= 128
+        && data.createdAt is timestamp;
+    }
+
+    function isValidIdentityVerification(data, uid) {
+      return data.keys().hasAll(['uid', 'frontImageData', 'backImageData', 'status', 'submittedAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'frontImageData', 'backImageData', 'status', 'rejectionReason', 'reviewedBy', 'submittedAt', 'updatedAt'])
+        && data.uid == uid
+        && data.frontImageData is string && data.frontImageData.size() >= 20 && data.frontImageData.size() <= 350000
+        && data.backImageData is string && data.backImageData.size() >= 20 && data.backImageData.size() <= 350000
+        && data.status in ['pending_review', 'verified', 'rejected']
+        && (!('rejectionReason' in data) || (data.rejectionReason is string && data.rejectionReason.size() <= 500))
+        && (!('reviewedBy' in data) || (data.reviewedBy is string && data.reviewedBy.size() <= 128))
+        && data.submittedAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidListing(data) {
+      return data.keys().hasAll([
+          'sellerId', 'sellerName', 'sellerUsername', 'sellerVerified',
+          'platform', 'subcategory', 'title', 'description',
+          'priceMinor', 'currency', 'monetizationStatus',
+          'claimedOptions', 'verifiedOptions', 'verificationState',
+          'ageYears', 'ageMonths', 'metricValue', 'monthlyRevenueMinor',
+          'accountUrl', 'urlValidationStatus', 'images', 'status', 'views',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'sellerId', 'sellerName', 'sellerUsername', 'sellerVerified',
+          'platform', 'subcategory', 'title', 'description',
+          'priceMinor', 'currency', 'monetizationStatus',
+          'claimedOptions', 'verifiedOptions', 'verificationState',
+          'ageYears', 'ageMonths', 'metricValue', 'monthlyRevenueMinor',
+          'accountUrl', 'urlValidationStatus', 'gameName', 'gameUid', 'gameLevel',
+          'images', 'activeDealId', 'acceptedBidAmountMinor', 'reservedBuyerId',
+          'status', 'rejectionReason', 'views',
+          'createdAt', 'updatedAt'
+        ])
+        && data.sellerId is string && data.sellerId.size() >= 1 && data.sellerId.size() <= 128
+        && data.sellerName is string && data.sellerName.size() >= 1 && data.sellerName.size() <= 80
+        && data.sellerUsername is string && data.sellerUsername.size() >= 1 && data.sellerUsername.size() <= 24
+        && data.sellerVerified is bool
+        && data.platform in ['youtube', 'facebook', 'instagram', 'tiktok', 'telegram', 'website', 'domain', 'gaming']
+        && data.subcategory is string && data.subcategory.size() >= 1 && data.subcategory.size() <= 60
+        && data.title is string && data.title.size() >= 8 && data.title.size() <= 120
+        && data.description is string && data.description.size() >= 20 && data.description.size() <= 4000
+        && data.priceMinor is int && data.priceMinor > 0
+        && data.currency in ['BDT', 'USD']
+        && data.monetizationStatus in ['monetized', 'non-monetized', 'not_applicable']
+        && data.claimedOptions is list && data.claimedOptions.size() <= 15 && (data.claimedOptions.size() == 0 || (data.claimedOptions[0] is string && data.claimedOptions[0].size() <= 64))
+        && data.verifiedOptions is list && data.verifiedOptions.size() <= 15 && (data.verifiedOptions.size() == 0 || (data.verifiedOptions[0] is string && data.verifiedOptions[0].size() <= 64))
+        && data.verificationState in ['not_claimed', 'submitted_for_verification', 'in_review', 'active_verified', 'eligible_not_active', 'rejected', 'unable_to_verify']
+        && data.ageYears is int && data.ageYears >= 0 && data.ageYears <= 50
+        && data.ageMonths is int && data.ageMonths >= 0 && data.ageMonths <= 11
+        && data.metricValue is int && data.metricValue >= 0
+        && data.monthlyRevenueMinor is int && data.monthlyRevenueMinor >= 0
+        && data.accountUrl is string && data.accountUrl.size() <= 300
+        && data.urlValidationStatus in ['domain_matched', 'not_applicable']
+        && (!('gameName' in data) || (data.gameName is string && data.gameName.size() <= 60))
+        && (!('gameUid' in data) || (data.gameUid is string && data.gameUid.size() <= 64))
+        && (!('gameLevel' in data) || (data.gameLevel is int && data.gameLevel >= 0 && data.gameLevel <= 10000))
+        && data.images is list && data.images.size() <= 5 && (data.images.size() == 0 || (data.images[0] is string && data.images[0].size() <= 250000))
+        && (!('activeDealId' in data) || (data.activeDealId is string && isValidId(data.activeDealId)))
+        && (!('acceptedBidAmountMinor' in data) || (data.acceptedBidAmountMinor is int && data.acceptedBidAmountMinor > 0))
+        && (!('reservedBuyerId' in data) || (data.reservedBuyerId is string && isValidId(data.reservedBuyerId)))
+        && data.status in ['draft', 'pending', 'active', 'reserved', 'sold', 'rejected', 'archived']
+        && (!('rejectionReason' in data) || (data.rejectionReason is string && data.rejectionReason.size() <= 500))
+        && data.views is int && data.views >= 0
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidListingEvidence(data, listingId) {
+      return data.keys().hasAll(['listingId', 'sellerId', 'evidenceImages', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['listingId', 'sellerId', 'evidenceImages', 'aiSummary', 'aiMethod', 'reviewerNotes', 'createdAt', 'updatedAt'])
+        && data.listingId == listingId
+        && data.sellerId is string && data.sellerId.size() <= 128
+        && data.evidenceImages is list && data.evidenceImages.size() <= 5 && (data.evidenceImages.size() == 0 || (data.evidenceImages[0] is string && data.evidenceImages[0].size() <= 250000))
+        && (!('aiSummary' in data) || (data.aiSummary is string && data.aiSummary.size() <= 2000))
+        && (!('aiMethod' in data) || (data.aiMethod is string && data.aiMethod.size() <= 80))
+        && (!('reviewerNotes' in data) || (data.reviewerNotes is string && data.reviewerNotes.size() <= 1000))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidBid(data) {
+      return data.keys().hasAll([
+          'listingId', 'sellerId', 'buyerId', 'buyerName', 'buyerUsername',
+          'buyerVerified', 'amountMinor', 'currency', 'status', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'listingId', 'sellerId', 'buyerId', 'buyerName', 'buyerUsername',
+          'buyerVerified', 'amountMinor', 'currency', 'status', 'dealId', 'createdAt', 'updatedAt'
+        ])
+        && data.listingId is string && data.listingId.size() <= 128
+        && data.sellerId is string && data.sellerId.size() <= 128
+        && data.buyerId is string && data.buyerId.size() <= 128
+        && data.buyerName is string && data.buyerName.size() >= 1 && data.buyerName.size() <= 80
+        && data.buyerUsername is string && data.buyerUsername.size() >= 1 && data.buyerUsername.size() <= 24
+        && data.buyerVerified is bool
+        && data.amountMinor is int && data.amountMinor > 0
+        && data.currency in ['BDT', 'USD']
+        && data.status in ['pending', 'accepted_pending_payment', 'accepted', 'paid', 'rejected', 'withdrawn', 'expired', 'cancelled']
+        && (!('dealId' in data) || isValidId(data.dealId))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidConversation(data) {
+      return data.keys().hasAll([
+          'buyerId', 'sellerId', 'buyerName', 'sellerName',
+          'listingId', 'listingTitle', 'lastMessage',
+          'safetyAcceptedByBuyer', 'safetyAcceptedBySeller', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'buyerId', 'sellerId', 'buyerName', 'sellerName',
+          'listingId', 'listingTitle', 'lastMessage',
+          'safetyAcceptedByBuyer', 'safetyAcceptedBySeller', 'createdAt', 'updatedAt'
+        ])
+        && data.buyerId is string && data.buyerId.size() <= 128
+        && data.sellerId is string && data.sellerId.size() <= 128
+        && data.buyerId != data.sellerId
+        && data.buyerName is string && data.buyerName.size() <= 80
+        && data.sellerName is string && data.sellerName.size() <= 80
+        && data.listingId is string && data.listingId.size() <= 128
+        && data.listingTitle is string && data.listingTitle.size() <= 120
+        && data.lastMessage is string && data.lastMessage.size() <= 300
+        && data.safetyAcceptedByBuyer is bool
+        && data.safetyAcceptedBySeller is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidChatMessage(data) {
+      return data.keys().hasAll(['senderId', 'senderName', 'kind', 'text', 'createdAt'])
+        && data.keys().hasOnly(['senderId', 'senderName', 'senderRole', 'kind', 'text', 'mediaData', 'createdAt'])
+        && data.senderId is string && data.senderId.size() <= 128
+        && data.senderName is string && data.senderName.size() <= 80
+        && (!('senderRole' in data) || data.senderRole in ['buyer', 'seller', 'admin', 'system'])
+        && data.kind in ['text', 'image', 'voice', 'system']
+        && data.text is string && data.text.size() <= 1500
+        && (!('mediaData' in data) || (data.mediaData is string && data.mediaData.size() <= 350000))
+        && data.createdAt is timestamp;
+    }
+
+    function isValidDeal(data) {
+      return data.keys().hasAll([
+          'listingId', 'listingTitle', 'platform', 'buyerId', 'buyerName',
+          'sellerId', 'sellerName', 'baseAmountMinor', 'buyerFeePct', 'sellerFeePct',
+          'buyerFeeMinor', 'sellerFeeMinor', 'buyerTotalMinor', 'sellerPayoutMinor',
+          'platformCommissionMinor', 'currency', 'protectionDurationHours',
+          'confirmedAtMs', 'originalDeadlineMs', 'unresolvedReportCount', 'status',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'listingId', 'listingTitle', 'platform', 'acceptedBidId', 'originalListingPriceMinor',
+          'buyerId', 'buyerName', 'sellerId', 'sellerName',
+          'baseAmountMinor', 'buyerFeePct', 'sellerFeePct',
+          'buyerFeeMinor', 'sellerFeeMinor', 'buyerTotalMinor', 'sellerPayoutMinor',
+          'platformCommissionMinor', 'refundBuyerMinor', 'refundPlatformRetainedMinor',
+          'currency', 'protectionDurationHours',
+          'confirmedAtMs', 'originalDeadlineMs', 'unresolvedReportCount',
+          'paymentLedgerId', 'paidAtMs', 'transferSubmissionCount',
+          'latestTransferSubmissionId', 'latestRejectionReason',
+          'refundLedgerId', 'settlementLedgerId', 'adminHoldNote',
+          'settledAtMs', 'refundedAtMs',
+          'status', 'createdAt', 'updatedAt'
+        ])
+        && data.listingId is string && data.listingId.size() <= 128
+        && data.listingTitle is string && data.listingTitle.size() <= 120
+        && data.platform is string && data.platform.size() <= 32
+        && (!('acceptedBidId' in data) || isValidId(data.acceptedBidId))
+        && (!('originalListingPriceMinor' in data) || (data.originalListingPriceMinor is int && data.originalListingPriceMinor > 0))
+        && data.buyerId is string && data.buyerId.size() <= 128
+        && data.buyerName is string && data.buyerName.size() <= 80
+        && data.sellerId is string && data.sellerId.size() <= 128
+        && data.sellerName is string && data.sellerName.size() <= 80
+        && data.baseAmountMinor is int && data.baseAmountMinor > 0
+        && data.buyerFeePct is number && data.buyerFeePct >= 0 && data.buyerFeePct <= 50
+        && data.sellerFeePct is number && data.sellerFeePct >= 0 && data.sellerFeePct <= 50
+        && data.buyerFeeMinor is int && data.buyerFeeMinor >= 0
+        && data.sellerFeeMinor is int && data.sellerFeeMinor >= 0
+        && data.buyerTotalMinor == data.baseAmountMinor + data.buyerFeeMinor
+        && data.sellerPayoutMinor == data.baseAmountMinor - data.sellerFeeMinor
+        && data.platformCommissionMinor == data.buyerFeeMinor + data.sellerFeeMinor
+        && (!('refundBuyerMinor' in data) || (data.refundBuyerMinor is int && data.refundBuyerMinor >= 0 && data.refundBuyerMinor <= data.buyerTotalMinor))
+        && (!('refundPlatformRetainedMinor' in data) || (data.refundPlatformRetainedMinor is int && data.refundPlatformRetainedMinor >= 0 && data.refundPlatformRetainedMinor <= data.buyerTotalMinor))
+        && data.currency in ['BDT', 'USD']
+        && data.protectionDurationHours is int && data.protectionDurationHours >= 1 && data.protectionDurationHours <= 720
+        && data.confirmedAtMs is int && data.confirmedAtMs >= 0
+        && data.originalDeadlineMs is int && data.originalDeadlineMs >= 0
+        && data.unresolvedReportCount is int && data.unresolvedReportCount >= 0
+        && (!('paymentLedgerId' in data) || isValidId(data.paymentLedgerId))
+        && (!('paidAtMs' in data) || (data.paidAtMs is int && data.paidAtMs >= 0))
+        && (!('transferSubmissionCount' in data) || (data.transferSubmissionCount is int && data.transferSubmissionCount >= 0 && data.transferSubmissionCount <= 50))
+        && (!('latestTransferSubmissionId' in data) || isValidId(data.latestTransferSubmissionId))
+        && (!('latestRejectionReason' in data) || (data.latestRejectionReason is string && data.latestRejectionReason.size() <= 1000))
+        && (!('refundLedgerId' in data) || isValidId(data.refundLedgerId))
+        && (!('settlementLedgerId' in data) || isValidId(data.settlementLedgerId))
+        && (!('adminHoldNote' in data) || (data.adminHoldNote is string && data.adminHoldNote.size() <= 1000))
+        && (!('settledAtMs' in data) || (data.settledAtMs is int && data.settledAtMs >= 0))
+        && (!('refundedAtMs' in data) || (data.refundedAtMs is int && data.refundedAtMs >= 0))
+        && data.status in [
+          'accepted_pending_payment', 'awaiting_payment', 'payment_pending_verification',
+          'paid_deal_room_active', 'paid', 'transfer_in_progress', 'transfer_submitted',
+          'awaiting_buyer_confirmation', 'transfer_rejected',
+          'security_period_active', 'protection_active', 'reported_under_review',
+          'protection_expired', 'refunded', 'settled', 'cancelled'
+        ]
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidDealTransferSubmission(data, dealId) {
+      return data.keys().hasAll([
+          'dealId', 'sellerId', 'sellerName', 'version', 'screenshots',
+          'transferNote', 'completedSteps', 'status', 'submittedAtMs',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'dealId', 'sellerId', 'sellerName', 'version', 'screenshots',
+          'transferNote', 'completedSteps', 'status',
+          'buyerDecisionBy', 'buyerDecisionReason', 'decidedAtMs',
+          'submittedAtMs', 'createdAt', 'updatedAt'
+        ])
+        && data.dealId == dealId
+        && isValidId(data.sellerId)
+        && data.sellerName is string && data.sellerName.size() >= 1 && data.sellerName.size() <= 80
+        && data.version is int && data.version >= 1 && data.version <= 50
+        && data.screenshots is list && data.screenshots.size() >= 2 && data.screenshots.size() <= 3
+        && data.screenshots[0] is string && data.screenshots[0].size() >= 30 && data.screenshots[0].size() <= 300000
+        && data.screenshots[1] is string && data.screenshots[1].size() >= 30 && data.screenshots[1].size() <= 300000
+        && (data.screenshots.size() == 2 || (data.screenshots[2] is string && data.screenshots[2].size() >= 30 && data.screenshots[2].size() <= 300000))
+        && data.transferNote is string && data.transferNote.size() >= 5 && data.transferNote.size() <= 1500
+        && data.completedSteps is list && data.completedSteps.size() >= 1 && data.completedSteps.size() <= 10
+        && data.completedSteps[0] is string && data.completedSteps[0].size() >= 2 && data.completedSteps[0].size() <= 160
+        && data.status in ['submitted', 'approved', 'rejected']
+        && (!('buyerDecisionBy' in data) || isValidId(data.buyerDecisionBy))
+        && (!('buyerDecisionReason' in data) || (data.buyerDecisionReason is string && data.buyerDecisionReason.size() <= 1000))
+        && (!('decidedAtMs' in data) || (data.decidedAtMs is int && data.decidedAtMs >= 0))
+        && data.submittedAtMs is int && data.submittedAtMs >= 0
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidDealAuditEvent(data, dealId) {
+      return data.keys().hasAll([
+          'dealId', 'actorId', 'actorRole', 'actorName',
+          'eventType', 'summary', 'createdAtMs', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'dealId', 'actorId', 'actorRole', 'actorName',
+          'eventType', 'summary', 'createdAtMs', 'createdAt'
+        ])
+        && data.dealId == dealId
+        && isValidId(data.actorId)
+        && data.actorRole in ['buyer', 'seller', 'admin', 'system']
+        && data.actorName is string && data.actorName.size() >= 1 && data.actorName.size() <= 80
+        && data.eventType is string && data.eventType.size() >= 2 && data.eventType.size() <= 64
+        && data.summary is string && data.summary.size() >= 2 && data.summary.size() <= 600
+        && data.createdAtMs is int && data.createdAtMs >= 0
+        && data.createdAt is timestamp;
+    }
+
+    function isValidDealReport(data, dealId) {
+      return data.keys().hasAll(['dealId', 'reporterId', 'reporterRole', 'reason', 'status', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'dealId', 'reporterId', 'reporterName', 'reporterRole',
+          'category', 'dealReference', 'reason', 'evidenceImages',
+          'status', 'adminDecisionNote', 'decidedBy', 'decidedAtMs',
+          'createdAt', 'updatedAt'
+        ])
+        && data.dealId == dealId
+        && data.reporterId is string && data.reporterId.size() <= 128
+        && (!('reporterName' in data) || (data.reporterName is string && data.reporterName.size() <= 80))
+        && data.reporterRole in ['buyer', 'seller']
+        && (!('category' in data) || data.category in [
+          'credentials_invalid', 'ownership_not_transferred',
+          'monetization_mismatch', 'account_recovered_by_seller',
+          'buyer_unresponsive', 'invalid_or_revoked_access',
+          'asset_mismatch', 'unauthorized_recovery_attempt',
+          'counterparty_unresponsive', 'other'
+        ])
+        && (!('dealReference' in data) || (data.dealReference is string && data.dealReference.size() <= 140))
+        && data.reason is string && data.reason.size() >= 5 && data.reason.size() <= 1500
+        && (!('evidenceImages' in data) || (data.evidenceImages is list && data.evidenceImages.size() <= 3 && (data.evidenceImages.size() == 0 || (data.evidenceImages[0] is string && data.evidenceImages[0].size() <= 300000))))
+        && data.status in ['open', 'evidence_requested', 'rejected_resumed', 'resolved_refund', 'resolved_release']
+        && (!('adminDecisionNote' in data) || (data.adminDecisionNote is string && data.adminDecisionNote.size() <= 1000))
+        && (!('decidedBy' in data) || isValidId(data.decidedBy))
+        && (!('decidedAtMs' in data) || (data.decidedAtMs is int && data.decidedAtMs >= 0))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidDepositRequest(data) {
+      return data.keys().hasAll([
+          'userId', 'userName', 'method', 'amountMinor', 'currency',
+          'senderNumber', 'transactionId', 'status', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'userId', 'userName', 'method', 'amountMinor', 'currency',
+          'senderNumber', 'transactionId', 'screenshotData', 'status',
+          'rejectionReason', 'reviewedBy', 'createdAt', 'updatedAt'
+        ])
+        && data.userId is string && data.userId.size() <= 128
+        && data.userName is string && data.userName.size() <= 80
+        && data.method in ['bkash', 'nagad', 'rocket']
+        && data.amountMinor is int && data.amountMinor >= 1000
+        && data.currency == 'BDT'
+        && data.senderNumber is string && data.senderNumber.size() >= 6 && data.senderNumber.size() <= 24
+        && data.transactionId is string && data.transactionId.size() >= 4 && data.transactionId.size() <= 64
+        && (!('screenshotData' in data) || (data.screenshotData is string && data.screenshotData.size() <= 300000))
+        && data.status in ['pending', 'approved', 'rejected']
+        && (!('rejectionReason' in data) || (data.rejectionReason is string && data.rejectionReason.size() <= 500))
+        && (!('reviewedBy' in data) || (data.reviewedBy is string && data.reviewedBy.size() <= 128))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidWithdrawalRequest(data) {
+      return data.keys().hasAll([
+          'userId', 'userName', 'method', 'payoutAccount',
+          'amountMinor', 'currency', 'status', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'userId', 'userName', 'method', 'payoutAccount',
+          'amountMinor', 'currency', 'status', 'referenceId',
+          'rejectionReason', 'createdAt', 'updatedAt'
+        ])
+        && data.userId is string && data.userId.size() <= 128
+        && data.userName is string && data.userName.size() <= 80
+        && data.method in ['bkash', 'nagad', 'rocket', 'bank']
+        && data.payoutAccount is string && data.payoutAccount.size() >= 5 && data.payoutAccount.size() <= 120
+        && data.amountMinor is int && data.amountMinor >= 1000
+        && data.currency in ['BDT', 'USD']
+        && data.status in ['pending', 'paid', 'rejected']
+        && (!('referenceId' in data) || (data.referenceId is string && data.referenceId.size() <= 80))
+        && (!('rejectionReason' in data) || (data.rejectionReason is string && data.rejectionReason.size() <= 500))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidWalletLedgerEntry(data) {
+      return data.keys().hasAll(['userId', 'kind', 'amountMinor', 'currency', 'referenceId', 'note', 'createdAt'])
+        && data.keys().hasOnly(['userId', 'kind', 'amountMinor', 'currency', 'referenceId', 'note', 'createdAt'])
+        && data.userId is string && data.userId.size() <= 128
+        && data.kind in ['deposit_approved', 'escrow_debit', 'escrow_release', 'escrow_refund', 'withdrawal_reserved', 'withdrawal_paid', 'withdrawal_restored']
+        && data.amountMinor is int && data.amountMinor > 0
+        && data.currency in ['BDT', 'USD']
+        && data.referenceId is string && data.referenceId.size() <= 128
+        && data.note is string && data.note.size() <= 300
+        && data.createdAt is timestamp;
+    }
+
+    function isValidReview(data) {
+      return data.keys().hasAll(['dealId', 'sellerId', 'reviewerId', 'reviewerName', 'score', 'comment', 'createdAt'])
+        && data.keys().hasOnly(['dealId', 'sellerId', 'reviewerId', 'reviewerName', 'score', 'comment', 'createdAt'])
+        && data.dealId is string && data.dealId.size() <= 128
+        && data.sellerId is string && data.sellerId.size() <= 128
+        && data.reviewerId is string && data.reviewerId.size() <= 128
+        && data.reviewerId != data.sellerId
+        && data.reviewerName is string && data.reviewerName.size() <= 80
+        && data.score is int && data.score >= 1 && data.score <= 5
+        && data.comment is string && data.comment.size() >= 3 && data.comment.size() <= 600
+        && data.createdAt is timestamp;
+    }
+
+    function isValidPublicSettings(data) {
+      return data.keys().hasAll([
+          'buyerFeeEnabled', 'buyerFeePct', 'sellerFeeEnabled', 'sellerFeePct',
+          'usdToBdtRate', 'supportWhatsapp', 'supportTelegram', 'supportEmail',
+          'bkashNumber', 'nagadNumber', 'rocketNumber', 'aiEmergencyStop',
+          'disabledMonetizationIds', 'gamingTitles',
+          'protectionHoursYoutube', 'protectionHoursFacebook', 'protectionHoursDefault',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'buyerFeeEnabled', 'buyerFeePct', 'sellerFeeEnabled', 'sellerFeePct',
+          'usdToBdtRate', 'supportWhatsapp', 'supportTelegram', 'supportEmail',
+          'bkashNumber', 'nagadNumber', 'rocketNumber', 'aiEmergencyStop',
+          'disabledMonetizationIds', 'gamingTitles',
+          'protectionHoursYoutube', 'protectionHoursFacebook', 'protectionHoursDefault',
+          'customProtectionWindowsEnabled', 'fcmVapidPublicKey',
+          'updatedAt'
+        ])
+        && data.buyerFeeEnabled is bool
+        && data.buyerFeePct is number && data.buyerFeePct >= 0 && data.buyerFeePct <= 50
+        && data.sellerFeeEnabled is bool
+        && data.sellerFeePct is number && data.sellerFeePct >= 0 && data.sellerFeePct <= 50
+        && data.usdToBdtRate is number && data.usdToBdtRate > 0 && data.usdToBdtRate <= 500
+        && data.supportWhatsapp is string && data.supportWhatsapp.size() <= 32
+        && data.supportTelegram is string && data.supportTelegram.size() <= 160
+        && data.supportEmail is string && data.supportEmail.size() <= 160
+        && data.bkashNumber is string && data.bkashNumber.size() <= 32
+        && data.nagadNumber is string && data.nagadNumber.size() <= 32
+        && data.rocketNumber is string && data.rocketNumber.size() <= 32
+        && data.aiEmergencyStop is bool
+        && data.disabledMonetizationIds is list && data.disabledMonetizationIds.size() <= 50 && (data.disabledMonetizationIds.size() == 0 || (data.disabledMonetizationIds[0] is string && data.disabledMonetizationIds[0].size() <= 64))
+        && data.gamingTitles is list && data.gamingTitles.size() <= 20 && (data.gamingTitles.size() == 0 || (data.gamingTitles[0] is string && data.gamingTitles[0].size() <= 64))
+        && data.protectionHoursYoutube is int && data.protectionHoursYoutube >= 1 && data.protectionHoursYoutube <= 720
+        && data.protectionHoursFacebook is int && data.protectionHoursFacebook >= 1 && data.protectionHoursFacebook <= 720
+        && data.protectionHoursDefault is int && data.protectionHoursDefault >= 1 && data.protectionHoursDefault <= 720
+        && (!('customProtectionWindowsEnabled' in data) || data.customProtectionWindowsEnabled is bool)
+        && (!('fcmVapidPublicKey' in data) || (data.fcmVapidPublicKey is string && data.fcmVapidPublicKey.size() <= 100 && data.fcmVapidPublicKey.matches('^$|^[A-Za-z0-9_\\-]{84,92}$')))
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidAiProposal(data) {
+      return data.keys().hasAll([
+          'title', 'category', 'severity', 'summary',
+          'affectedFiles', 'proposedDiff', 'status', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'title', 'category', 'severity', 'summary',
+          'affectedFiles', 'proposedDiff', 'status', 'decidedBy', 'createdAt', 'updatedAt'
+        ])
+        && data.title is string && data.title.size() >= 3 && data.title.size() <= 140
+        && data.category in ['bugfix', 'security', 'feature', 'performance']
+        && data.severity in ['low', 'medium', 'high', 'critical']
+        && data.summary is string && data.summary.size() <= 2000
+        && data.affectedFiles is list && data.affectedFiles.size() <= 20 && (data.affectedFiles.size() == 0 || (data.affectedFiles[0] is string && data.affectedFiles[0].size() <= 160))
+        && data.proposedDiff is string && data.proposedDiff.size() <= 8000
+        && data.status in ['awaiting_review', 'in_review', 'approved', 'rejected', 'deployed']
+        && (!('decidedBy' in data) || (data.decidedBy is string && data.decidedBy.size() <= 128))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidAuditLog(data) {
+      return data.keys().hasAll(['actorId', 'action', 'targetType', 'targetId', 'details', 'createdAt'])
+        && data.keys().hasOnly(['actorId', 'action', 'targetType', 'targetId', 'details', 'createdAt'])
+        && data.actorId is string && data.actorId.size() <= 128
+        && data.action is string && data.action.size() <= 80
+        && data.targetType is string && data.targetType.size() <= 40
+        && data.targetId is string && data.targetId.size() <= 128
+        && data.details is string && data.details.size() <= 1000
+        && data.createdAt is timestamp;
+    }
+
+    function isValidPushToken(data, uid) {
+      return data.keys().hasAll(['uid', 'token', 'userAgent', 'enabled', 'createdAtMs', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'uid', 'token', 'userAgent', 'platform', 'deviceLabel',
+          'enabled', 'createdAtMs', 'lastRefreshedAtMs', 'createdAt', 'updatedAt'
+        ])
+        && data.uid == uid
+        && data.token is string && data.token.size() >= 20 && data.token.size() <= 1024
+        && data.userAgent is string && data.userAgent.size() <= 240
+        && (!('platform' in data) || data.platform in ['web', 'ios_pwa'])
+        && (!('deviceLabel' in data) || (data.deviceLabel is string && data.deviceLabel.size() <= 80))
+        && data.enabled is bool
+        && data.createdAtMs is int && data.createdAtMs >= 0
+        && (!('lastRefreshedAtMs' in data) || (data.lastRefreshedAtMs is int && data.lastRefreshedAtMs >= 0))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidNotification(data) {
+      return data.keys().hasAll([
+          'recipientId', 'actorId', 'actorRole', 'category', 'severity',
+          'title', 'preview', 'body', 'refType', 'refId',
+          'referenceLabel', 'destination', 'read', 'createdAtMs',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'recipientId', 'actorId', 'actorRole', 'category', 'severity', 'alertKind',
+          'title', 'preview', 'body', 'refType', 'refId',
+          'referenceLabel', 'destination', 'read', 'readAt', 'createdAtMs',
+          'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.recipientId)
+        && isValidId(data.actorId)
+        && data.actorRole in ['user', 'admin', 'system']
+        && data.category in [
+          'account', 'security', 'verification', 'listing', 'bid',
+          'deal', 'dispute', 'wallet', 'announcement', 'system'
+        ]
+        && data.severity in ['info', 'success', 'warning', 'critical']
+        && (!('alertKind' in data) || data.alertKind in ['normal', 'deal_room_created', 'admin_alert'])
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 140
+        && data.preview is string && data.preview.size() >= 1 && data.preview.size() <= 240
+        && data.body is string && data.body.size() >= 1 && data.body.size() <= 2000
+        && data.refType in ['none', 'listing', 'deal', 'wallet', 'profile', 'announcement']
+        && data.refId is string && data.refId.size() <= 128
+        && data.referenceLabel is string && data.referenceLabel.size() <= 140
+        && data.destination is string && data.destination.size() <= 160
+        && data.read is bool
+        && (!('readAt' in data) || data.readAt is timestamp)
+        && data.createdAtMs is int && data.createdAtMs >= 0
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidAnnouncement(data) {
+      return data.keys().hasAll([
+          'title', 'preview', 'body', 'severity', 'destination',
+          'active', 'authorId', 'createdAtMs', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'title', 'preview', 'body', 'severity', 'destination',
+          'active', 'authorId', 'createdAtMs', 'createdAt', 'updatedAt'
+        ])
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 140
+        && data.preview is string && data.preview.size() >= 1 && data.preview.size() <= 240
+        && data.body is string && data.body.size() >= 1 && data.body.size() <= 2000
+        && data.severity in ['info', 'success', 'warning', 'critical']
+        && data.destination is string && data.destination.size() <= 160
+        && data.active is bool
+        && isValidId(data.authorId)
+        && data.createdAtMs is int && data.createdAtMs >= 0
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // 0. Health Connection Test Path (Read-only doc lookup)
+    match /test/{docId} {
+      allow get: if docId == 'connection';
+      allow list, write: if false;
+    }
+
+    // 1. Public Profiles (Public read; strict owner/admin write; badges protected)
+    match /publicProfiles/{userId} {
+      allow get: if isValidId(userId);
+      allow list: if resource.data.uid is string || (request.query.limit != null && request.query.limit <= 100);
+      allow create: if isSignedIn()
+        && isValidId(userId)
+        && request.auth.uid == userId
+        && isValidPublicProfile(incoming(), userId)
+        && incoming().nidVerified == false
+        && incoming().completedTrader == false
+        && incoming().completedSales == 0
+        && incoming().completedPurchases == 0
+        && incoming().ratingSum == 0
+        && incoming().ratingCount == 0
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isSignedIn()
+        && isValidId(userId)
+        && isValidPublicProfile(incoming(), userId)
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin()
+          || (
+            request.auth.uid == userId
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'displayName', 'username', 'bio', 'avatarUrl', 'coverUrl', 'location', 'updatedAt'
+            ])
+          )
+          || (
+            // Verified buyer submitting a valid 1-5 review increments seller ratingSum & ratingCount by 1
+            incoming().diff(existing()).affectedKeys().hasOnly(['ratingSum', 'ratingCount', 'updatedAt'])
+            && incoming().ratingCount == existing().ratingCount + 1
+            && incoming().ratingSum >= existing().ratingSum + 1
+            && incoming().ratingSum <= existing().ratingSum + 5
+          )
+        );
+      allow delete: if false;
+    }
+
+    // 2. Private Users (Strictly owner or admin read/write; wallet balance protected)
+    match /privateUsers/{userId} {
+      allow get: if isSignedIn() && isValidId(userId) && (request.auth.uid == userId || isAdmin());
+      allow list: if isSignedIn() && (resource.data.uid == request.auth.uid || isAdmin());
+      allow create: if isSignedIn()
+        && isValidId(userId)
+        && request.auth.uid == userId
+        && isValidPrivateUser(incoming(), userId)
+        && (incoming().emailVerified == false || request.auth.token.email_verified == true)
+        && (incoming().phoneVerified == false || request.auth.token.firebase.sign_in_provider == 'phone' || ('phone_number' in request.auth.token && request.auth.token.phone_number is string))
+        && incoming().nidStatus == 'not_verified'
+        && incoming().walletBalanceMinor == 0
+        && incoming().reservedBalanceMinor == 0
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isSignedIn()
+        && isValidId(userId)
+        && isValidPrivateUser(incoming(), userId)
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin()
+          || (
+            request.auth.uid == userId
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'email', 'phone', 'emailVerified', 'phoneVerified', 'nidStatus',
+              'preferredLanguage', 'preferredCurrency', 'notificationPrefs', 'updatedAt'
+            ])
+            && (incoming().nidStatus == existing().nidStatus || incoming().nidStatus == 'pending_review')
+            && (incoming().emailVerified == existing().emailVerified || (incoming().emailVerified == true && request.auth.token.email_verified == true))
+            && (incoming().phoneVerified == existing().phoneVerified || (incoming().phoneVerified == true && ('phone_number' in request.auth.token && request.auth.token.phone_number is string)))
+          )
+          || (
+            // Atomic wallet debit when purchasing an active listing or reserving withdrawal
+            request.auth.uid == userId
+            && incoming().diff(existing()).affectedKeys().hasOnly(['walletBalanceMinor', 'reservedBalanceMinor', 'updatedAt'])
+            && incoming().walletBalanceMinor <= existing().walletBalanceMinor
+            && (incoming().walletBalanceMinor + incoming().reservedBalanceMinor) <= (existing().walletBalanceMinor + existing().reservedBalanceMinor)
+          )
+        );
+      allow delete: if false;
+
+      // 2b. Strictly Owner-Private FCM Web Push Registration Tokens
+      match /pushTokens/{tokenId} {
+        allow get: if isSignedIn()
+          && isValidId(userId)
+          && isValidId(tokenId)
+          && request.auth.uid == userId
+          && exists(/databases/$(database)/documents/privateUsers/$(userId));
+        allow list: if isSignedIn()
+          && isValidId(userId)
+          && request.auth.uid == userId
+          && resource.data.uid == request.auth.uid
+          && exists(/databases/$(database)/documents/privateUsers/$(userId));
+        allow create: if isSignedIn()
+          && isValidId(userId)
+          && isValidId(tokenId)
+          && request.auth.uid == userId
+          && exists(/databases/$(database)/documents/privateUsers/$(userId))
+          && isValidPushToken(incoming(), userId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time;
+        allow update: if isSignedIn()
+          && isValidId(userId)
+          && isValidId(tokenId)
+          && request.auth.uid == userId
+          && exists(/databases/$(database)/documents/privateUsers/$(userId))
+          && isValidPushToken(incoming(), userId)
+          && incoming().uid == existing().uid
+          && incoming().createdAtMs == existing().createdAtMs
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'token', 'userAgent', 'platform', 'deviceLabel', 'enabled', 'lastRefreshedAtMs', 'updatedAt'
+          ]);
+        allow delete: if isSignedIn()
+          && isValidId(userId)
+          && isValidId(tokenId)
+          && request.auth.uid == userId;
+      }
+    }
+
+    // 3. Global Username Reservations
+    match /usernames/{username} {
+      allow get: if isValidId(username);
+      allow list: if false;
+      allow create: if isSignedIn()
+        && isValidId(username)
+        && isValidUsernameReservation(incoming(), username)
+        && incoming().uid == request.auth.uid
+        && incoming().updatedAt == request.time;
+      allow update: if isSignedIn()
+        && isValidId(username)
+        && isValidUsernameReservation(incoming(), username)
+        && existing().uid == request.auth.uid
+        && incoming().uid == request.auth.uid
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['updatedAt']);
+      allow delete: if isSignedIn()
+        && isValidId(username)
+        && (existing().uid == request.auth.uid || isAdmin());
+    }
+
+    // 4. Admins Registry (Only SuperAdmin can manage roles)
+    match /admins/{userId} {
+      allow get: if isSignedIn() && isValidId(userId) && (request.auth.uid == userId || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isSuperAdmin()
+        && isValidId(userId)
+        && isValidAdminRecord(incoming(), userId)
+        && incoming().createdAt == request.time;
+      allow update: if isSuperAdmin()
+        && isValidId(userId)
+        && isValidAdminRecord(incoming(), userId)
+        && incoming().createdAt == existing().createdAt
+        && incoming().diff(existing()).affectedKeys().hasOnly(['role', 'permissions']);
+      allow delete: if isSuperAdmin() && isValidId(userId);
+    }
+
+    // 5. Private Identity Verifications (NID Front & Back)
+    match /identityVerifications/{userId} {
+      allow get: if isSignedIn() && isValidId(userId) && (request.auth.uid == userId || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isSignedIn()
+        && isValidId(userId)
+        && request.auth.uid == userId
+        && isValidIdentityVerification(incoming(), userId)
+        && incoming().status == 'pending_review'
+        && incoming().submittedAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isSignedIn()
+        && isValidId(userId)
+        && isValidIdentityVerification(incoming(), userId)
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin()
+          || (
+            request.auth.uid == userId
+            && existing().status == 'rejected'
+            && incoming().status == 'pending_review'
+            && incoming().diff(existing()).affectedKeys().hasOnly(['frontImageData', 'backImageData', 'status', 'submittedAt', 'updatedAt'])
+          )
+        );
+      allow delete: if false;
+    }
+
+    // 6. Marketplace Listings
+    match /listings/{listingId} {
+      allow get: if isValidId(listingId) && (
+        resource == null
+        || existing().status in ['active', 'reserved', 'sold']
+        || (isSignedIn() && (isAdmin() || existing().sellerId == request.auth.uid))
+      );
+      allow list: if resource.data.status in ['active', 'reserved']
+        || (isSignedIn() && (resource.data.sellerId == request.auth.uid || isAdmin()));
+      allow create: if isSignedIn()
+        && isValidId(listingId)
+        && isValidListing(incoming())
+        && incoming().sellerId == request.auth.uid
+        && incoming().status in ['draft', 'pending']
+        && incoming().verifiedOptions.size() == 0
+        && incoming().views == 0
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isSignedIn()
+        && isValidId(listingId)
+        && isValidListing(incoming())
+        && incoming().sellerId == existing().sellerId
+        && incoming().createdAt == existing().createdAt
+        && (
+          (
+            isAdmin()
+            && incoming().updatedAt == request.time
+          )
+          || (
+            // Seller editing own non-sold and non-reserved listing resets verification to pending
+            existing().sellerId == request.auth.uid
+            && existing().status != 'sold'
+            && existing().status != 'reserved'
+            && incoming().status in ['draft', 'pending', 'archived']
+            && incoming().verifiedOptions == existing().verifiedOptions
+            && incoming().updatedAt == request.time
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'title', 'description', 'priceMinor', 'subcategory', 'monetizationStatus',
+              'claimedOptions', 'verificationState', 'ageYears', 'ageMonths',
+              'metricValue', 'monthlyRevenueMinor', 'accountUrl', 'urlValidationStatus',
+              'gameName', 'gameUid', 'gameLevel', 'images', 'status', 'updatedAt'
+            ])
+          )
+          || (
+            // Seller accepting a bid reserves their own active listing atomically with deal creation
+            existing().sellerId == request.auth.uid
+            && existing().status == 'active'
+            && incoming().status == 'reserved'
+            && incoming().activeDealId is string
+            && isValidId(incoming().activeDealId)
+            && existsAfter(/databases/$(database)/documents/deals/$(incoming().activeDealId))
+            && getAfter(/databases/$(database)/documents/deals/$(incoming().activeDealId)).data.listingId == listingId
+            && incoming().updatedAt == request.time
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'status', 'activeDealId', 'acceptedBidAmountMinor', 'reservedBuyerId', 'updatedAt'
+            ])
+          )
+          || (
+            // Seller or reserved buyer safely cancelling an unpaid reservation restores listing to active
+            existing().status == 'reserved'
+            && existing().activeDealId is string
+            && (
+              existing().sellerId == request.auth.uid
+              || ('reservedBuyerId' in existing() && existing().reservedBuyerId == request.auth.uid)
+            )
+            && incoming().status == 'active'
+            && !('activeDealId' in incoming())
+            && !('acceptedBidAmountMinor' in incoming())
+            && !('reservedBuyerId' in incoming())
+            && !exists(/databases/$(database)/documents/walletLedger/$('led_pay_' + existing().activeDealId))
+            && getAfter(/databases/$(database)/documents/deals/$(existing().activeDealId)).data.status == 'cancelled'
+            && incoming().updatedAt == request.time
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'status', 'activeDealId', 'acceptedBidAmountMinor', 'reservedBuyerId', 'updatedAt'
+            ])
+          )
+          || (
+            // Buyer completing atomic Buy Now or Reserved Deal Payment transitions listing -> sold
+            existing().status in ['active', 'reserved']
+            && (existing().status == 'active' || !('reservedBuyerId' in existing()) || existing().reservedBuyerId == request.auth.uid)
+            && incoming().status == 'sold'
+            && incoming().activeDealId is string
+            && (existing().status == 'active' || incoming().activeDealId == existing().activeDealId)
+            && existsAfter(/databases/$(database)/documents/deals/$(incoming().activeDealId))
+            && getAfter(/databases/$(database)/documents/deals/$(incoming().activeDealId)).data.listingId == listingId
+            && getAfter(/databases/$(database)/documents/deals/$(incoming().activeDealId)).data.buyerId == request.auth.uid
+            && existsAfter(/databases/$(database)/documents/walletLedger/$('led_pay_' + incoming().activeDealId))
+            && incoming().updatedAt == request.time
+            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'activeDealId', 'updatedAt'])
+          )
+          || (
+            // Safe +1 view counter increment
+            existing().status in ['active', 'reserved']
+            && incoming().views == existing().views + 1
+            && incoming().diff(existing()).affectedKeys().hasOnly(['views'])
+          )
+        );
+      allow delete: if isAdmin() && isValidId(listingId);
+    }
+
+    // 7. Private Listing Evidence
+    match /listingEvidence/{listingId} {
+      allow get: if isSignedIn() && isValidId(listingId) && (
+        isAdmin() || (resource != null && existing().sellerId == request.auth.uid)
+      );
+      allow list: if isAdmin();
+      allow create: if isSignedIn()
+        && isValidId(listingId)
+        && isValidListingEvidence(incoming(), listingId)
+        && incoming().sellerId == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isSignedIn()
+        && isValidId(listingId)
+        && isValidListingEvidence(incoming(), listingId)
+        && incoming().sellerId == existing().sellerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin()
+          || (
+            existing().sellerId == request.auth.uid
+            && incoming().diff(existing()).affectedKeys().hasOnly(['evidenceImages', 'updatedAt'])
+          )
+        );
+      allow delete: if false;
+    }
+
+    // 8. Role-Based Bids (Never deleted; preserves accepted_pending_payment & paid lifecycle)
+    match /bids/{bidId} {
+      allow get: if isValidId(bidId);
+      allow list: if resource.data.listingId is string
+        || (isSignedIn() && (resource.data.buyerId == request.auth.uid || resource.data.sellerId == request.auth.uid || isAdmin()));
+      allow create: if isSignedIn()
+        && isValidId(bidId)
+        && isValidBid(incoming())
+        && incoming().buyerId == request.auth.uid
+        && incoming().buyerId != incoming().sellerId
+        && incoming().status == 'pending'
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && exists(/databases/$(database)/documents/listings/$(incoming().listingId))
+        && get(/databases/$(database)/documents/listings/$(incoming().listingId)).data.status == 'active'
+        && get(/databases/$(database)/documents/listings/$(incoming().listingId)).data.sellerId == incoming().sellerId;
+      allow update: if isSignedIn()
+        && isValidId(bidId)
+        && isValidBid(incoming())
+        && incoming().listingId == existing().listingId
+        && incoming().sellerId == existing().sellerId
+        && incoming().buyerId == existing().buyerId
+        && incoming().amountMinor == existing().amountMinor
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin()
+          || (
+            // Buyer can withdraw their own pending bid
+            existing().status == 'pending'
+            && existing().buyerId == request.auth.uid
+            && incoming().status == 'withdrawn'
+            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+          )
+          || (
+            // Seller can reject a pending bid on their listing
+            existing().status == 'pending'
+            && existing().sellerId == request.auth.uid
+            && incoming().status == 'rejected'
+            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+          )
+          || (
+            // Seller accepting a pending bid marks accepted_pending_payment and binds exact dealId + baseAmountMinor
+            existing().status == 'pending'
+            && existing().sellerId == request.auth.uid
+            && incoming().status in ['accepted_pending_payment', 'accepted']
+            && 'dealId' in incoming()
+            && isValidId(incoming().dealId)
+            && existsAfter(/databases/$(database)/documents/deals/$(incoming().dealId))
+            && getAfter(/databases/$(database)/documents/deals/$(incoming().dealId)).data.baseAmountMinor == existing().amountMinor
+            && getAfter(/databases/$(database)/documents/deals/$(incoming().dealId)).data.buyerId == existing().buyerId
+            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'dealId', 'updatedAt'])
+          )
+          || (
+            // Buyer paying their accepted bid marks bid paid atomically with deterministic payment ledger
+            existing().status in ['accepted_pending_payment', 'accepted']
+            && existing().buyerId == request.auth.uid
+            && incoming().status == 'paid'
+            && 'dealId' in existing()
+            && incoming().dealId == existing().dealId
+            && existsAfter(/databases/$(database)/documents/walletLedger/$('led_pay_' + existing().dealId))
+            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+          )
+          || (
+            // Seller or buyer cancelling an unpaid reservation marks the accepted bid expired
+            existing().status in ['accepted_pending_payment', 'accepted']
+            && (existing().sellerId == request.auth.uid || existing().buyerId == request.auth.uid)
+            && incoming().status == 'expired'
+            && 'dealId' in existing()
+            && incoming().dealId == existing().dealId
+            && !exists(/databases/$(database)/documents/walletLedger/$('led_pay_' + existing().dealId))
+            && getAfter(/databases/$(database)/documents/deals/$(existing().dealId)).data.status == 'cancelled'
+            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+          )
+        );
+      allow delete: if false;
+    }
+
+    // 9. Pre-Deal Messenger Conversations & Messages
+    match /conversations/{convId} {
+      allow get: if isSignedIn() && isValidId(convId) && (
+        resource == null
+        || isAdmin()
+        || existing().buyerId == request.auth.uid
+        || existing().sellerId == request.auth.uid
+      );
+      allow list: if isSignedIn() && (
+        resource.data.buyerId == request.auth.uid
+        || resource.data.sellerId == request.auth.uid
+        || isAdmin()
+      );
+      allow create: if isSignedIn()
+        && isValidId(convId)
+        && isValidConversation(incoming())
+        && (incoming().buyerId == request.auth.uid || incoming().sellerId == request.auth.uid)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isSignedIn()
+        && isValidId(convId)
+        && isValidConversation(incoming())
+        && incoming().buyerId == existing().buyerId
+        && incoming().sellerId == existing().sellerId
+        && incoming().listingId == existing().listingId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          existing().buyerId == request.auth.uid
+          || existing().sellerId == request.auth.uid
+          || isAdmin()
+        )
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'lastMessage', 'safetyAcceptedByBuyer', 'safetyAcceptedBySeller', 'updatedAt'
+        ]);
+      allow delete: if false;
+
+      match /messages/{msgId} {
+        function isConvParticipant() {
+          let conv = get(/databases/$(database)/documents/conversations/$(convId)).data;
+          return request.auth.uid == conv.buyerId || request.auth.uid == conv.sellerId || isAdmin();
+        }
+        allow get: if isSignedIn() && isValidId(convId) && isValidId(msgId) && isConvParticipant();
+        allow list: if isSignedIn() && isValidId(convId) && isConvParticipant();
+        allow create: if isSignedIn()
+          && isValidId(convId)
+          && isValidId(msgId)
+          && isValidChatMessage(incoming())
+          && incoming().senderId == request.auth.uid
+          && incoming().createdAt == request.time
+          && isConvParticipant();
+        allow update, delete: if false;
+      }
+    }
+
+    // 10. Private 3-Party Escrow Deals, Messages, Transfers, Reports & Events
+    match /deals/{dealId} {
+      allow get: if isSignedIn() && isValidId(dealId) && (
+        resource == null
+        || isAdmin()
+        || existing().buyerId == request.auth.uid
+        || existing().sellerId == request.auth.uid
+      );
+      allow list: if isSignedIn() && (
+        resource.data.buyerId == request.auth.uid
+        || resource.data.sellerId == request.auth.uid
+        || isAdmin()
+      );
+      allow create: if isSignedIn()
+        && isValidId(dealId)
+        && isValidDeal(incoming())
+        && incoming().buyerId != incoming().sellerId
+        && incoming().confirmedAtMs == 0
+        && incoming().originalDeadlineMs == 0
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin()
+          || (
+            // Seller creating unpaid deal upon bid acceptance
+            incoming().sellerId == request.auth.uid
+            && incoming().status in ['accepted_pending_payment', 'awaiting_payment']
+          )
+          || (
+            // Buyer creating funded deal upon atomic Buy Now payment
+            incoming().buyerId == request.auth.uid
+            && incoming().status in ['paid_deal_room_active', 'awaiting_buyer_confirmation']
+            && !exists(/databases/$(database)/documents/walletLedger/$('led_pay_' + dealId))
+            && existsAfter(/databases/$(database)/documents/walletLedger/$('led_pay_' + dealId))
+          )
+        );
+      allow update: if isSignedIn()
+        && isValidId(dealId)
+        && isValidDeal(incoming())
+        // Fee snapshot & identities are strictly immutable after creation
+        && incoming().listingId == existing().listingId
+        && incoming().buyerId == existing().buyerId
+        && incoming().sellerId == existing().sellerId
+        && incoming().baseAmountMinor == existing().baseAmountMinor
+        && incoming().buyerFeePct == existing().buyerFeePct
+        && incoming().sellerFeePct == existing().sellerFeePct
+        && incoming().buyerFeeMinor == existing().buyerFeeMinor
+        && incoming().sellerFeeMinor == existing().sellerFeeMinor
+        && incoming().buyerTotalMinor == existing().buyerTotalMinor
+        && incoming().sellerPayoutMinor == existing().sellerPayoutMinor
+        && incoming().platformCommissionMinor == existing().platformCommissionMinor
+        && incoming().protectionDurationHours == existing().protectionDurationHours
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        // Terminal state lock unless admin correction (financial ledgers still enforce strict 1x idempotency)
+        && (!(existing().status in ['settled', 'refunded', 'cancelled']) || isAdmin())
+        // Immutable originalDeadlineMs rule: once set (>0), NEVER changes even by admin or report!
+        && (existing().originalDeadlineMs == 0 || incoming().originalDeadlineMs == existing().originalDeadlineMs)
+        && (
+          (
+            // Administrator dispute & settlement actions with deterministic ledger idempotency guards
+            isAdmin()
+            && (existing().originalDeadlineMs == 0 || incoming().confirmedAtMs == existing().confirmedAtMs)
+            && (
+              incoming().status != 'refunded'
+              || (
+                !(existing().status in ['accepted_pending_payment', 'awaiting_payment', 'refunded', 'settled'])
+                && !exists(/databases/$(database)/documents/walletLedger/$('led_refund_' + dealId))
+                && existsAfter(/databases/$(database)/documents/walletLedger/$('led_refund_' + dealId))
+              )
+            )
+            && (
+              incoming().status != 'settled'
+              || (
+                !(existing().status in ['accepted_pending_payment', 'awaiting_payment', 'settled', 'refunded'])
+                && !exists(/databases/$(database)/documents/walletLedger/$('led_release_' + dealId))
+                && existsAfter(/databases/$(database)/documents/walletLedger/$('led_release_' + dealId))
+              )
+            )
+          )
+          || (
+            // Buyer paying for accepted-bid deal atomically with deterministic payment ledger
+            request.auth.uid == existing().buyerId
+            && existing().status in ['accepted_pending_payment', 'awaiting_payment']
+            && incoming().status in ['paid_deal_room_active', 'awaiting_buyer_confirmation']
+            && !exists(/databases/$(database)/documents/walletLedger/$('led_pay_' + dealId))
+            && existsAfter(/databases/$(database)/documents/walletLedger/$('led_pay_' + dealId))
+            && incoming().confirmedAtMs == 0
+            && incoming().originalDeadlineMs == 0
+            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'paymentLedgerId', 'paidAtMs', 'updatedAt'])
+          )
+          || (
+            // Seller or buyer cancelling an UNPAID accepted-bid deal prior to payment
+            (request.auth.uid == existing().sellerId || request.auth.uid == existing().buyerId)
+            && existing().status in ['accepted_pending_payment', 'awaiting_payment']
+            && incoming().status == 'cancelled'
+            && !exists(/databases/$(database)/documents/walletLedger/$('led_pay_' + dealId))
+            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+          )
+          || (
+            // Seller submitting 2-3 transfer-proof screenshots to transfers/{submissionId}
+            request.auth.uid == existing().sellerId
+            && existing().status in [
+              'paid_deal_room_active', 'paid', 'transfer_in_progress',
+              'awaiting_buyer_confirmation', 'transfer_rejected'
+            ]
+            && incoming().status == 'transfer_submitted'
+            && 'latestTransferSubmissionId' in incoming()
+            && isValidId(incoming().latestTransferSubmissionId)
+            && existsAfter(/databases/$(database)/documents/deals/$(dealId)/transfers/$(incoming().latestTransferSubmissionId))
+            && incoming().confirmedAtMs == existing().confirmedAtMs
+            && incoming().originalDeadlineMs == existing().originalDeadlineMs
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'status', 'transferSubmissionCount', 'latestTransferSubmissionId', 'latestRejectionReason', 'updatedAt'
+            ])
+          )
+          || (
+            // Buyer rejecting seller transfer proof with required written reason
+            request.auth.uid == existing().buyerId
+            && existing().status == 'transfer_submitted'
+            && incoming().status == 'transfer_rejected'
+            && 'latestRejectionReason' in incoming()
+            && incoming().latestRejectionReason.size() >= 5
+            && incoming().confirmedAtMs == existing().confirmedAtMs
+            && incoming().originalDeadlineMs == existing().originalDeadlineMs
+            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'latestRejectionReason', 'updatedAt'])
+          )
+          || (
+            // Buyer approving asset transfer ONCE to start immutable 168h (YouTube) or 40h (Standard) security timer
+            request.auth.uid == existing().buyerId
+            && existing().status in ['transfer_submitted', 'paid', 'transfer_in_progress', 'awaiting_buyer_confirmation']
+            && existing().originalDeadlineMs == 0
+            && incoming().status in ['security_period_active', 'protection_active']
+            && incoming().confirmedAtMs >= request.time.toMillis() - 300000
+            && incoming().confirmedAtMs <= request.time.toMillis() + 300000
+            && incoming().originalDeadlineMs == incoming().confirmedAtMs + existing().protectionDurationHours * 3600000
+            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'confirmedAtMs', 'originalDeadlineMs', 'updatedAt'])
+          )
+          || (
+            // Buyer or Seller filing a report pauses settlement WITHOUT modifying originalDeadlineMs
+            (request.auth.uid == existing().buyerId || request.auth.uid == existing().sellerId)
+            && existing().status in [
+              'paid_deal_room_active', 'paid', 'transfer_in_progress',
+              'transfer_submitted', 'awaiting_buyer_confirmation', 'transfer_rejected',
+              'security_period_active', 'protection_active', 'reported_under_review'
+            ]
+            && incoming().status == 'reported_under_review'
+            && incoming().confirmedAtMs == existing().confirmedAtMs
+            && incoming().originalDeadlineMs == existing().originalDeadlineMs
+            && incoming().unresolvedReportCount == existing().unresolvedReportCount + 1
+            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'unresolvedReportCount', 'updatedAt'])
+          )
+        );
+      allow delete: if false;
+
+      match /messages/{msgId} {
+        function isDealParticipant() {
+          let d = get(/databases/$(database)/documents/deals/$(dealId)).data;
+          return request.auth.uid == d.buyerId || request.auth.uid == d.sellerId || isAdmin();
+        }
+        allow get: if isSignedIn() && isValidId(dealId) && isValidId(msgId) && isDealParticipant();
+        allow list: if isSignedIn() && isValidId(dealId) && isDealParticipant();
+        allow create: if isSignedIn()
+          && isValidId(dealId)
+          && isValidId(msgId)
+          && isValidChatMessage(incoming())
+          && incoming().senderId == request.auth.uid
+          && incoming().createdAt == request.time
+          && isDealParticipant();
+        allow update, delete: if false;
+      }
+
+      match /transfers/{submissionId} {
+        function getParentDeal() {
+          return get(/databases/$(database)/documents/deals/$(dealId)).data;
+        }
+        function isTransferDealViewer() {
+          let d = getParentDeal();
+          return request.auth.uid == d.buyerId || request.auth.uid == d.sellerId || isAdmin();
+        }
+        allow get: if isSignedIn() && isValidId(dealId) && isValidId(submissionId) && isTransferDealViewer();
+        allow list: if isSignedIn() && isValidId(dealId) && isTransferDealViewer();
+        allow create: if isSignedIn()
+          && isValidId(dealId)
+          && isValidId(submissionId)
+          && isValidDealTransferSubmission(incoming(), dealId)
+          && incoming().sellerId == request.auth.uid
+          && incoming().status == 'submitted'
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && getParentDeal().sellerId == request.auth.uid;
+        allow update: if isSignedIn()
+          && isValidId(dealId)
+          && isValidId(submissionId)
+          && isValidDealTransferSubmission(incoming(), dealId)
+          && incoming().dealId == existing().dealId
+          && incoming().sellerId == existing().sellerId
+          && incoming().version == existing().version
+          && incoming().screenshots == existing().screenshots
+          && incoming().transferNote == existing().transferNote
+          && incoming().completedSteps == existing().completedSteps
+          && incoming().submittedAtMs == existing().submittedAtMs
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && (
+            isAdmin()
+            || (
+              existing().status == 'submitted'
+              && incoming().status in ['approved', 'rejected']
+              && incoming().buyerDecisionBy == request.auth.uid
+              && getParentDeal().buyerId == request.auth.uid
+              && incoming().diff(existing()).affectedKeys().hasOnly([
+                'status', 'buyerDecisionBy', 'buyerDecisionReason', 'decidedAtMs', 'updatedAt'
+              ])
+            )
+          );
+        allow delete: if false;
+      }
+
+      match /reports/{reportId} {
+        function isDealMember() {
+          let d = get(/databases/$(database)/documents/deals/$(dealId)).data;
+          return request.auth.uid == d.buyerId || request.auth.uid == d.sellerId || isAdmin();
+        }
+        allow get: if isSignedIn() && isValidId(dealId) && isValidId(reportId) && isDealMember();
+        allow list: if isSignedIn() && isValidId(dealId) && isDealMember();
+        allow create: if isSignedIn()
+          && isValidId(dealId)
+          && isValidId(reportId)
+          && isValidDealReport(incoming(), dealId)
+          && incoming().reporterId == request.auth.uid
+          && incoming().status == 'open'
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && isDealMember();
+        allow update: if isAdmin()
+          && isValidId(dealId)
+          && isValidId(reportId)
+          && isValidDealReport(incoming(), dealId)
+          && incoming().dealId == existing().dealId
+          && incoming().reporterId == existing().reporterId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'status', 'adminDecisionNote', 'decidedBy', 'decidedAtMs', 'updatedAt'
+          ]);
+        allow delete: if false;
+      }
+
+      match /events/{eventId} {
+        function isEventDealParticipant() {
+          let d = get(/databases/$(database)/documents/deals/$(dealId)).data;
+          return request.auth.uid == d.buyerId || request.auth.uid == d.sellerId || isAdmin();
+        }
+        allow get: if isSignedIn() && isValidId(dealId) && isValidId(eventId) && isEventDealParticipant();
+        allow list: if isSignedIn() && isValidId(dealId) && isEventDealParticipant();
+        allow create: if isSignedIn()
+          && isValidId(dealId)
+          && isValidId(eventId)
+          && isValidDealAuditEvent(incoming(), dealId)
+          && incoming().actorId == request.auth.uid
+          && incoming().createdAt == request.time
+          && isEventDealParticipant();
+        allow update, delete: if false;
+      }
+    }
+
+    // 11. Manual Deposit Requests
+    match /deposits/{depositId} {
+      allow get: if isSignedIn() && isValidId(depositId) && (
+        isAdmin() || (resource != null && existing().userId == request.auth.uid)
+      );
+      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isSignedIn()
+        && isValidId(depositId)
+        && isValidDepositRequest(incoming())
+        && incoming().userId == request.auth.uid
+        && incoming().status == 'pending'
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isAdmin()
+        && isValidId(depositId)
+        && isValidDepositRequest(incoming())
+        && existing().status == 'pending'
+        && incoming().userId == existing().userId
+        && incoming().amountMinor == existing().amountMinor
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'rejectionReason', 'reviewedBy', 'updatedAt']);
+      allow delete: if false;
+    }
+
+    // 12. Manual Withdrawal Requests
+    match /withdrawals/{withdrawalId} {
+      allow get: if isSignedIn() && isValidId(withdrawalId) && (
+        isAdmin() || (resource != null && existing().userId == request.auth.uid)
+      );
+      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isSignedIn()
+        && isValidId(withdrawalId)
+        && isValidWithdrawalRequest(incoming())
+        && incoming().userId == request.auth.uid
+        && incoming().status == 'pending'
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isAdmin()
+        && isValidId(withdrawalId)
+        && isValidWithdrawalRequest(incoming())
+        && existing().status == 'pending'
+        && incoming().userId == existing().userId
+        && incoming().amountMinor == existing().amountMinor
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'referenceId', 'rejectionReason', 'updatedAt']);
+      allow delete: if false;
+    }
+
+    // 13. Append-Only Financial Wallet Ledger
+    match /walletLedger/{entryId} {
+      allow get: if isSignedIn() && isValidId(entryId) && (
+        isAdmin() || (resource != null && existing().userId == request.auth.uid)
+      );
+      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isSignedIn()
+        && isValidId(entryId)
+        && isValidWalletLedgerEntry(incoming())
+        && incoming().createdAt == request.time
+        && (
+          isAdmin()
+          || (
+            incoming().userId == request.auth.uid
+            && incoming().kind in ['escrow_debit', 'withdrawal_reserved']
+          )
+        );
+      allow update, delete: if false;
+    }
+
+    // 14. Authentic Transaction-Verified Seller Reviews
+    match /reviews/{reviewId} {
+      allow get: if isValidId(reviewId);
+      allow list: if resource.data.sellerId is string;
+      allow create: if isSignedIn()
+        && isValidId(reviewId)
+        && isValidReview(incoming())
+        && incoming().reviewerId == request.auth.uid
+        && incoming().createdAt == request.time
+        && exists(/databases/$(database)/documents/deals/$(incoming().dealId))
+        && get(/databases/$(database)/documents/deals/$(incoming().dealId)).data.buyerId == request.auth.uid
+        && get(/databases/$(database)/documents/deals/$(incoming().dealId)).data.sellerId == incoming().sellerId
+        && get(/databases/$(database)/documents/deals/$(incoming().dealId)).data.status == 'settled';
+      allow update, delete: if false;
+    }
+
+    // 15. Public Platform Settings (Support contacts, fees, categories)
+    match /publicConfig/{docId} {
+      allow get: if isValidId(docId);
+      allow list: if false;
+      allow create: if isAdmin()
+        && isValidId(docId)
+        && isValidPublicSettings(incoming())
+        && incoming().updatedAt == request.time;
+      allow update: if isAdmin()
+        && isValidId(docId)
+        && isValidPublicSettings(incoming())
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'buyerFeeEnabled', 'buyerFeePct', 'sellerFeeEnabled', 'sellerFeePct',
+          'usdToBdtRate', 'supportWhatsapp', 'supportTelegram', 'supportEmail',
+          'bkashNumber', 'nagadNumber', 'rocketNumber', 'aiEmergencyStop',
+          'disabledMonetizationIds', 'gamingTitles',
+          'protectionHoursYoutube', 'protectionHoursFacebook', 'protectionHoursDefault',
+          'customProtectionWindowsEnabled', 'fcmVapidPublicKey',
+          'updatedAt'
+        ]);
+      allow delete: if false;
+    }
+
+    // 16. AI Developer Proposals (Admin-only, human-controlled approval)
+    match /aiProposals/{proposalId} {
+      allow get: if isAdmin() && isValidId(proposalId);
+      allow list: if isAdmin();
+      allow create: if isAdmin()
+        && isValidId(proposalId)
+        && isValidAiProposal(incoming())
+        && incoming().status in ['awaiting_review', 'in_review']
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isAdmin()
+        && isValidId(proposalId)
+        && isValidAiProposal(incoming())
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'status', 'decidedBy', 'summary', 'proposedDiff', 'updatedAt'
+        ]);
+      allow delete: if false;
+    }
+
+    // 17. Append-Only Audit Logs
+    match /auditLogs/{logId} {
+      allow get: if isAdmin() && isValidId(logId);
+      allow list: if isAdmin();
+      allow create: if isSignedIn()
+        && isValidId(logId)
+        && isValidAuditLog(incoming())
+        && incoming().actorId == request.auth.uid
+        && incoming().createdAt == request.time;
+      allow update, delete: if false;
+    }
+
+    // 18. User-Scoped Marketplace, Security, Escrow & Wallet Notifications
+    match /notifications/{notificationId} {
+      allow get: if isSignedIn() && isValidId(notificationId) && (
+        resource == null
+        || existing().recipientId == request.auth.uid
+        || isAdmin()
+      );
+      allow list: if isSignedIn() && (
+        resource.data.recipientId == request.auth.uid
+        || isAdmin()
+      );
+      allow create: if isSignedIn()
+        && isValidId(notificationId)
+        && isValidNotification(incoming())
+        && !('readAt' in incoming())
+        && incoming().read == false
+        && incoming().actorId == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (!('alertKind' in incoming()) || incoming().alertKind != 'admin_alert' || isAdmin())
+        && (
+          !('alertKind' in incoming())
+          || incoming().alertKind != 'deal_room_created'
+          || isAdmin()
+          || (
+            incoming().refType == 'deal'
+            && isValidId(incoming().refId)
+            && exists(/databases/$(database)/documents/deals/$(incoming().refId))
+            && get(/databases/$(database)/documents/deals/$(incoming().refId)).data.status in [
+              'paid_deal_room_active', 'paid', 'transfer_in_progress', 'transfer_submitted',
+              'awaiting_buyer_confirmation', 'security_period_active', 'protection_active'
+            ]
+          )
+        )
+        && (
+          isAdmin()
+          || (
+            // Self-scoped notification (registration welcome, verification, security, own listing/bid/deal/wallet events)
+            incoming().recipientId == request.auth.uid
+            && incoming().actorRole == 'user'
+            && incoming().category in [
+              'account', 'security', 'verification', 'listing',
+              'bid', 'deal', 'dispute', 'wallet'
+            ]
+          )
+          || (
+            // Verified listing counterparty notification (buyer <-> seller on real listing)
+            incoming().recipientId != request.auth.uid
+            && incoming().actorRole == 'user'
+            && incoming().category in ['bid', 'deal']
+            && incoming().refType == 'listing'
+            && isValidId(incoming().refId)
+            && exists(/databases/$(database)/documents/listings/$(incoming().refId))
+            && (
+              get(/databases/$(database)/documents/listings/$(incoming().refId)).data.sellerId == incoming().recipientId
+              || get(/databases/$(database)/documents/listings/$(incoming().refId)).data.sellerId == request.auth.uid
+            )
+          )
+          || (
+            // Verified escrow deal counterparty notification (buyer <-> seller on real deal)
+            incoming().recipientId != request.auth.uid
+            && incoming().actorRole == 'user'
+            && incoming().category in ['deal', 'dispute']
+            && incoming().refType == 'deal'
+            && isValidId(incoming().refId)
+            && exists(/databases/$(database)/documents/deals/$(incoming().refId))
+            && (
+              (
+                get(/databases/$(database)/documents/deals/$(incoming().refId)).data.buyerId == request.auth.uid
+                && get(/databases/$(database)/documents/deals/$(incoming().refId)).data.sellerId == incoming().recipientId
+              )
+              || (
+                get(/databases/$(database)/documents/deals/$(incoming().refId)).data.sellerId == request.auth.uid
+                && get(/databases/$(database)/documents/deals/$(incoming().refId)).data.buyerId == incoming().recipientId
+              )
+            )
+          )
+          || (
+            // Verified deal participant alerting BEXORA Administration (report filed, transfer rejected, security timer elapsed)
+            incoming().recipientId != request.auth.uid
+            && incoming().actorRole == 'user'
+            && incoming().category in ['deal', 'dispute']
+            && incoming().refType == 'deal'
+            && isValidId(incoming().refId)
+            && exists(/databases/$(database)/documents/deals/$(incoming().refId))
+            && (
+              get(/databases/$(database)/documents/deals/$(incoming().refId)).data.buyerId == request.auth.uid
+              || get(/databases/$(database)/documents/deals/$(incoming().refId)).data.sellerId == request.auth.uid
+            )
+            && (
+              incoming().recipientId == 'FFiOzaXKxBMuCzoQXM68sy3aPax2'
+              || exists(/databases/$(database)/documents/admins/$(incoming().recipientId))
+            )
+          )
+        );
+      allow update: if isSignedIn()
+        && isValidId(notificationId)
+        && isValidNotification(incoming())
+        && (
+          isAdmin()
+          || (
+            existing().recipientId == request.auth.uid
+            && incoming().recipientId == existing().recipientId
+            && incoming().actorId == existing().actorId
+            && incoming().createdAt == existing().createdAt
+            && existing().read == false
+            && incoming().read == true
+            && incoming().readAt == request.time
+            && incoming().updatedAt == request.time
+            && incoming().diff(existing()).affectedKeys().hasOnly(['read', 'readAt', 'updatedAt'])
+          )
+        );
+      allow delete: if false;
+    }
+
+    // 19. Admin-Managed Public Broadcast Announcements
+    match /announcements/{announcementId} {
+      allow get: if isValidId(announcementId);
+      allow list: if resource.data.active == true || isAdmin();
+      allow create: if isAdmin()
+        && isValidId(announcementId)
+        && isValidAnnouncement(incoming())
+        && incoming().authorId == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isAdmin()
+        && isValidId(announcementId)
+        && isValidAnnouncement(incoming())
+        && incoming().authorId == existing().authorId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'title', 'preview', 'body', 'severity', 'destination', 'active', 'updatedAt'
+        ]);
+      allow delete: if isAdmin() && isValidId(announcementId);
+    }
+  }
+}

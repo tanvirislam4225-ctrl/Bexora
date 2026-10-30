@@ -1,0 +1,63 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Default deny all
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isBootstrappedSuperAdmin() {
+      return isSignedIn()
+        && request.auth.token.email_verified == true
+        && request.auth.token.email == 'tanvirislam7574@gmail.com';
+    }
+
+    function isValidImageUpload() {
+      return request.resource != null
+        && request.resource.size <= 5 * 1024 * 1024
+        && request.resource.contentType.matches('image/(jpeg|png|webp)');
+    }
+
+    function isValidVoiceUpload() {
+      return request.resource != null
+        && request.resource.size <= 5 * 1024 * 1024
+        && request.resource.contentType.matches('audio/(webm|ogg|mp4|mpeg|wav)');
+    }
+
+    // Strictly Private NID Documents — NEVER publicly readable
+    match /nid_documents/{userId}/{fileName} {
+      allow read: if isSignedIn() && (request.auth.uid == userId || isBootstrappedSuperAdmin());
+      allow write: if isSignedIn() && request.auth.uid == userId && isValidImageUpload();
+    }
+
+    // Strictly Private Monetization Verification Evidence
+    match /listing_evidence/{userId}/{listingId}/{fileName} {
+      allow read: if isSignedIn() && (request.auth.uid == userId || isBootstrappedSuperAdmin());
+      allow write: if isSignedIn() && request.auth.uid == userId && isValidImageUpload();
+    }
+
+    // Public Listing Showcase Images (Owner write, public read)
+    match /listing_images/{userId}/{listingId}/{fileName} {
+      allow read: if true;
+      allow write: if isSignedIn() && request.auth.uid == userId && isValidImageUpload();
+    }
+
+    // Public User Avatars & Covers
+    match /profile_media/{userId}/{fileName} {
+      allow read: if true;
+      allow write: if isSignedIn() && request.auth.uid == userId && isValidImageUpload();
+    }
+
+    // Private Deal Media (15-day retention eligible — restricted to uploader or superadmin)
+    match /deal_media/{dealId}/{userId}/{fileName} {
+      allow read: if isSignedIn() && (request.auth.uid == userId || isBootstrappedSuperAdmin());
+      allow write: if isSignedIn() && request.auth.uid == userId && (isValidImageUpload() || isValidVoiceUpload());
+    }
+  }
+}
+

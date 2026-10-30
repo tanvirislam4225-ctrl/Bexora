@@ -1,0 +1,6 @@
+{
+  "name": "BEXORA — Digital Asset Marketplace",
+  "description": "Multilingual digital asset marketplace with escrow protection, evidence-based monetization verification, role-based bidding, messenger chat, and manual wallet ledger.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

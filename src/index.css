@@ -1,0 +1,392 @@
+@import "tailwindcss";
+
+/* ============================= BEXORA DESIGN TOKENS ============================= */
+:root,
+[data-theme="light"] {
+  --bg: #FFF9F1;
+  --bg-2: #FFF3E4;
+  --surface: #FFFFFF;
+  --surface-2: #FFF6EC;
+  --surface-3: #FFEFDD;
+  --text: #191919;
+  --text-2: #525252;
+  --text-3: #78716C;
+  --border: #191919;
+  --border-soft: #E5D9C8;
+  --border-strong: #191919;
+  --orange: #FF6500;
+  --orange-hover: #E65A00;
+  --orange-soft: #FFE8D6;
+  --yellow: #FFD400;
+  --yellow-soft: #FFF4BF;
+  --purple: #793A91;
+  --purple-soft: #F3E7F8;
+  --teal: #12897B;
+  --teal-soft: #DCF4F0;
+  --green: #187244;
+  --green-soft: #DCF3E6;
+  --red: #C3341F;
+  --red-soft: #FCE3DE;
+  --shadow-color: #191919;
+  --shadow: 4px 4px 0 var(--shadow-color);
+  --shadow-sm: 2px 2px 0 var(--shadow-color);
+  --bx-bg: var(--bg);
+  --bx-surface: var(--surface);
+  --bx-surface-alt: var(--surface-2);
+  --bx-text: var(--text);
+  --bx-border: var(--border-strong);
+  --bx-shadow: var(--shadow-color);
+  --r-sm: 10px;
+  --r: 14px;
+  --r-lg: 20px;
+  --r-xl: 26px;
+  --font: 'Plus Jakarta Sans', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+  color-scheme: light;
+}
+
+[data-theme="dark"] {
+  --bg: #0D0D10;
+  --bg-2: #121218;
+  --surface: #17171E;
+  --surface-2: #20202A;
+  --surface-3: #282836;
+  --text: #F6F3EE;
+  --text-2: #C0BDD0;
+  --text-3: #908CA2;
+  --border: #2F2F3E;
+  --border-soft: #2B2B3A;
+  --border-strong: #793A91;
+  --orange: #FF7A26;
+  --orange-hover: #FF8E47;
+  --orange-soft: #3A2214;
+  --yellow: #FFD400;
+  --yellow-soft: #3A3310;
+  --purple: #B983DA;
+  --purple-soft: #2B1C36;
+  --teal: #4DD6C8;
+  --teal-soft: #12312E;
+  --green: #5FD99B;
+  --green-soft: #12301F;
+  --red: #FF8A72;
+  --red-soft: #3B1710;
+  --shadow-color: rgba(121, 58, 145, 0.55);
+  --shadow: 4px 4px 0 var(--shadow-color);
+  --shadow-sm: 2px 2px 0 var(--shadow-color);
+  --bx-bg: var(--bg);
+  --bx-surface: var(--surface);
+  --bx-surface-alt: var(--surface-2);
+  --bx-text: var(--text);
+  --bx-border: var(--border-strong);
+  --bx-shadow: var(--shadow-color);
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  overflow-x: hidden;
+  max-width: 100%;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  font-family: var(--font);
+  background-color: var(--bg);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  transition: background-color 0.2s ease, color 0.2s ease;
+  min-height: 100vh;
+}
+
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+:focus-visible {
+  outline: 3px solid var(--purple);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+::selection {
+  background: var(--yellow);
+  color: #191919;
+}
+
+/* ============================= TYPOGRAPHY & SURFACES ============================= */
+@layer components {
+.bx-wrap {
+  width: 100%;
+  max-width: 1260px;
+  margin: 0 auto;
+  padding: 0 16px;
+}
+
+@media (min-width: 768px) {
+  .bx-wrap {
+    padding: 0 28px;
+  }
+}
+
+.bx-card {
+  background: var(--surface);
+  color: var(--text);
+  border: 2px solid var(--border-strong);
+  border-radius: var(--r);
+  box-shadow: var(--shadow);
+  transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+}
+
+[data-theme="dark"] .bx-card {
+  border-width: 1.5px;
+  border-color: var(--border-strong);
+}
+
+.bx-soft {
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1.5px solid var(--border-soft);
+  border-radius: var(--r);
+}
+
+/* ============================= GUARANTEED FORM CONTRAST ============================= */
+.bx-input,
+.bx-select,
+.bx-textarea {
+  width: 100%;
+  min-height: 44px;
+  padding: 10px 14px;
+  border-radius: var(--r-sm);
+  border: 2px solid var(--border-soft);
+  background-color: var(--surface);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.45;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.bx-select option {
+  background-color: var(--surface);
+  color: var(--text);
+}
+
+.bx-input::placeholder,
+.bx-textarea::placeholder {
+  color: var(--text-3);
+  opacity: 1;
+}
+
+.bx-input:focus,
+.bx-select:focus,
+.bx-textarea:focus {
+  outline: none;
+  border-color: var(--purple);
+  box-shadow: 0 0 0 3px var(--purple-soft);
+}
+
+.bx-input:disabled,
+.bx-select:disabled,
+.bx-textarea:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  background-color: var(--surface-2);
+  color: var(--text-2);
+}
+
+.bx-input-err {
+  border-color: var(--red) !important;
+  box-shadow: 0 0 0 3px var(--red-soft) !important;
+}
+
+.bx-label {
+  display: block;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 6px;
+}
+
+.bx-hint {
+  font-size: 12px;
+  color: var(--text-2);
+  line-height: 1.45;
+}
+
+/* ============================= INTERACTIVE BUTTONS ============================= */
+.bx-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 10px 18px;
+  border-radius: var(--r-sm);
+  font-weight: 700;
+  font-size: 14px;
+  line-height: 1;
+  white-space: nowrap;
+  border: 2px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-sm);
+  transition: transform 0.12s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.12s ease, background-color 0.15s ease;
+}
+
+.bx-btn:hover:not(:disabled) {
+  transform: translate(-1px, -1px);
+  box-shadow: 3px 3px 0 var(--shadow-color);
+}
+
+.bx-btn:active:not(:disabled) {
+  transform: translate(2px, 2px);
+  box-shadow: 0 0 0 var(--shadow-color);
+}
+
+.bx-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.bx-btn-primary {
+  background: var(--orange);
+  color: #FFFFFF;
+}
+
+[data-theme="dark"] .bx-btn-primary {
+  color: #141414;
+}
+
+.bx-btn-yellow {
+  background: var(--yellow);
+  color: #191919;
+}
+
+.bx-btn-purple {
+  background: var(--purple);
+  color: #FFFFFF;
+}
+
+[data-theme="dark"] .bx-btn-purple {
+  color: #0D0D10;
+}
+
+.bx-btn-danger {
+  background: var(--red-soft);
+  color: var(--red);
+  border-color: var(--red);
+}
+
+.bx-btn-sm {
+  min-height: 36px;
+  padding: 7px 12px;
+  font-size: 12.5px;
+  border-radius: 8px;
+}
+
+.bx-icon-btn {
+  width: 44px;
+  height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12px;
+  border: 2px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-sm);
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+  flex-shrink: 0;
+}
+
+.bx-icon-btn:hover:not(:disabled) {
+  transform: translate(-1px, -1px);
+  box-shadow: 3px 3px 0 var(--shadow-color);
+}
+
+.bx-icon-btn:active:not(:disabled) {
+  transform: translate(2px, 2px);
+  box-shadow: none;
+}
+
+/* ============================= PLATFORM CATEGORY CARDS (REF A + B) ============================= */
+.bx-cat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+@media (min-width: 540px) {
+  .bx-cat-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 12px;
+  }
+}
+
+@media (min-width: 900px) {
+  .bx-cat-grid {
+    grid-template-columns: repeat(8, minmax(0, 1fr));
+    gap: 14px;
+  }
+}
+
+.bx-cat-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 12px 6px;
+  min-height: 82px;
+  border-radius: 16px;
+  background: #14141B;
+  color: #F6F3EE;
+  border: 1.5px solid #793A91;
+  box-shadow: 0 3px 0 rgba(121, 58, 145, 0.28);
+  transition: transform 0.15s ease, border-color 0.15s ease, background-color 0.15s ease;
+  position: relative;
+}
+
+[data-theme="light"] .bx-cat-card {
+  background: var(--surface);
+  color: var(--text);
+  border: 2px solid var(--border-strong);
+  box-shadow: var(--shadow-sm);
+}
+
+.bx-cat-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--orange);
+}
+
+.bx-cat-card.active {
+  background: var(--purple-soft);
+  color: var(--text);
+  border-color: var(--purple);
+  border-width: 2px;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}
