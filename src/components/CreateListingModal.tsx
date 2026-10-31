@@ -1,14 +1,25 @@
-import React, { useRef, useState } from 'react';
-import { addDoc, collection, doc, serverTimestamp, setDoc } from 'firebase/firestore';
-import { ImagePlus, ShieldAlert, Trash2, Upload, X } from 'lucide-react';
+import React, { useEffect, useRef, useState } from 'react';
+import {
+  addDoc,
+  collection,
+  deleteField,
+  doc,
+  getDoc,
+  serverTimestamp,
+  setDoc,
+  updateDoc,
+} from 'firebase/firestore';
+import { ArrowLeft, ImagePlus, ShieldAlert, Trash2, Upload } from 'lucide-react';
 import {
   CurrencyCode,
+  MarketplaceListing,
   MonetizationStatus,
   PlatformId,
   PublicProfile,
   PublicSettings,
 } from '../types';
 import {
+  auth,
   db,
   extractUserFacingFirestoreError,
   handleFirestoreError,
@@ -20,6 +31,7 @@ import {
   formatAccountAge,
   formatMoneyFromMinor,
   getCategoryMetricLabel,
+  normalizeDraftListingFields,
   PLATFORM_CATALOG,
   PLATFORM_LIST,
   validateAccountAge,
@@ -34,6 +46,7 @@ interface CreateListingModalProps {
   userUid: string | null;
   profile: PublicProfile | null;
   settings: PublicSettings;
+  editingListing?: MarketplaceListing | null;
   onRequireAuth: () => void;
   onCreated: (msg: string) => void;
 }
@@ -43,6 +56,7 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
   userUid,
   profile,
   settings,
+  editingListing = null,
   onRequireAuth,
   onCreated,
 }) => {
@@ -75,10 +89,60 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
   const [uploadingImg, setUploadingImg] = useState(false);
   const [uploadingEvidence, setUploadingEvidence] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [savingDraft, setSavingDraft] = useState(false);
   const [error, setError] = useState('');
 
   const listingImgInputRef = useRef<HTMLInputElement | null>(null);
   const evidenceImgInputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (!editingListing) return;
+    setStep(0);
+    setPlatform(editingListing.platform);
+    setSubcategory(
+      editingListing.subcategory || PLATFORM_CATALOG[editingListing.platform]?.subcategories[0] || ''
+    );
+    setTitle(editingListing.title === 'Untitled Asset Draft' ? '' : editingListing.title);
+    setMonetizationStatus(
+      editingListing.monetizationStatus === 'monetized'
+        ? 'monetized'
+        : editingListing.monetizationStatus === 'non-monetized'
+        ? 'non-monetized'
+        : ''
+    );
+    setClaimedOptions(editingListing.claimedOptions || []);
+    setAgeYears(String(editingListing.ageYears ?? ''));
+    setAgeMonths(String(editingListing.ageMonths ?? ''));
+    setMetricValue(String(editingListing.metricValue ?? ''));
+    setMonthlyRevenue(
+      editingListing.monthlyRevenueMinor > 0
+        ? String(editingListing.monthlyRevenueMinor / 100)
+        : ''
+    );
+    setAccountUrl(editingListing.accountUrl || '');
+    setGameName(editingListing.gameName || settings.gamingTitles[0] || 'Free Fire');
+    setGameUid(editingListing.gameUid || '');
+    setGameLevel(editingListing.gameLevel !== undefined ? String(editingListing.gameLevel) : '');
+    setCurrency(editingListing.currency || 'BDT');
+    setPrice(editingListing.priceMinor > 100 ? String(editingListing.priceMinor / 100) : '');
+    setDescription(
+      editingListing.description === 'Draft digital asset listing saved by seller.'
+        ? ''
+        : editingListing.description
+    );
+    setListingImages(editingListing.images || []);
+    setError('');
+
+    if (editingListing.id) {
+      getDoc(doc(db, 'listingEvidence', editingListing.id))
+        .then((snap) => {
+          if (snap.exists() && Array.isArray(snap.data().evidenceImages)) {
+            setEvidenceImages(snap.data().evidenceImages as string[]);
+          }
+        })
+        .catch(() => {});
+    }
+  }, [editingListing, settings.gamingTitles]);
 
   const platformDef = platform ? PLATFORM_CATALOG[platform] : null;
   const enabledMonetizationOptions = platformDef
@@ -226,6 +290,140 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
     setStep((s) => Math.min(3, s + 1) as 0 | 1 | 2 | 3);
   };
 
+  const handleSaveDraft = async () => {
+    if (!userUid || !profile) {
+      onRequireAuth();
+      return;
+    }
+    if (!platform || !platformDef) {
+      setError('Select an asset platform first before saving a draft.');
+      return;
+    }
+    setSavingDraft(true);
+    setError('');
+    try {
+      const normalized = normalizeDraftListingFields({
+        platform,
+        subcategory,
+        title,
+        description,
+        price,
+        ageYears,
+        ageMonths,
+      });
+      if (!normalized.valid) {
+        setError(normalized.error || 'Draft contains prohibited off-platform contact details.');
+        return;
+      }
+
+      const urlRes = validatePlatformAssetUrl(platform, accountUrl);
+      const finalMonStatus: MonetizationStatus = !supportsMonetizationHere
+        ? 'not_applicable'
+        : monetizationStatus === 'monetized'
+        ? 'monetized'
+        : 'non-monetized';
+      const finalClaimed = finalMonStatus === 'monetized' ? claimedOptions : [];
+      const revMinor =
+        supportsMonetizationHere && monetizationStatus === 'monetized' && Number(monthlyRevenue) > 0
+          ? Math.round(Number(monthlyRevenue) * 100)
+          : 0;
+
+      const baseFields: Record<string, unknown> = {
+        subcategory: normalized.subcategory,
+        title: normalized.title,
+        description: normalized.description,
+        priceMinor: normalized.priceMinor,
+        monetizationStatus: finalMonStatus,
+        claimedOptions: finalClaimed,
+        verificationState:
+          finalMonStatus === 'monetized' ? 'submitted_for_verification' : 'not_claimed',
+        ageYears: normalized.ageYears,
+        ageMonths: normalized.ageMonths,
+        metricValue:
+          platform === 'gaming'
+            ? Math.max(0, Math.round(Number(gameLevel) || 0))
+            : Math.max(0, Math.round(Number(metricValue) || 0)),
+        monthlyRevenueMinor: revMinor,
+        accountUrl:
+          platform === 'gaming'
+            ? ''
+            : urlRes.valid
+            ? urlRes.normalizedUrl
+            : accountUrl.trim().slice(0, 300),
+        urlValidationStatus:
+          platform === 'gaming' || !urlRes.valid ? 'not_applicable' : urlRes.status,
+        images: listingImages,
+        status: 'draft',
+        updatedAt: serverTimestamp(),
+      };
+
+      if (platform === 'gaming') {
+        baseFields.gameName = (gameName || settings.gamingTitles[0] || 'Free Fire').slice(0, 60);
+        baseFields.gameUid = gameUid.trim().slice(0, 64);
+        baseFields.gameLevel = Math.max(0, Math.min(10000, Math.round(Number(gameLevel) || 1)));
+      }
+
+      let draftId = editingListing?.id || '';
+      if (editingListing?.id) {
+        try {
+          await updateDoc(doc(db, 'listings', editingListing.id), {
+            ...baseFields,
+            verifiedOptions: [],
+            rejectionReason: deleteField(),
+          });
+        } catch (e) {
+          handleFirestoreError(e, OperationType.UPDATE, `listings/${editingListing.id}`);
+        }
+      } else {
+        try {
+          const ref = await addDoc(collection(db, 'listings'), {
+            ...baseFields,
+            sellerId: userUid,
+            sellerName: profile.displayName,
+            sellerUsername: profile.username,
+            sellerVerified: Boolean(profile.nidVerified),
+            platform,
+            currency,
+            verifiedOptions: [],
+            views: 0,
+            createdAt: serverTimestamp(),
+          });
+          draftId = ref.id;
+        } catch (e) {
+          handleFirestoreError(e, OperationType.CREATE, 'listings');
+        }
+      }
+
+      if (finalMonStatus === 'monetized' && evidenceImages.length > 0 && draftId) {
+        const evRef = doc(db, 'listingEvidence', draftId);
+        const evSnap = await getDoc(evRef).catch(() => null);
+        if (evSnap?.exists()) {
+          await updateDoc(evRef, {
+            evidenceImages,
+            updatedAt: serverTimestamp(),
+          });
+        } else {
+          await setDoc(evRef, {
+            listingId: draftId,
+            sellerId: userUid,
+            evidenceImages,
+            aiSummary: 'Draft evidence saved by seller.',
+            aiMethod: 'draft_saved',
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+        }
+      }
+
+      onCreated('Draft saved to Profile → My Listings.');
+      onClose();
+    } catch (err) {
+      setError(extractUserFacingFirestoreError(err, 'Failed to save listing draft.'));
+    } finally {
+      setSavingDraft(false);
+    }
+  };
+
   const handleSubmit = async () => {
     if (!userUid || !profile) {
       onRequireAuth();
@@ -252,20 +450,13 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
 
       const finalClaimed = finalMonStatus === 'monetized' ? claimedOptions : [];
 
-      const payload: Record<string, unknown> = {
-        sellerId: userUid,
-        sellerName: profile.displayName,
-        sellerUsername: profile.username,
-        sellerVerified: Boolean(profile.nidVerified),
-        platform,
+      const mutableFields: Record<string, unknown> = {
         subcategory,
         title: title.trim(),
         description: description.trim(),
         priceMinor,
-        currency,
         monetizationStatus: finalMonStatus,
         claimedOptions: finalClaimed,
-        verifiedOptions: [], // Never self-verified! Only admin review can populate verifiedOptions
         verificationState:
           finalMonStatus === 'monetized' ? 'submitted_for_verification' : 'not_claimed',
         ageYears: ageRes.years,
@@ -279,33 +470,59 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
         urlValidationStatus: platform === 'gaming' ? 'not_applicable' : urlRes.status,
         images: listingImages,
         status: 'pending',
-        views: 0,
-        createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       };
 
       if (platform === 'gaming') {
-        payload.gameName = gameName;
-        payload.gameUid = gameUid.trim();
-        payload.gameLevel = Math.round(Number(gameLevel) || 1);
+        mutableFields.gameName = gameName;
+        mutableFields.gameUid = gameUid.trim();
+        mutableFields.gameLevel = Math.round(Number(gameLevel) || 1);
       }
 
-      let createdListingId = '';
-      try {
-        const ref = await addDoc(collection(db, 'listings'), payload);
-        createdListingId = ref.id;
-      } catch (e) {
-        handleFirestoreError(e, OperationType.CREATE, 'listings');
+      let targetListingId = editingListing?.id || '';
+      if (editingListing?.id) {
+        try {
+          await updateDoc(doc(db, 'listings', editingListing.id), {
+            ...mutableFields,
+            verifiedOptions: [],
+            rejectionReason: deleteField(),
+          });
+        } catch (e) {
+          handleFirestoreError(e, OperationType.UPDATE, `listings/${editingListing.id}`);
+        }
+      } else {
+        try {
+          const ref = await addDoc(collection(db, 'listings'), {
+            ...mutableFields,
+            sellerId: userUid,
+            sellerName: profile.displayName,
+            sellerUsername: profile.username,
+            sellerVerified: Boolean(profile.nidVerified),
+            platform,
+            currency,
+            verifiedOptions: [], // Never self-verified! Only admin review can populate verifiedOptions
+            views: 0,
+            createdAt: serverTimestamp(),
+          });
+          targetListingId = ref.id;
+        } catch (e) {
+          handleFirestoreError(e, OperationType.CREATE, 'listings');
+        }
       }
 
       // Store private monetization evidence & invoke optional AI screenshot assessment
-      if (finalMonStatus === 'monetized' && evidenceImages.length > 0 && createdListingId) {
+      if (finalMonStatus === 'monetized' && evidenceImages.length > 0 && targetListingId) {
         let aiSummary = 'Queued for manual administrator verification.';
         let aiMethod = 'manual_review_queue';
         try {
+          const idToken = auth.currentUser ? await auth.currentUser.getIdToken().catch(() => '') : '';
+          const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+          if (idToken) {
+            headers.Authorization = `Bearer ${idToken}`;
+          }
           const resp = await fetch('/api/ai/verify-evidence', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers,
             body: JSON.stringify({
               platform,
               claimedOptions: finalClaimed,
@@ -324,37 +541,50 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
         }
 
         try {
-          await setDoc(doc(db, 'listingEvidence', createdListingId), {
-            listingId: createdListingId,
-            sellerId: userUid,
-            evidenceImages,
-            aiSummary: aiSummary.slice(0, 2000),
-            aiMethod: aiMethod.slice(0, 80),
-            createdAt: serverTimestamp(),
-            updatedAt: serverTimestamp(),
-          });
+          const evRef = doc(db, 'listingEvidence', targetListingId);
+          const existingEv = await getDoc(evRef).catch(() => null);
+          if (existingEv?.exists()) {
+            await updateDoc(evRef, {
+              evidenceImages,
+              updatedAt: serverTimestamp(),
+            });
+          } else {
+            await setDoc(evRef, {
+              listingId: targetListingId,
+              sellerId: userUid,
+              evidenceImages,
+              aiSummary: aiSummary.slice(0, 2000),
+              aiMethod: aiMethod.slice(0, 80),
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            });
+          }
         } catch (e) {
-          handleFirestoreError(e, OperationType.CREATE, `listingEvidence/${createdListingId}`);
+          handleFirestoreError(e, OperationType.CREATE, `listingEvidence/${targetListingId}`);
         }
       }
 
-      if (createdListingId) {
+      if (targetListingId) {
         await emitUserNotification({
           recipientId: userUid,
-          eventKey: `listing_submitted_${createdListingId}`,
+          eventKey: `listing_submitted_${targetListingId}_${Date.now()}`,
           category: 'listing',
           severity: 'info',
-          title: 'Listing Submitted for Moderation',
+          title: editingListing ? 'Listing Resubmitted for Moderation' : 'Listing Submitted for Moderation',
           preview: `"${title.trim()}" is queued for BEXORA administrator verification.`,
           body: `Your ${platformDef.name} listing "${title.trim()}" has been submitted with Pending Review status. You will receive an immediate notification here once BEXORA Moderation approves or reviews your submission.`,
           refType: 'listing',
-          refId: createdListingId,
+          refId: targetListingId,
           referenceLabel: `${platformDef.name} · ${subcategory}`,
-          destination: `listing:${createdListingId}`,
+          destination: `listing:${targetListingId}`,
         });
       }
 
-      onCreated('Listing submitted for administrator moderation.');
+      onCreated(
+        editingListing
+          ? 'Listing updated and resubmitted for administrator moderation.'
+          : 'Listing submitted for administrator moderation.'
+      );
       onClose();
     } catch (err) {
       setError(extractUserFacingFirestoreError(err, 'Failed to submit listing.'));
@@ -368,26 +598,52 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
     enabledMonetizationOptions.every((o) => claimedOptions.includes(o.id));
 
   return (
-    <div
-      className="fixed inset-0 z-50 bg-black/65 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4"
-      onClick={onClose}
-      role="dialog"
-      aria-modal="true"
-      aria-label="Create digital asset listing"
-    >
-      <div
-        className="bx-card w-full max-w-2xl max-h-[92vh] overflow-y-auto rounded-t-3xl sm:rounded-2xl p-5 sm:p-6 space-y-5"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <section className="bx-wrap py-6 sm:py-8 space-y-6" aria-label="Create digital asset listing">
+      <div className="max-w-4xl mx-auto flex flex-wrap items-center justify-between gap-3">
+        <button
+          type="button"
+          onClick={onClose}
+          className="bx-btn bx-btn-sm inline-flex items-center gap-2"
+        >
+          <ArrowLeft className="w-4 h-4" />
+          <span>Back to Marketplace</span>
+        </button>
+
+        <span className="bx-hint">
+          Step {step + 1} of 4 — Verified Moderation Workflow
+        </span>
+      </div>
+
+      <div className="bx-card max-w-4xl mx-auto p-5 sm:p-8 space-y-6">
         {/* Header */}
-        <div className="flex items-center justify-between gap-3 pb-3 border-b" style={{ borderColor: 'var(--border-soft)' }}>
+        <div className="pb-4 border-b flex flex-wrap items-start justify-between gap-3" style={{ borderColor: 'var(--border-soft)' }}>
           <div>
-            <h2 className="text-lg font-extrabold">Sell a Digital Asset</h2>
-            <p className="bx-hint">Step {step + 1} of 4 — Verified Moderation Workflow</p>
+            <h1 className="text-xl sm:text-2xl font-black">
+              {editingListing
+                ? editingListing.status === 'rejected'
+                  ? 'Edit & Resubmit Listing'
+                  : 'Resume Asset Draft'
+                : 'Sell a Digital Asset'}
+            </h1>
+            <p className="bx-hint mt-0.5">
+              Complete all 4 verification steps to list your asset with BEXORA 3-party Escrow protection, or save a draft at any time.
+            </p>
+            {editingListing?.rejectionReason && (
+              <p className="text-xs font-bold text-red-600 mt-1.5">
+                Moderator Feedback: {editingListing.rejectionReason}
+              </p>
+            )}
           </div>
-          <button type="button" onClick={onClose} className="bx-icon-btn !w-9 !h-9" aria-label="Close">
-            <X className="w-4 h-4" />
-          </button>
+          {platform && (
+            <button
+              type="button"
+              disabled={savingDraft || submitting}
+              onClick={handleSaveDraft}
+              className="bx-btn bx-btn-sm font-extrabold"
+            >
+              {savingDraft ? 'Saving Draft…' : 'Save as Draft'}
+            </button>
+          )}
         </div>
 
         {/* Step Indicator */}
@@ -942,11 +1198,11 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
         )}
 
         {/* Navigation Actions */}
-        <div className="flex items-center gap-2.5 pt-2">
+        <div className="flex flex-wrap items-center gap-2.5 pt-2">
           {step > 0 && (
             <button
               type="button"
-              disabled={submitting}
+              disabled={submitting || savingDraft}
               onClick={() => {
                 setError('');
                 setStep((s) => (s - 1) as 0 | 1 | 2 | 3);
@@ -956,6 +1212,16 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
               Back
             </button>
           )}
+          {platform && (
+            <button
+              type="button"
+              disabled={submitting || savingDraft}
+              onClick={handleSaveDraft}
+              className="bx-btn font-bold"
+            >
+              {savingDraft ? 'Saving…' : 'Save Draft'}
+            </button>
+          )}
           {step < 3 ? (
             <button type="button" onClick={handleNext} className="bx-btn bx-btn-primary flex-1">
               Continue
@@ -963,15 +1229,19 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
           ) : (
             <button
               type="button"
-              disabled={submitting}
+              disabled={submitting || savingDraft}
               onClick={handleSubmit}
               className="bx-btn bx-btn-primary flex-1"
             >
-              {submitting ? 'Submitting Listing…' : 'Submit Listing for Review'}
+              {submitting
+                ? 'Submitting Listing…'
+                : editingListing
+                ? 'Resubmit Listing for Review'
+                : 'Submit Listing for Review'}
             </button>
           )}
         </div>
       </div>
-    </div>
+    </section>
   );
 };

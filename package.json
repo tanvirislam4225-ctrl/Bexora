@@ -10,10 +10,10 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "test": "tsx --test src/lib/marketplaceLogic.test.ts src/lib/dealWorkflow.test.ts src/lib/notificationLogic.test.ts src/lib/fcmAndSound.test.ts firestore.rules.test.ts"
+    "test": "tsx --test src/lib/checkoutAndIntentLogic.test.ts src/lib/marketplaceLogic.test.ts src/lib/dealWorkflow.test.ts src/lib/notificationLogic.test.ts src/lib/fcmAndSound.test.ts firestore.rules.test.ts"
   },
   "dependencies": {
-    "@google/genai": "^2.4.0",
+    "@google/genai": "^2.32.0",
     "@tailwindcss/vite": "^4.3.3",
     "@vitejs/plugin-react": "^6.1.1",
     "dotenv": "^17.2.3",

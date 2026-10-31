@@ -64,6 +64,8 @@ export const DEFAULT_NOTIFICATION_PREFERENCES: UserNotificationPreferences = {
   normalSoundId: '02_crisp_normal',
   dealAlertSoundId: '04_urgent_deal',
   adminAlertSoundId: '04_urgent_deal',
+  followedSellerListingsEnabled: true,
+  bidUpdatesEnabled: true,
 };
 
 export const STANDARD_DEAL_VIBRATION_PATTERN: number[] = [180, 90, 240];
@@ -80,6 +82,14 @@ export function getDealRoomVibrationPattern(strength?: VibrationStrength): numbe
     ? STANDARD_DEAL_VIBRATION_PATTERN
     : STRONG_DEAL_VIBRATION_PATTERN;
 }
+
+/**
+ * Official Google-managed default Web Push VAPID public key built into `@firebase/messaging` (`DEFAULT_VAPID_KEY`).
+ * Used automatically by Firebase Cloud Messaging for Web Push subscriptions on projects that have not uploaded
+ * a custom self-managed Web Push certificate in Firebase Console. (Public 65-byte uncompressed P-256 point.)
+ */
+export const FCM_OFFICIAL_DEFAULT_VAPID_PUBLIC_KEY =
+  'BDOU99-h67HcA6JeFXHbSNMu7e2yNNu3RzoMj8TM4W88jITfq7ZmPvIM1Iv-4_l2LxQcYwhqby2xGpWwzjfAnG4';
 
 /**
  * Strictly validates that a candidate string is a genuine Web Push VAPID P-256
@@ -148,6 +158,14 @@ export function normalizeNotificationPreferences(
     adminAlertSoundId: VALID_SOUND_IDS.has(raw.adminAlertSoundId as NotificationSoundId)
       ? (raw.adminAlertSoundId as NotificationSoundId)
       : DEFAULT_NOTIFICATION_PREFERENCES.adminAlertSoundId,
+    followedSellerListingsEnabled:
+      typeof raw.followedSellerListingsEnabled === 'boolean'
+        ? raw.followedSellerListingsEnabled
+        : true,
+    bidUpdatesEnabled:
+      typeof raw.bidUpdatesEnabled === 'boolean'
+        ? raw.bidUpdatesEnabled
+        : true,
   };
 }
 

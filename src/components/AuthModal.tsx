@@ -9,23 +9,22 @@ import {
 import { doc, getDoc } from 'firebase/firestore';
 import {
   AlertCircle,
+  ArrowLeft,
   CheckCircle2,
-  ExternalLink,
   Eye,
   EyeOff,
   Info,
   KeyRound,
   Loader2,
+  Lock,
   Mail,
   RefreshCw,
-  X,
+  ShieldCheck,
 } from 'lucide-react';
 import {
   auth,
   clearPendingSignupProfile,
   db,
-  DEFAULT_FIREBASE_AUTH_DOMAINS_URL,
-  DEFAULT_FIREBASE_AUTH_PROVIDERS_URL,
   detectFirebaseAuthCapabilities,
   ensureUserProfileInitialized,
   FirebaseAuthCapabilities,
@@ -45,15 +44,23 @@ import {
   validateRegistrationInput,
   validateStrongPassword,
 } from '../lib/marketplaceLogic';
+import {
+  describePendingAuthIntent,
+  PendingAuthIntent,
+} from '../lib/checkoutAndIntentLogic';
 
 interface AuthModalProps {
   initialMode?: 'login' | 'register' | 'forgot';
+  pendingIntent?: PendingAuthIntent | null;
+  onModeChange?: (mode: 'login' | 'register' | 'forgot') => void;
   onClose: () => void;
   onSuccess: (msg: string) => void;
 }
 
 export const AuthModal: React.FC<AuthModalProps> = ({
   initialMode = 'login',
+  pendingIntent = null,
+  onModeChange,
   onClose,
   onSuccess,
 }) => {
@@ -106,8 +113,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         setRecoveryTarget(loginEmail.trim());
       }
       setMode(nextMode);
+      onModeChange?.(nextMode);
     },
-    [isAnyBusy, clearFeedbackAndVisibility, recoveryTarget, loginEmail]
+    [isAnyBusy, clearFeedbackAndVisibility, recoveryTarget, loginEmail, onModeChange]
   );
 
   useEffect(() => {
@@ -149,11 +157,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       const caps = await detectFirebaseAuthCapabilities(true);
       setCapabilities(caps);
       if (caps.emailPasswordStatus === 'enabled') {
-        setInfo('Email/Password authentication is verified active in Firebase. You can sign in or create an account below.');
+        setInfo('Direct Email/Password sign-in is active. You can sign in or create an account below.');
       } else if (caps.emailPasswordStatus === 'unable_to_verify') {
-        setInfo('Could not verify provider status right now due to network connectivity. You can still submit the form directly.');
+        setInfo('Could not verify sign-in status right now due to network connectivity. You can still submit the form directly or use Connect with Google.');
       } else {
-        setInfo('Email/Password is still reported disabled in Firebase Console. Enable Email/Password -> Save, then try again.');
+        setInfo('Direct Email/Password sign-in is currently unavailable. Click Connect with Google above to sign in or create your account immediately.');
       }
     } finally {
       setCheckingCaps(false);
@@ -394,77 +402,138 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     currentHostLabel === 'localhost' || currentHostLabel === '127.0.0.1';
   const errorIsProviderDisabled = error.includes('Authentication → Sign-in method');
 
-  return (
-    <div
-      className="fixed inset-0 z-50 bg-black/65 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4"
-      onClick={() => {
-        if (!isAnyBusy) onClose();
-      }}
-      role="dialog"
-      aria-modal="true"
-      aria-label="Account authentication"
-    >
-      <div
-        className="bx-card w-full max-w-md max-h-[92vh] overflow-y-auto rounded-t-3xl sm:rounded-2xl p-4 sm:p-5 space-y-3.5"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between gap-3">
-          <BexoraLogo compact />
-          <button
-            type="button"
-            onClick={onClose}
-            disabled={isAnyBusy}
-            className="bx-icon-btn !w-9 !h-9"
-            aria-label="Close authentication dialog"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
+  const intentBanner = describePendingAuthIntent(pendingIntent);
 
-        {/* Mode Switcher */}
-        {mode !== 'forgot' ? (
-          <div className="grid grid-cols-2 gap-1.5 p-1 rounded-xl bx-soft" role="tablist">
-            <button
-              type="button"
-              role="tab"
-              aria-selected={mode === 'login'}
-              disabled={isAnyBusy}
-              onClick={() => switchMode('login')}
-              className="py-2 rounded-lg text-sm font-extrabold transition-colors"
-              style={{
-                background: mode === 'login' ? 'var(--surface)' : 'transparent',
-                color: mode === 'login' ? 'var(--text)' : 'var(--text-2)',
-              }}
-            >
-              Sign In
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={mode === 'register'}
-              disabled={isAnyBusy}
-              onClick={() => switchMode('register')}
-              className="py-2 rounded-lg text-sm font-extrabold transition-colors"
-              style={{
-                background: mode === 'register' ? 'var(--surface)' : 'transparent',
-                color: mode === 'register' ? 'var(--text)' : 'var(--text-2)',
-              }}
-            >
-              Create Account
-            </button>
+  return (
+    <section className="bx-wrap py-6 sm:py-10 space-y-6" aria-label="Account authentication">
+      {/* Top Back Bar */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <button
+          type="button"
+          onClick={onClose}
+          disabled={isAnyBusy}
+          className="bx-btn bx-btn-sm inline-flex items-center gap-2"
+        >
+          <ArrowLeft className="w-4 h-4" />
+          <span>{intentBanner?.backLabel || 'Back to Marketplace'}</span>
+        </button>
+
+        <span className="bx-hint">
+          Protected Firebase Authentication · Session &amp; Action Continuation Enabled
+        </span>
+      </div>
+
+      {/* Saved Action Continuation Banner (shown when logged-out user clicked Buy Now, Place Bid, Message Seller, etc.) */}
+      {intentBanner && (
+        <div
+          role="region"
+          aria-label="Saved marketplace action"
+          className="bx-card p-4 sm:p-5 flex items-start gap-3.5"
+          style={{
+            background: 'var(--yellow-soft)',
+            borderColor: 'var(--orange)',
+          }}
+        >
+          <div
+            className="w-9 h-9 rounded-xl grid place-items-center shrink-0 text-white"
+            style={{ background: 'var(--orange)' }}
+          >
+            <Lock className="w-4 h-4" />
           </div>
-        ) : (
-          <div className="space-y-1">
-            <h2 className="text-lg font-extrabold flex items-center gap-2">
-              <KeyRound className="w-5 h-5" style={{ color: 'var(--orange)' }} />
-              <span>Recover Your Password</span>
-            </h2>
-            <p className="bx-hint">
-              Receive a secure Firebase Authentication password-reset link at your registered email
-              address.
+          <div className="space-y-1 min-w-0">
+            <h2 className="text-sm sm:text-base font-extrabold">{intentBanner.heading}</h2>
+            <p className="text-xs sm:text-sm font-semibold" style={{ color: 'var(--text-2)' }}>
+              {intentBanner.detail}
             </p>
           </div>
-        )}
+        </div>
+      )}
+
+      {/* Full-Screen 2-Column Authentication Layout */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+        {/* Left Column: BEXORA Account & Escrow Security Overview */}
+        <div className="lg:col-span-5 space-y-5 order-2 lg:order-1">
+          <div className="bx-card p-6 space-y-4">
+            <div className="flex items-center gap-2.5">
+              <BexoraLogo compact />
+            </div>
+            <h1 className="text-xl sm:text-2xl font-black leading-tight">
+              Trade Verifiable Digital Assets with 3-Party Escrow Protection
+            </h1>
+            <p className="text-xs sm:text-sm leading-relaxed" style={{ color: 'var(--text-2)' }}>
+              Your BEXORA account connects your public trader profile, BDT/USD escrow wallet, live bidding history, and private 3-party Deal Rooms.
+            </p>
+
+            <div className="space-y-3 pt-2 text-xs">
+              <div className="p-3 rounded-xl bx-soft flex items-start gap-2.5">
+                <ShieldCheck className="w-4 h-4 shrink-0 mt-0.5" style={{ color: 'var(--green)' }} />
+                <div>
+                  <strong className="font-extrabold block">Seamless Action Continuation</strong>
+                  <span style={{ color: 'var(--text-2)' }}>
+                    Sign in or create an account and continue directly to your selected listing, saved bid, or Buy Now checkout.
+                  </span>
+                </div>
+              </div>
+              <div className="p-3 rounded-xl bx-soft flex items-start gap-2.5">
+                <Lock className="w-4 h-4 shrink-0 mt-0.5" style={{ color: 'var(--orange)' }} />
+                <div>
+                  <strong className="font-extrabold block">Protected Escrow Settlement</strong>
+                  <span style={{ color: 'var(--text-2)' }}>
+                    Funds remain locked in BEXORA Escrow until seller transfer proof is verified and the category protection window completes.
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Right Column: Sign In / Create Account / Password Recovery Form Card */}
+        <div className="lg:col-span-7 order-1 lg:order-2">
+          <div className="bx-card p-5 sm:p-7 space-y-4">
+            {/* Mode Switcher */}
+            {mode !== 'forgot' ? (
+              <div className="grid grid-cols-2 gap-1.5 p-1 rounded-xl bx-soft" role="tablist">
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={mode === 'login'}
+                  disabled={isAnyBusy}
+                  onClick={() => switchMode('login')}
+                  className="py-2.5 rounded-lg text-sm font-extrabold transition-colors"
+                  style={{
+                    background: mode === 'login' ? 'var(--surface)' : 'transparent',
+                    color: mode === 'login' ? 'var(--text)' : 'var(--text-2)',
+                  }}
+                >
+                  Sign In
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={mode === 'register'}
+                  disabled={isAnyBusy}
+                  onClick={() => switchMode('register')}
+                  className="py-2.5 rounded-lg text-sm font-extrabold transition-colors"
+                  style={{
+                    background: mode === 'register' ? 'var(--surface)' : 'transparent',
+                    color: mode === 'register' ? 'var(--text)' : 'var(--text-2)',
+                  }}
+                >
+                  Create Account
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-1">
+                <h2 className="text-lg font-extrabold flex items-center gap-2">
+                  <KeyRound className="w-5 h-5" style={{ color: 'var(--orange)' }} />
+                  <span>Recover Your Password</span>
+                </h2>
+                <p className="bx-hint">
+                  Receive a secure Firebase Authentication password-reset link at your registered email
+                  address.
+                </p>
+              </div>
+            )}
 
         {/* Google Sign-In Button — Exact Label "Connect with Google" */}
         {mode !== 'forgot' && (
@@ -501,20 +570,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 <div className="flex items-start gap-2">
                   <Info className="w-4 h-4 shrink-0 mt-0.5" style={{ color: 'var(--orange)' }} />
                   <span>
-                    Domain <code>{currentHostLabel}</code> is not listed in{' '}
-                    <a
-                      href={
-                        capabilities?.firebaseAuthorizedDomainsUrl ||
-                        DEFAULT_FIREBASE_AUTH_DOMAINS_URL
-                      }
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="underline"
-                      style={{ color: 'var(--orange)' }}
-                    >
-                      Firebase Authorized Domains
-                    </a>
-                    .
+                    Google Sign-In popup is restricted on <code>{currentHostLabel}</code>. Please open the official BEXORA domain or sign in with Email below.
                   </span>
                 </div>
               </div>
@@ -528,7 +584,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           </>
         )}
 
-        {/* Confirmed Disabled Provider Advisory (Non-blocking & suppressed when post-submit alert is shown) */}
+        {/* Confirmed Disabled Provider Advisory (Customer-clean, non-blocking) */}
         {mode !== 'forgot' && emailProviderConfirmedDisabled && !errorIsProviderDisabled && (
           <div
             className="p-2.5 rounded-xl text-xs font-bold leading-snug space-y-2 border"
@@ -542,21 +598,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             <div className="flex items-start gap-2">
               <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" style={{ color: 'var(--orange)' }} />
               <span>
-                <strong>Email/Password provider is off in Firebase Console</strong> (
-                <code>{capabilities?.projectId || 'responsive-dragon-tmn89'}</code> →{' '}
-                <strong>Authentication → Sign-in method → Email/Password → Enable → Save</strong>).
+                <strong>Direct Email/Password sign-in is currently unavailable.</strong> Use{' '}
+                <strong>Connect with Google</strong> above to sign in or create your BEXORA account immediately.
               </span>
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              <a
-                href={capabilities?.firebaseAuthConsoleUrl || DEFAULT_FIREBASE_AUTH_PROVIDERS_URL}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="bx-btn bx-btn-primary bx-btn-sm inline-flex items-center gap-1.5"
-              >
-                <span>Open Firebase Auth</span>
-                <ExternalLink className="w-3.5 h-3.5" />
-              </a>
               <button
                 type="button"
                 onClick={handleRecheckProviders}
@@ -564,7 +610,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 className="bx-btn bx-btn-sm inline-flex items-center gap-1.5"
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${checkingCaps ? 'animate-spin' : ''}`} />
-                <span>{checkingCaps ? 'Checking…' : 'Re-check Provider Status'}</span>
+                <span>{checkingCaps ? 'Checking…' : 'Re-check Sign-In Status'}</span>
               </button>
             </div>
           </div>
@@ -611,17 +657,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             </div>
             {errorIsProviderDisabled && (
               <div className="flex flex-wrap items-center gap-2 pt-0.5">
-                <a
-                  href={
-                    capabilities?.firebaseAuthConsoleUrl || DEFAULT_FIREBASE_AUTH_PROVIDERS_URL
-                  }
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="bx-btn bx-btn-primary bx-btn-sm inline-flex items-center gap-1.5"
-                >
-                  <span>Open Firebase Auth</span>
-                  <ExternalLink className="w-3.5 h-3.5" />
-                </a>
                 <button
                   type="button"
                   onClick={handleRecheckProviders}
@@ -630,7 +665,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   style={{ color: 'var(--text)' }}
                 >
                   <RefreshCw className={`w-3.5 h-3.5 ${checkingCaps ? 'animate-spin' : ''}`} />
-                  <span>{checkingCaps ? 'Checking…' : 'Re-check Provider Status'}</span>
+                  <span>{checkingCaps ? 'Checking…' : 'Re-check Sign-In Status'}</span>
                 </button>
               </div>
             )}
@@ -981,7 +1016,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             </button>
           </form>
         )}
+          </div>
+        </div>
       </div>
-    </div>
+    </section>
   );
 };

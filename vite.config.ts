@@ -55,9 +55,22 @@ function vite8SafeClientTransport(hmrDisabled: boolean): Plugin {
 
 export default defineConfig(() => {
   const hmrDisabled = process.env.DISABLE_HMR === 'true';
+  const fcmOfficialDefaultVapidPublicKey =
+    'BDOU99-h67HcA6JeFXHbSNMu7e2yNNu3RzoMj8TM4W88jITfq7ZmPvIM1Iv-4_l2LxQcYwhqby2xGpWwzjfAnG4';
+  const rawEnvVapid = (process.env.VITE_FIREBASE_VAPID_KEY || '').trim();
+  const resolvedPublicVapidKey =
+    rawEnvVapid &&
+    rawEnvVapid !== 'YOUR_FIREBASE_VAPID_KEY' &&
+    rawEnvVapid !== 'MY_FIREBASE_VAPID_KEY' &&
+    rawEnvVapid !== 'PASTE_YOUR_VAPID_KEY_HERE'
+      ? rawEnvVapid
+      : fcmOfficialDefaultVapidPublicKey;
 
   return {
     base: './',
+    define: {
+      'import.meta.env.VITE_FIREBASE_VAPID_KEY': JSON.stringify(resolvedPublicVapidKey),
+    },
     plugins: [
       react(),
       tailwindcss(),

@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
 import {
   Download,
+  Gavel,
+  Heart,
   Home,
   LayoutGrid,
   LogOut,
@@ -12,22 +14,23 @@ import {
   Sun,
   Trophy,
   User as UserIcon,
+  UserCheck,
   Wallet,
   X,
 } from 'lucide-react';
 import { CurrencyCode, LanguageCode, PublicProfile, ThemeMode } from '../types';
 import { BexoraLogo } from './Icons';
 import { SUPPORTED_LANGUAGES, t } from '../lib/i18n';
+import { FullScreenPage } from '../lib/checkoutAndIntentLogic';
 
-export type NavPage =
-  | 'home'
-  | 'market'
-  | 'sellers'
-  | 'chat'
-  | 'deals'
-  | 'profile'
-  | 'public-profile'
-  | 'admin';
+export type NavPage = FullScreenPage;
+
+function isNavSectionActive(currentPage: FullScreenPage, navId: FullScreenPage): boolean {
+  if (currentPage === navId) return true;
+  if (navId === 'market' && (currentPage === 'listing' || currentPage === 'checkout')) return true;
+  if (navId === 'sellers' && currentPage === 'public-profile') return true;
+  return false;
+}
 
 interface NavbarProps {
   page: NavPage;
@@ -49,6 +52,9 @@ interface NavbarProps {
   isInstalled: boolean;
   onTriggerInstall: () => void;
   notificationSlot?: React.ReactNode;
+  siteName?: string;
+  logoUrl?: string;
+  enabledLanguages?: LanguageCode[];
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -71,13 +77,23 @@ export const Navbar: React.FC<NavbarProps> = ({
   isInstalled,
   onTriggerInstall,
   notificationSlot,
+  siteName,
+  logoUrl,
+  enabledLanguages,
 }) => {
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const visibleLanguages =
+    enabledLanguages && enabledLanguages.length > 0
+      ? SUPPORTED_LANGUAGES.filter((l) => enabledLanguages.includes(l.code))
+      : SUPPORTED_LANGUAGES;
 
   const navItems: { id: NavPage; label: string; icon: React.ReactNode }[] = [
     { id: 'home', label: t(language, 'nav_home'), icon: <Home className="w-4 h-4" /> },
     { id: 'market', label: t(language, 'nav_market'), icon: <LayoutGrid className="w-4 h-4" /> },
     { id: 'sellers', label: t(language, 'nav_sellers'), icon: <Trophy className="w-4 h-4" /> },
+    { id: 'favorites', label: t(language, 'nav_favorites'), icon: <Heart className="w-4 h-4" /> },
+    { id: 'my-bids', label: t(language, 'nav_my_bids'), icon: <Gavel className="w-4 h-4" /> },
+    { id: 'following', label: t(language, 'nav_following'), icon: <UserCheck className="w-4 h-4" /> },
     { id: 'chat', label: t(language, 'nav_chat'), icon: <MessageSquare className="w-4 h-4" /> },
     { id: 'deals', label: t(language, 'nav_deals'), icon: <ShieldCheck className="w-4 h-4" /> },
   ];
@@ -99,12 +115,12 @@ export const Navbar: React.FC<NavbarProps> = ({
         }}
       >
         <div className="bx-wrap h-16 flex items-center justify-between gap-4">
-          {/* Left: Hamburger on mobile + Official BEXORA Logo */}
+          {/* Left: Hamburger on mobile/tablet + Official BEXORA Logo */}
           <div className="flex items-center gap-2.5 shrink-0">
             <button
               type="button"
               onClick={() => setDrawerOpen(true)}
-              className="bx-icon-btn lg:hidden"
+              className="bx-icon-btn xl:hidden"
               aria-label="Open navigation menu"
             >
               <Menu className="w-5 h-5" />
@@ -113,16 +129,16 @@ export const Navbar: React.FC<NavbarProps> = ({
               type="button"
               onClick={() => onNavigate('home')}
               className="inline-flex items-center text-left"
-              aria-label="BEXORA Home"
+              aria-label={`${siteName || 'BEXORA'} Home`}
             >
-              <BexoraLogo />
+              <BexoraLogo siteName={siteName} logoUrl={logoUrl} />
             </button>
           </div>
 
           {/* Center: Clean single-line text navigation links */}
-          <nav className="hidden lg:flex items-center gap-6" aria-label="Main navigation">
+          <nav className="hidden xl:flex items-center gap-4 2xl:gap-5" aria-label="Main navigation">
             {navItems.map((item) => {
-              const active = page === item.id;
+              const active = isNavSectionActive(page, item.id);
               return (
                 <button
                   key={item.id}
@@ -173,6 +189,11 @@ export const Navbar: React.FC<NavbarProps> = ({
                   type="button"
                   onClick={onOpenWallet}
                   className="bx-icon-btn hidden sm:inline-flex"
+                  style={
+                    page === 'wallet'
+                      ? { background: 'var(--orange-soft)', borderColor: 'var(--orange)' }
+                      : undefined
+                  }
                   aria-label="Open Wallet"
                   title="Wallet & Add Balance"
                 >
@@ -221,7 +242,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between pb-3 border-b" style={{ borderColor: 'var(--border-soft)' }}>
-              <BexoraLogo compact />
+              <BexoraLogo compact siteName={siteName} logoUrl={logoUrl} />
               <button
                 type="button"
                 onClick={() => setDrawerOpen(false)}
@@ -234,7 +255,7 @@ export const Navbar: React.FC<NavbarProps> = ({
 
             <div className="flex flex-col gap-1.5">
               {navItems.map((item) => {
-                const active = page === item.id;
+                const active = isNavSectionActive(page, item.id);
                 return (
                   <button
                     key={item.id}
@@ -307,7 +328,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                   onChange={(e) => onChangeLanguage(e.target.value as LanguageCode)}
                   className="bx-select !min-h-[40px] !py-1.5 !text-xs"
                 >
-                  {SUPPORTED_LANGUAGES.map((l) => (
+                  {visibleLanguages.map((l) => (
                     <option key={l.code} value={l.code}>
                       {l.label}
                     </option>
@@ -396,7 +417,7 @@ export const BottomNav: React.FC<{
       aria-label="Mobile bottom navigation"
     >
       {items.map((it) => {
-        const active = page === it.id;
+        const active = isNavSectionActive(page, it.id);
         return (
           <button
             key={it.id}

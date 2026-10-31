@@ -3,6 +3,7 @@ import {
   CurrencyCode,
   DealReportCategory,
   DealStatus,
+  ListingStatus,
   PlatformId,
   PublicSettings,
 } from '../types';
@@ -178,6 +179,15 @@ export const DEFAULT_PUBLIC_SETTINGS: PublicSettings = {
   protectionHoursDefault: 40, // 40 hours for other standard-transfer assets
   customProtectionWindowsEnabled: false,
   fcmVapidPublicKey: '',
+  wordpressPaymentEnabled: false,
+  wordpressSiteUrl: '',
+  wordpressBridgeEndpoint: '/wp-json/bexora/v1',
+  siteName: 'BEXORA',
+  brandTagline: 'Escrow-Protected Digital Asset Marketplace',
+  logoUrl: '',
+  noticeBannerEnabled: false,
+  noticeBannerText: '',
+  enabledLanguages: ['en', 'bn', 'hi', 'ar', 'ur'],
 };
 
 export function getMonetizationLabel(optionId: string): string {
@@ -1500,5 +1510,161 @@ export function validateDealReportInput(input: {
     cleanEvidence: rawEvidence,
   };
 }
+
+/**
+ * Strips any internal Google Cloud / Firebase Console URLs, project IDs, or developer instructions
+ * from customer-facing authentication or database messages so ordinary visitors never see internal
+ * cloud console links on the Login/Register UI.
+ */
+export function sanitizeCustomerAuthMessage(rawMessage: string): string {
+  const msg = String(rawMessage || '').trim();
+  if (!msg) {
+    return 'Authentication could not be completed right now. Please try again or use Connect with Google.';
+  }
+  const hasInternalCloudConsoleLeak =
+    /console\.firebase\.google\.com|console\.cloud\.google\.com|console\.developers\.google\.com|responsive-dragon-tmn89|securetoken\.googleapis\.com|identitytoolkit\.googleapis\.com/i.test(
+      msg
+    );
+  if (!hasInternalCloudConsoleLeak) {
+    return msg;
+  }
+  if (/email\/password|password_login_disabled|operation-not-allowed/i.test(msg)) {
+    return 'Email & Password sign-in is temporarily unavailable right now. Please use Connect with Google above to sign in or create your account immediately.';
+  }
+  if (/unauthorized-domain|authorized domain/i.test(msg)) {
+    return 'Google popup sign-in is not yet active on this domain. Please sign in using your email and password or contact BEXORA Support.';
+  }
+  if (/token-service|securetoken|session expired/i.test(msg)) {
+    return 'Your security session expired. Please sign in again to continue right where you left off.';
+  }
+  return 'Sign-in service encountered a temporary configuration issue. Please try Connect with Google or contact BEXORA Support.';
+}
+
+export function getListingStatusBadgeMeta(status: ListingStatus): {
+  label: string;
+  canSellerEdit: boolean;
+  isPubliclyVisible: boolean;
+} {
+  switch (status) {
+    case 'draft':
+      return { label: 'Draft (Saved Privately)', canSellerEdit: true, isPubliclyVisible: false };
+    case 'pending':
+      return { label: 'Pending Admin Review', canSellerEdit: false, isPubliclyVisible: false };
+    case 'active':
+      return { label: 'Approved & Live', canSellerEdit: false, isPubliclyVisible: true };
+    case 'reserved':
+      return { label: 'Reserved — Pending Buyer Payment', canSellerEdit: false, isPubliclyVisible: true };
+    case 'sold':
+      return { label: 'Sold & Completed', canSellerEdit: false, isPubliclyVisible: true };
+    case 'rejected':
+      return { label: 'Rejected — Needs Revision', canSellerEdit: true, isPubliclyVisible: false };
+    case 'suspended':
+      return { label: 'Suspended by Admin', canSellerEdit: false, isPubliclyVisible: false };
+    case 'archived':
+    default:
+      return { label: 'Archived', canSellerEdit: false, isPubliclyVisible: false };
+  }
+}
+
+export function normalizeDraftListingFields(input: {
+  platform?: PlatformId;
+  subcategory?: string;
+  title?: string;
+  description?: string;
+  priceMajor?: string | number;
+  price?: string | number;
+  priceBdt?: string | number;
+  ageYears?: string | number;
+  ageMonths?: string | number;
+}): {
+  valid: boolean;
+  title: string;
+  cleanTitle: string;
+  description: string;
+  cleanDescription: string;
+  subcategory: string;
+  priceMinor: number;
+  ageYears: number;
+  ageMonths: number;
+  error?: string;
+} {
+  const defaultSubcat =
+    input.platform && PLATFORM_CATALOG[input.platform]?.subcategories?.[0]
+      ? PLATFORM_CATALOG[input.platform].subcategories[0]
+      : 'General Asset';
+  const rawSubcat = String(input.subcategory || '').trim();
+  const subcategory = (rawSubcat.length >= 2 ? rawSubcat : defaultSubcat).slice(0, 80);
+
+  const rawTitle = String(input.title || '').trim();
+  const cleanTitle =
+    rawTitle.length >= 8
+      ? rawTitle.slice(0, 120)
+      : rawTitle.length > 0
+      ? `${rawTitle} (Draft Asset)`.slice(0, 120)
+      : 'Untitled Draft Asset Listing';
+
+  const titleSafety = detectSensitiveOrOffPlatformContent(cleanTitle);
+  if (titleSafety.blocked) {
+    return {
+      valid: false,
+      title: cleanTitle,
+      cleanTitle,
+      description: '',
+      cleanDescription: '',
+      subcategory,
+      priceMinor: 100,
+      ageYears: 0,
+      ageMonths: 1,
+      error: `Title: ${titleSafety.reason}`,
+    };
+  }
+
+  const rawDesc = String(input.description || '').trim();
+  const cleanDescription =
+    rawDesc.length >= 20
+      ? rawDesc.slice(0, 4000)
+      : `${rawDesc ? `${rawDesc} — ` : ''}Draft listing saved in progress by seller before submitting for moderation.`.slice(
+          0,
+          4000
+        );
+
+  const descSafety = detectSensitiveOrOffPlatformContent(cleanDescription);
+  if (descSafety.blocked) {
+    return {
+      valid: false,
+      title: cleanTitle,
+      cleanTitle,
+      description: cleanDescription,
+      cleanDescription,
+      subcategory,
+      priceMinor: 100,
+      ageYears: 0,
+      ageMonths: 1,
+      error: `Description: ${descSafety.reason}`,
+    };
+  }
+
+  const rawPrice = input.priceMajor ?? input.price ?? input.priceBdt ?? '';
+  const parsedPrice = Number(rawPrice);
+  const priceMinor =
+    Number.isFinite(parsedPrice) && parsedPrice > 0 ? Math.max(100, Math.round(parsedPrice * 100)) : 10_000;
+
+  const parsedYears = Math.max(0, Math.min(30, Math.floor(Number(input.ageYears) || 0)));
+  const parsedMonthsRaw = Math.max(0, Math.min(11, Math.floor(Number(input.ageMonths) || 0)));
+  const ageMonths = parsedYears === 0 && parsedMonthsRaw === 0 ? 1 : parsedMonthsRaw;
+
+  return {
+    valid: true,
+    title: cleanTitle,
+    cleanTitle,
+    description: cleanDescription,
+    cleanDescription,
+    subcategory,
+    priceMinor,
+    ageYears: parsedYears,
+    ageMonths,
+  };
+}
+
 
 

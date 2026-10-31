@@ -30,6 +30,7 @@ import {
   extractTokenServiceActivationUrl,
   inspectStoredFirebaseAuthToken,
   isTokenServiceDisabledMessage,
+  sanitizeCustomerAuthMessage,
 } from './marketplaceLogic';
 import { buildNotificationId, classifyTokenServiceProbe } from './notificationLogic';
 import type { AuthProviderStatus, TokenServiceStatus } from '../types';
@@ -187,23 +188,18 @@ export function extractUserFacingFirestoreError(
   }
 
   if (isTokenServiceDisabledMessage(inner)) {
-    const url = extractTokenServiceActivationUrl(
-      inner,
-      String(firebaseConfig.messagingSenderId || '448578956301'),
-      String(firebaseConfig.projectId || '')
-    );
-    return `Google Cloud Token Service API (securetoken.googleapis.com) is currently disabled in project ${firebaseConfig.projectId || firebaseConfig.messagingSenderId || '448578956301'}. Enable it once for free at ${url} and retry.`;
+    return 'Your session needs a quick security refresh. Click Reconnect Session or sign in with Google to continue.';
   }
   if (inner.includes('Missing or insufficient permissions')) {
     return 'Permission denied by security rules. Make sure you are signed in with a verified session and have access to this resource.';
   }
   if (inner.includes('Quota exceeded')) {
-    return 'Firebase service quota temporarily reached. Please wait and try again.';
+    return 'Service capacity is temporarily busy. Please wait a moment and retry.';
   }
   if (inner.includes('offline') || inner.includes('unavailable')) {
-    return 'Network connection to Firebase is temporarily unavailable. Check your internet connection and retry.';
+    return 'Network connection is temporarily unavailable. Check your internet connection and retry.';
   }
-  return inner;
+  return sanitizeCustomerAuthMessage(inner);
 }
 
 let sessionPrepPromise: Promise<void> | null = null;
@@ -475,13 +471,21 @@ export async function testFirestoreConnection(): Promise<void> {
   }
 }
 
-const ALLOWED_IMAGE_MIMES = ['image/jpeg', 'image/png', 'image/webp'];
-const MAX_UPLOAD_BYTES = 5 * 1024 * 1024; // 5 MB
+const ALLOWED_IMAGE_MIMES = [
+  'image/jpeg',
+  'image/jpg',
+  'image/pjpeg',
+  'image/png',
+  'image/x-png',
+  'image/webp',
+];
+const ALLOWED_IMAGE_EXT_RE = /\.(jpe?g|png|webp)$/i;
+const MAX_UPLOAD_BYTES = 8 * 1024 * 1024; // 8 MB raw camera photos accepted before canvas downscaling
 
 /**
  * Validates file MIME type and size, then downscales/compresses onto an offscreen canvas
  * so images persist reliably inside Firestore size bounds (<= 185 KB per image, <= 250 KB rule cap,
- * and <= 750 KB total for 4 listing images under Firestore's 1 MB document limit).
+ * and <= 750 KB total for 4 listing images or Front+Back NID under Firestore's 1 MB document limit).
  */
 export async function validateAndProcessImageFile(
   file: File,
@@ -489,11 +493,15 @@ export async function validateAndProcessImageFile(
   quality = 0.74,
   maxChars = 185_000
 ): Promise<string> {
-  if (!ALLOWED_IMAGE_MIMES.includes(file.type)) {
-    throw new Error('Unsupported image format. Please choose a JPEG, PNG, or WebP image.');
+  const normalizedType = String(file.type || '').trim().toLowerCase();
+  const hasAllowedMime = ALLOWED_IMAGE_MIMES.includes(normalizedType);
+  const hasAllowedFallbackExt =
+    normalizedType === '' && ALLOWED_IMAGE_EXT_RE.test(String(file.name || ''));
+  if (!hasAllowedMime && !hasAllowedFallbackExt) {
+    throw new Error('Unsupported image format. Please choose a JPEG, JPG, PNG, or WebP image.');
   }
   if (file.size > MAX_UPLOAD_BYTES) {
-    throw new Error('Image exceeds the 5 MB maximum upload limit. Please choose a smaller file.');
+    throw new Error('Image exceeds the 8 MB maximum upload limit. Please choose a smaller photo.');
   }
   if (file.size === 0) {
     throw new Error('Selected file is empty.');
@@ -521,34 +529,43 @@ export async function validateAndProcessImageFile(
     height = Math.max(1, Math.round(height * ratio));
   }
 
-  const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) {
+  const renderScaledJpeg = (scale: number, q: number): string | null => {
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(width * scale));
+    c.height = Math.max(1, Math.round(height * scale));
+    const context = c.getContext('2d');
+    if (!context) return null;
+    context.fillStyle = '#FFFFFF';
+    context.fillRect(0, 0, c.width, c.height);
+    context.drawImage(img, 0, 0, c.width, c.height);
+    return c.toDataURL('image/jpeg', q);
+  };
+
+  let compressed = renderScaledJpeg(1, quality);
+  if (!compressed) {
     if (rawDataUrl.length > maxChars) {
       throw new Error('Browser canvas unavailable to compress large image. Please choose a smaller screenshot.');
     }
     return rawDataUrl;
   }
-  ctx.drawImage(img, 0, 0, width, height);
 
-  let compressed = canvas.toDataURL('image/jpeg', quality);
-  if (compressed.length > maxChars) {
-    compressed = canvas.toDataURL('image/jpeg', 0.52);
-  }
-  if (compressed.length > maxChars) {
-    const smallerCanvas = document.createElement('canvas');
-    smallerCanvas.width = Math.max(1, Math.round(width * 0.72));
-    smallerCanvas.height = Math.max(1, Math.round(height * 0.72));
-    const sCtx = smallerCanvas.getContext('2d');
-    if (sCtx) {
-      sCtx.drawImage(img, 0, 0, smallerCanvas.width, smallerCanvas.height);
-      compressed = smallerCanvas.toDataURL('image/jpeg', 0.5);
+  const fallbackStages: Array<[number, number]> = [
+    [1, 0.56],
+    [1, 0.42],
+    [0.75, 0.5],
+    [0.58, 0.44],
+    [0.45, 0.4],
+  ];
+  for (const [scale, q] of fallbackStages) {
+    if (compressed.length <= maxChars) break;
+    const candidate = renderScaledJpeg(scale, q);
+    if (candidate) {
+      compressed = candidate;
     }
   }
+
   if (compressed.length > maxChars) {
-    throw new Error('Compressed image is still too large. Please crop or select a simpler screenshot.');
+    throw new Error('Compressed image is still too large. Please crop or select a clearer photo.');
   }
   return compressed;
 }
@@ -940,9 +957,17 @@ export async function safeRefreshCurrentUserToken(): Promise<{
  */
 export async function requestServerEnableTokenService(): Promise<EnableTokenServiceResult> {
   try {
+    const idToken = auth.currentUser ? await auth.currentUser.getIdToken().catch(() => '') : '';
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    };
+    if (idToken) {
+      headers.Authorization = `Bearer ${idToken}`;
+    }
     const resp = await fetch('/api/auth/enable-token-service', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      headers,
       body: JSON.stringify({}),
     });
     const ct = resp.headers.get('content-type') || '';
@@ -1173,16 +1198,8 @@ export async function ensureUserProfileInitialized(
 
 export function formatFirebaseAuthError(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);
-  const projectLabel = String(
-    firebaseConfig.projectId || firebaseConfig.messagingSenderId || 'responsive-dragon-tmn89'
-  );
   if (isTokenServiceDisabledMessage(msg)) {
-    const url = extractTokenServiceActivationUrl(
-      msg,
-      String(firebaseConfig.messagingSenderId || '448578956301'),
-      String(firebaseConfig.projectId || '')
-    );
-    return `Google Cloud Token Service API (securetoken.googleapis.com) is disabled in project ${projectLabel}. Enable it once for free at ${url} and try again.`;
+    return 'Your session needs a quick security refresh. Click Connect with Google to sign in and continue.';
   }
   if (
     msg.includes('auth/invalid-credential') ||
@@ -1201,8 +1218,12 @@ export function formatFirebaseAuthError(err: unknown): string {
   if (msg.includes('auth/weak-password') || msg.includes('WEAK_PASSWORD')) {
     return 'Password is too weak. Use at least 8 characters with both letters and numbers.';
   }
-  if (msg.includes('PASSWORD_LOGIN_DISABLED') || msg.includes('auth/operation-not-allowed') || msg.includes('OPERATION_NOT_ALLOWED')) {
-    return `Email/Password authentication is currently disabled in Firebase Console (${projectLabel} → Authentication → Sign-in method → Email/Password → Enable → Save). Use Connect with Google above, or enable Email/Password in Firebase Console and try again.`;
+  if (
+    msg.includes('PASSWORD_LOGIN_DISABLED') ||
+    msg.includes('auth/operation-not-allowed') ||
+    msg.includes('OPERATION_NOT_ALLOWED')
+  ) {
+    return 'Direct Email/Password sign-in is currently unavailable. Please click Connect with Google above to sign in or create your account.';
   }
   if (msg.includes('auth/expired-action-code')) {
     return 'This verification or password-reset link has expired. Please request a fresh link.';
@@ -1211,11 +1232,7 @@ export function formatFirebaseAuthError(err: unknown): string {
     return 'This verification or password-reset link is invalid or has already been used. Please request a new link.';
   }
   if (msg.includes('auth/unauthorized-domain')) {
-    const host =
-      typeof window !== 'undefined' && window.location?.hostname
-        ? window.location.hostname
-        : 'current domain';
-    return `Domain "${host}" is not listed in Firebase Console → Authentication → Settings → Authorized domains for project ${projectLabel}.`;
+    return 'Google sign-in is not yet enabled on this domain. Please use the official BEXORA domain or contact support.';
   }
   if (msg.includes('auth/popup-blocked')) {
     return 'Your browser blocked the Google sign-in popup. Allow popups for this site and click Connect with Google again.';
@@ -1226,7 +1243,11 @@ export function formatFirebaseAuthError(err: unknown): string {
   if (msg.includes('auth/user-disabled') || msg.includes('USER_DISABLED')) {
     return 'This account has been disabled by an administrator.';
   }
-  if (msg.includes('auth/too-many-requests') || msg.includes('TOO_MANY_ATTEMPTS_TRY_LATER') || msg.includes('Quota exceeded')) {
+  if (
+    msg.includes('auth/too-many-requests') ||
+    msg.includes('TOO_MANY_ATTEMPTS_TRY_LATER') ||
+    msg.includes('Quota exceeded')
+  ) {
     return 'Too many attempts detected. Please wait a few minutes before trying again.';
   }
   if (msg.includes('auth/requires-recent-login')) {
@@ -1238,5 +1259,5 @@ export function formatFirebaseAuthError(err: unknown): string {
   if (msg.includes('auth/network-request-failed')) {
     return 'Network connection error. Check your internet connection and try again.';
   }
-  return msg.replace(/^Firebase:\s*/i, '');
+  return sanitizeCustomerAuthMessage(msg.replace(/^Firebase:\s*/i, ''));
 }

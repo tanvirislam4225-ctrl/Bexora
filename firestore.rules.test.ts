@@ -87,3 +87,42 @@ test('Firestore Rules: validates notificationPrefs sound catalog & vibrationStre
   assert.match(rules, /incoming\(\)\.alertKind\s*!=\s*'deal_room_created'/);
   assert.match(rules, /'paid_deal_room_active'/);
 });
+
+test('Firestore Rules: validates non-secret WordPress payment bridge fields with strict HTTPS regex and blocks secret keys in publicConfig', () => {
+  assert.match(rules, /data\.wordpressSiteUrl\.matches\('\^\$\|\^https:\/\/\[A-Za-z0-9\.\\\\-\/:_\]\+\$'\)/);
+  assert.match(rules, /data\.wordpressBridgeEndpoint\.matches\('\^\/\[A-Za-z0-9_\/\\\\-\]\+\$'\)/);
+  assert.doesNotMatch(rules, /wordpressWebhookSecret/);
+  assert.doesNotMatch(rules, /wordpressConsumerSecret/);
+});
+
+test('Firestore Rules: locks suspended listings from seller self-unsuspending, resets verifiedOptions on seller edit, allows clean NID resubmission, and enforces HTTPS branding logoUrl', () => {
+  assert.match(
+    rules,
+    /data\.status\s+in\s+\['draft',\s*'pending',\s*'active',\s*'reserved',\s*'sold',\s*'rejected',\s*'suspended',\s*'archived'\]/
+  );
+  assert.match(
+    rules,
+    /existing\(\)\.status\s+in\s+\['draft',\s*'pending',\s*'active',\s*'rejected',\s*'archived'\][\s\S]*?incoming\(\)\.verifiedOptions\.size\(\)\s*==\s*0/
+  );
+  assert.match(rules, /!?\('rejectionReason'\s+in\s+incoming\(\)\)\s*&&\s*!\('reviewedBy'\s+in\s+incoming\(\)\)/);
+  assert.match(rules, /data\.logoUrl\.matches\('\^\$\|\^\\\\\.\/icon\\\\\.svg\$\|\^https:\/\/\[A-Za-z0-9\.\\\\-\/:_\?=&%\]\+\$'\)/);
+});
+
+test('Firestore Rules: enforces owner-private favorites, non-self atomic sellerFollows with followerCount sync, and admin-only firstPublishedAtMs', () => {
+  // Favorites strictly owner-private with deterministic ID
+  assert.match(rules, /match\s+\/favorites\/\{favoriteId\}/);
+  assert.match(rules, /allow\s+list:\s*if\s+isSignedIn\(\)\s*&&\s*resource\.data\.userId\s*==\s*request\.auth\.uid;/);
+  assert.match(rules, /favoriteId\s*==\s*\('fav_'\s*\+\s*request\.auth\.uid\s*\+\s*'_'\s*\+\s*incoming\(\)\.listingId\)/);
+
+  // SellerFollows prevents self-follow and enforces Pillar-7 existsAfter / getAfter followerCount sync
+  assert.match(rules, /match\s+\/sellerFollows\/\{followId\}/);
+  assert.match(rules, /data\.followerId\s*!=\s*data\.sellerId/);
+  assert.match(rules, /followId\s*==\s*\('fol_'\s*\+\s*request\.auth\.uid\s*\+\s*'_'\s*\+\s*incoming\(\)\.sellerId\)/);
+  assert.match(rules, /existsAfter\(\/databases\/\$\(database\)\/documents\/sellerFollows\/\$\('fol_'\s*\+\s*request\.auth\.uid\s*\+\s*'_'\s*\+\s*userId\)\)/);
+  assert.match(rules, /getAfter\(\/databases\/\$\(database\)\/documents\/publicProfiles\/\$\(incoming\(\)\.sellerId\)\)\.data\.followerCount/);
+
+  // Sellers cannot spoof firstPublishedAtMs on listing creation; notificationPrefs validates optional category toggles
+  assert.match(rules, /!\('firstPublishedAtMs'\s+in\s+incoming\(\)\)/);
+  assert.match(rules, /followedSellerListingsEnabled/);
+  assert.match(rules, /bidUpdatesEnabled/);
+});

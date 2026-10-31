@@ -12,14 +12,19 @@ import {
   where,
 } from 'firebase/firestore';
 import {
+  ArrowLeft,
   ArrowRight,
   Check,
+  CreditCard,
   ExternalLink,
+  Heart,
   Lock,
   MessageSquare,
   RotateCcw,
+  Share2,
   ShieldCheck,
-  X,
+  UserCheck,
+  UserPlus,
 } from 'lucide-react';
 import {
   BidRecord,
@@ -38,7 +43,6 @@ import {
 } from '../lib/firebase';
 import {
   calculateAcceptedBidDealFinancials,
-  calculateCommission,
   formatAccountAge,
   formatMoneyFromMinor,
   getActiveBids,
@@ -53,9 +57,9 @@ import {
 } from '../lib/marketplaceLogic';
 import {
   appendDealAuditEvent,
-  emitPaidDealRoomCreatedAlerts,
   emitUserNotification,
 } from '../lib/notificationService';
+import { executeShareListing } from '../lib/engagementLogic';
 import { PLATFORM_BANNER_BG, PlatformIcon } from './Icons';
 
 interface ListingDetailModalProps {
@@ -66,12 +70,30 @@ interface ListingDetailModalProps {
   privateUser: PrivateUser | null;
   settings: PublicSettings;
   displayCurrency: CurrencyCode;
-  onRequireAuth: () => void;
-  onOpenWallet: () => void;
+  initialDraftBidAmount?: string;
+  onStartBuyNowCheckout: (listing: MarketplaceListing) => void;
+  onStartDealCheckout: (dealId: string, listingTitle: string) => void;
+  onRequireAuthForBuyNow: (listing: MarketplaceListing) => void;
+  onRequireAuthForBid: (listing: MarketplaceListing, draftBidAmount: string) => void;
+  onRequireAuthForChat: (
+    targetUid: string,
+    targetName: string,
+    listing: MarketplaceListing
+  ) => void;
   onStartChatWithUser: (targetUid: string, targetName: string, listing: MarketplaceListing) => void;
   onOpenPublicProfile: (uid: string) => void;
   onDealOpened: (dealId: string, msg: string) => void;
   onFlash: (msg: string) => void;
+  isFavorited?: boolean;
+  onToggleFavorite?: (listing: MarketplaceListing) => void;
+  isFollowingSeller?: boolean;
+  sellerFollowerCount?: number;
+  onToggleFollowSeller?: (seller: {
+    uid: string;
+    displayName: string;
+    username: string;
+    nidVerified: boolean;
+  }) => void;
 }
 
 export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
@@ -82,22 +104,49 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
   privateUser,
   settings,
   displayCurrency,
-  onRequireAuth,
-  onOpenWallet,
+  initialDraftBidAmount = '',
+  onStartBuyNowCheckout,
+  onStartDealCheckout,
+  onRequireAuthForBuyNow,
+  onRequireAuthForBid,
+  onRequireAuthForChat,
   onStartChatWithUser,
   onOpenPublicProfile,
   onDealOpened,
   onFlash,
+  isFavorited = false,
+  onToggleFavorite,
+  isFollowingSeller = false,
+  sellerFollowerCount,
+  onToggleFollowSeller,
 }) => {
+  void privateUser;
   const [selectedImg, setSelectedImg] = useState(0);
   const [bids, setBids] = useState<BidRecord[]>([]);
-  const [bidAmount, setBidAmount] = useState('');
+  const [bidAmount, setBidAmount] = useState(initialDraftBidAmount);
   const [bidError, setBidError] = useState('');
   const [busyAction, setBusyAction] = useState(false);
   const [withdrawingBidId, setWithdrawingBidId] = useState<string | null>(null);
+  const [shareFeedback, setShareFeedback] = useState<'idle' | 'copied' | 'shared'>('idle');
   const submittingBidRef = useRef(false);
   const withdrawingBidRef = useRef<string | null>(null);
   const viewCountedRef = useRef<string | null>(null);
+  const shareFeedbackTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    setShareFeedback('idle');
+    return () => {
+      if (shareFeedbackTimerRef.current) {
+        window.clearTimeout(shareFeedbackTimerRef.current);
+      }
+    };
+  }, [listing.id]);
+
+  useEffect(() => {
+    if (initialDraftBidAmount) {
+      setBidAmount((prev) => (prev ? prev : initialDraftBidAmount));
+    }
+  }, [initialDraftBidAmount]);
 
   const isSellerOwner = Boolean(userUid && userUid === listing.sellerId);
   const platformDef = PLATFORM_CATALOG[listing.platform];
@@ -159,17 +208,6 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
     }
   }, [listing.id, listing.sellerId, listing.status, userUid]);
 
-  // Close modal on Escape key press for keyboard accessibility
-  useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        onClose();
-      }
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [onClose]);
-
   const acceptedBidRecord = useMemo(
     () =>
       bids.find(
@@ -213,9 +251,9 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
     );
   }, [bids, isSellerOwner, userUid]);
 
-  const handleBuyNow = async () => {
-    if (!userUid || !profile || !privateUser) {
-      onRequireAuth();
+  const handleBuyNow = () => {
+    if (!userUid) {
+      onRequireAuthForBuyNow(listing);
       return;
     }
     if (isSellerOwner) {
@@ -226,148 +264,77 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
       onFlash('This listing is currently reserved or sold and unavailable for Buy Now.');
       return;
     }
-    const buyNowFinancials = calculateAcceptedBidDealFinancials(
-      listing.priceMinor,
-      settings,
-      listing.priceMinor
+    onStartBuyNowCheckout(listing);
+  };
+
+  const handleShareListing = async () => {
+    const origin = typeof window !== 'undefined' ? window.location.origin : '';
+    const pathname = typeof window !== 'undefined' ? window.location.pathname : '/';
+    const nav = typeof navigator !== 'undefined' ? navigator : undefined;
+
+    const fallbackCopyText = (text: string): boolean => {
+      if (typeof document === 'undefined') return false;
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.setAttribute('readonly', '');
+      textarea.className = 'fixed opacity-0 pointer-events-none -left-[9999px] top-0';
+      document.body.appendChild(textarea);
+      textarea.select();
+      let copied = false;
+      try {
+        copied = document.execCommand('copy');
+      } catch {
+        copied = false;
+      } finally {
+        document.body.removeChild(textarea);
+      }
+      return copied;
+    };
+
+    const result = await executeShareListing(
+      {
+        listingId: listing.id,
+        title: listing.title,
+        origin,
+        pathname,
+      },
+      {
+        canShare:
+          nav && typeof nav.canShare === 'function'
+            ? (data) => nav.canShare(data)
+            : undefined,
+        share:
+          nav && typeof nav.share === 'function'
+            ? (data) => nav.share(data)
+            : undefined,
+        writeClipboardText:
+          nav?.clipboard && typeof nav.clipboard.writeText === 'function'
+            ? (text) => nav.clipboard.writeText(text)
+            : undefined,
+        fallbackCopyText,
+      }
     );
-    if (privateUser.walletBalanceMinor < buyNowFinancials.buyerTotalMinor) {
-      onFlash('Insufficient wallet balance. Add funds via Manual Deposit to purchase.');
-      onOpenWallet();
+
+    if (result.method === 'cancelled') {
+      return;
+    }
+    if (result.method === 'failed') {
+      onFlash('Unable to share or copy listing link on this device.');
       return;
     }
 
-    setBusyAction(true);
-    try {
-      const dealId = `deal_${listing.id}_${Date.now()}`.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 120);
-      const ledgerId = `led_pay_${dealId}`;
-      const protectionHours = getProtectionDurationHours(listing.platform, settings);
-      const paidAtMs = Date.now();
+    if (shareFeedbackTimerRef.current) {
+      window.clearTimeout(shareFeedbackTimerRef.current);
+    }
+    setShareFeedback(result.method === 'web_share' ? 'shared' : 'copied');
+    shareFeedbackTimerRef.current = window.setTimeout(() => {
+      setShareFeedback('idle');
+    }, 2500);
 
-      await runTransaction(db, async (tx) => {
-        const listingRef = doc(db, 'listings', listing.id);
-        const buyerPrivRef = doc(db, 'privateUsers', userUid);
-        const dealRef = doc(db, 'deals', dealId);
-        const ledgerRef = doc(db, 'walletLedger', ledgerId);
-
-        const [listingSnap, buyerSnap, existingLedSnap] = await Promise.all([
-          tx.get(listingRef),
-          tx.get(buyerPrivRef),
-          tx.get(ledgerRef),
-        ]);
-
-        if (existingLedSnap.exists()) {
-          throw new Error('Payment has already been processed for this deal.');
-        }
-        if (!listingSnap.exists() || listingSnap.data()?.status !== 'active') {
-          throw new Error('This listing has already been reserved or sold.');
-        }
-
-        const currentBalance = Number(buyerSnap.data()?.walletBalanceMinor) || 0;
-        if (currentBalance < buyNowFinancials.buyerTotalMinor) {
-          throw new Error('Insufficient wallet balance.');
-        }
-
-        tx.update(buyerPrivRef, {
-          walletBalanceMinor: currentBalance - buyNowFinancials.buyerTotalMinor,
-          updatedAt: serverTimestamp(),
-        });
-
-        tx.set(dealRef, {
-          listingId: listing.id,
-          listingTitle: listing.title,
-          platform: listing.platform,
-          originalListingPriceMinor: listing.priceMinor,
-          buyerId: userUid,
-          buyerName: profile.displayName,
-          sellerId: listing.sellerId,
-          sellerName: listing.sellerName,
-          baseAmountMinor: buyNowFinancials.baseAmountMinor,
-          buyerFeePct: buyNowFinancials.buyerFeePct,
-          sellerFeePct: buyNowFinancials.sellerFeePct,
-          buyerFeeMinor: buyNowFinancials.buyerFeeMinor,
-          sellerFeeMinor: buyNowFinancials.sellerFeeMinor,
-          buyerTotalMinor: buyNowFinancials.buyerTotalMinor,
-          sellerPayoutMinor: buyNowFinancials.sellerPayoutMinor,
-          platformCommissionMinor: buyNowFinancials.platformCommissionMinor,
-          refundBuyerMinor: buyNowFinancials.refundBuyerMinor,
-          refundPlatformRetainedMinor: buyNowFinancials.refundPlatformRetainedMinor,
-          currency: listing.currency,
-          protectionDurationHours: protectionHours,
-          confirmedAtMs: 0,
-          originalDeadlineMs: 0,
-          unresolvedReportCount: 0,
-          paymentLedgerId: ledgerId,
-          paidAtMs,
-          transferSubmissionCount: 0,
-          status: 'paid_deal_room_active',
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        });
-
-        tx.update(listingRef, {
-          status: 'sold',
-          activeDealId: dealId,
-          updatedAt: serverTimestamp(),
-        });
-
-        tx.set(ledgerRef, {
-          userId: userUid,
-          kind: 'escrow_debit',
-          amountMinor: buyNowFinancials.buyerTotalMinor,
-          currency: listing.currency,
-          referenceId: dealId,
-          note: `Escrow Buy Now payment for ${listing.title.slice(0, 80)}`,
-          createdAt: serverTimestamp(),
-        });
-      });
-
-      const formattedTotal = formatMoneyFromMinor(
-        buyNowFinancials.buyerTotalMinor,
-        listing.currency,
-        listing.currency
-      );
-      await Promise.all([
-        appendDealAuditEvent({
-          dealId,
-          actorId: userUid,
-          actorName: profile.displayName,
-          actorRole: 'buyer',
-          eventType: 'deal_funded_buy_now',
-          summary: `Buyer funded ${formattedTotal} in Escrow (Buy Now). Private 3-party Deal Room activated.`,
-        }),
-        emitPaidDealRoomCreatedAlerts({
-          dealId,
-          listingTitle: listing.title,
-          buyerId: userUid,
-          buyerName: profile.displayName,
-          sellerId: listing.sellerId,
-          totalFormatted: formattedTotal,
-          paymentSummary: `Buy Now escrow payment (${formattedTotal})`,
-        }),
-        emitUserNotification({
-          recipientId: userUid,
-          eventKey: `wallet_escrow_debit_${dealId}`,
-          category: 'wallet',
-          severity: 'info',
-          title: 'Wallet Debited for Escrow Purchase',
-          preview: `${formattedTotal} locked in escrow for "${listing.title}".`,
-          body: `${formattedTotal} was debited from your BEXORA Wallet to fund Escrow Deal #${dealId.slice(0, 10)} for "${listing.title}".`,
-          refType: 'wallet',
-          refId: ledgerId,
-          referenceLabel: `Ledger #${ledgerId.slice(0, 12)}`,
-          destination: 'wallet',
-        }),
-      ]);
-
-      onDealOpened(
-        dealId,
-        'Escrow funded! Your 3-Party Deal Room is active — await Seller Asset Transfer Proof.'
-      );
-    } catch (err) {
-      onFlash(err instanceof Error ? err.message : 'Purchase could not be completed.');
-    } finally {
-      setBusyAction(false);
+    if (result.method === 'web_share') {
+      onFlash(`Shared "${listing.title}" (ID: ${listing.id}).`);
+    } else {
+      onFlash(`Listing link copied: "${listing.title}" (ID: ${listing.id}).`);
     }
   };
 
@@ -376,7 +343,7 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
     if (submittingBidRef.current) return;
     setBidError('');
     if (!userUid || !profile) {
-      onRequireAuth();
+      onRequireAuthForBid(listing, bidAmount);
       return;
     }
     if (isSellerOwner) {
@@ -794,26 +761,80 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
   };
 
   return (
-    <div
-      className="fixed inset-0 z-50 bg-black/65 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4"
-      onClick={onClose}
-      role="dialog"
-      aria-modal="true"
-      aria-label={listing.title}
-    >
-      <div
-        className="bx-card w-full max-w-3xl max-h-[92vh] overflow-y-auto rounded-t-3xl sm:rounded-2xl p-5 sm:p-6 space-y-5"
-        onClick={(e) => e.stopPropagation()}
-      >
-        {/* Header */}
-        <div className="flex items-start justify-between gap-3 pb-3 border-b" style={{ borderColor: 'var(--border-soft)' }}>
-          <div className="min-w-0">
-            <p className="text-xs font-semibold" style={{ color: 'var(--orange)' }}>
-              {platformDef.name} · {listing.subcategory}
+    <section className="bx-wrap py-6 sm:py-8 space-y-6" aria-label={listing.title}>
+      {/* Top Breadcrumb & Back Navigation */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <button
+          type="button"
+          onClick={onClose}
+          className="bx-btn bx-btn-sm inline-flex items-center gap-2"
+        >
+          <ArrowLeft className="w-4 h-4" />
+          <span>Back to Marketplace</span>
+        </button>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => void handleShareListing()}
+            aria-label={`Share listing ${listing.title} (ID: ${listing.id})`}
+            className={`bx-btn bx-btn-sm whitespace-nowrap shrink-0 ${
+              shareFeedback !== 'idle'
+                ? '!border-[var(--green)] !text-[var(--green)] !bg-[var(--green-soft)]'
+                : ''
+            }`}
+          >
+            {shareFeedback !== 'idle' ? (
+              <Check className="w-4 h-4" />
+            ) : (
+              <Share2 className="w-4 h-4" />
+            )}
+            <span>
+              {shareFeedback === 'copied'
+                ? 'Link Copied'
+                : shareFeedback === 'shared'
+                  ? 'Shared'
+                  : 'Share Listing'}
+            </span>
+          </button>
+          {onToggleFavorite && (
+            <button
+              type="button"
+              onClick={() => onToggleFavorite(listing)}
+              aria-pressed={isFavorited}
+              aria-label={
+                isFavorited
+                  ? `Remove ${listing.title} from favorites`
+                  : `Save ${listing.title} to favorites`
+              }
+              className="bx-btn bx-btn-sm whitespace-nowrap shrink-0"
+              style={
+                isFavorited
+                  ? {
+                      background: '#FFE4E6',
+                      borderColor: '#E11D48',
+                      color: '#BE123C',
+                    }
+                  : undefined
+              }
+            >
+              <Heart className={`w-4 h-4 ${isFavorited ? 'fill-current' : ''}`} />
+              <span>{isFavorited ? 'Saved in Favorites' : 'Save to Favorites'}</span>
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Main Full-Screen 2-Column Listing Workspace */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+        {/* LEFT COLUMN (7 cols): Title, Media Gallery, Metrics, URL, Monetization, Description, Seller */}
+        <div className="lg:col-span-7 space-y-5">
+          <div className="bx-card p-5 sm:p-6 space-y-5">
+            {/* Title Header */}
+            <div className="pb-4 border-b space-y-1.5" style={{ borderColor: 'var(--border-soft)' }}>
               {listing.status === 'reserved' && (
-                <span>
-                  {' '}
-                  · Reserved — Pending Buyer Payment (
+                <p className="text-xs font-extrabold mb-1" style={{ color: 'var(--orange)' }}>
+                  Reserved — Pending Buyer Payment (
                   {formatMoneyFromMinor(
                     effectiveBasePriceMinor,
                     displayCurrency,
@@ -821,614 +842,689 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
                     settings.usdToBdtRate
                   )}{' '}
                   accepted bid)
-                </span>
+                </p>
               )}
-            </p>
-            <h2 className="text-lg sm:text-xl font-extrabold leading-snug mt-0.5">{listing.title}</h2>
+              <h1 className="text-xl sm:text-2xl lg:text-3xl font-black leading-snug">
+                {listing.title}
+              </h1>
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs font-semibold text-[var(--text-2)]">
+                <span className="font-bold text-[var(--orange)]">
+                  {listing.subcategory
+                    .toLowerCase()
+                    .startsWith(platformDef.name.toLowerCase())
+                    ? listing.subcategory
+                    : `${platformDef.name} · ${listing.subcategory}`}
+                </span>
+                <span aria-hidden="true">·</span>
+                <span>{getProtectionDurationHours(listing.platform, settings)}h Escrow Protection</span>
+                <span aria-hidden="true">·</span>
+                <span className="font-mono select-all">Listing ID: {listing.id}</span>
+              </div>
+            </div>
+
+            {/* Media Gallery */}
+            <div className="space-y-2.5">
+              <div
+                className="aspect-[16/9] rounded-xl overflow-hidden flex items-center justify-center border"
+                style={{
+                  background: PLATFORM_BANNER_BG[listing.platform],
+                  borderColor: 'var(--border-soft)',
+                }}
+              >
+                {listing.images && listing.images[selectedImg] ? (
+                  <img
+                    src={listing.images[selectedImg]}
+                    alt={listing.title}
+                    referrerPolicy="no-referrer"
+                    className="w-full h-full object-cover"
+                  />
+                ) : (
+                  <div className="flex flex-col items-center gap-2 text-white">
+                    <PlatformIcon id={listing.platform} size={56} />
+                    <span className="text-xs font-extrabold uppercase">{listing.subcategory}</span>
+                  </div>
+                )}
+              </div>
+
+              {listing.images && listing.images.length > 1 && (
+                <div className="grid grid-cols-4 sm:flex sm:items-center gap-2 sm:overflow-x-auto pb-1">
+                  {listing.images.map((src, idx) => (
+                    <button
+                      key={idx}
+                      type="button"
+                      onClick={() => setSelectedImg(idx)}
+                      className="w-full sm:w-20 aspect-[16/10] rounded-lg overflow-hidden border-2 shrink-0"
+                      style={{
+                        borderColor: idx === selectedImg ? 'var(--orange)' : 'var(--border-soft)',
+                      }}
+                    >
+                      <img src={src} alt={`Thumbnail ${idx + 1}`} className="w-full h-full object-cover" />
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Key Metrics Strip */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 tabular-nums">
+              <div className="p-3 rounded-xl bx-soft">
+                <span className="text-[11px] font-bold uppercase block" style={{ color: 'var(--text-2)' }}>
+                  Account Age
+                </span>
+                <strong className="text-sm font-extrabold">
+                  {formatAccountAge(listing.ageYears, listing.ageMonths)}
+                </strong>
+              </div>
+              {listing.platform === 'gaming' ? (
+                <>
+                  <div className="p-3 rounded-xl bx-soft">
+                    <span className="text-[11px] font-bold uppercase block" style={{ color: 'var(--text-2)' }}>
+                      Game
+                    </span>
+                    <strong className="text-sm font-extrabold truncate block">
+                      {listing.gameName || 'Gaming'}
+                    </strong>
+                  </div>
+                  <div className="p-3 rounded-xl bx-soft">
+                    <span className="text-[11px] font-bold uppercase block" style={{ color: 'var(--text-2)' }}>
+                      Game UID
+                    </span>
+                    <strong className="text-sm font-extrabold truncate block">
+                      {listing.gameUid || '—'}
+                    </strong>
+                  </div>
+                  <div className="p-3 rounded-xl bx-soft">
+                    <span className="text-[11px] font-bold uppercase block" style={{ color: 'var(--text-2)' }}>
+                      Level
+                    </span>
+                    <strong className="text-sm font-extrabold">{listing.gameLevel ?? listing.metricValue}</strong>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="p-3 rounded-xl bx-soft">
+                    <span className="text-[11px] font-bold uppercase block" style={{ color: 'var(--text-2)' }}>
+                      {metricLabel}
+                    </span>
+                    <strong className="text-sm font-extrabold">
+                      {listing.metricValue.toLocaleString('en-US')}
+                    </strong>
+                  </div>
+                  <div className="p-3 rounded-xl bx-soft">
+                    <span className="text-[11px] font-bold uppercase block" style={{ color: 'var(--text-2)' }}>
+                      Monthly Revenue
+                    </span>
+                    <strong className="text-sm font-extrabold">
+                      {listing.monthlyRevenueMinor > 0
+                        ? formatMoneyFromMinor(
+                            listing.monthlyRevenueMinor,
+                            displayCurrency,
+                            listing.currency,
+                            settings.usdToBdtRate
+                          )
+                        : '—'}
+                    </strong>
+                  </div>
+                  <div className="p-3 rounded-xl bx-soft">
+                    <span className="text-[11px] font-bold uppercase block" style={{ color: 'var(--text-2)' }}>
+                      Protection Policy
+                    </span>
+                    <strong className="text-sm font-extrabold">
+                      {getProtectionDurationHours(listing.platform, settings)}h Escrow
+                    </strong>
+                  </div>
+                </>
+              )}
+            </div>
+
+            {/* Public Direct Account/Page URL — Visible to ALL Visitors including Logged-Out */}
+            {listing.accountUrl && (
+              <div className="p-3.5 rounded-xl bx-soft flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <span className="text-xs font-extrabold block" style={{ color: 'var(--text-2)' }}>
+                    Public Asset URL (Domain Matched · Seller Declared)
+                  </span>
+                  <a
+                    href={listing.accountUrl}
+                    target="_blank"
+                    rel="noopener noreferrer nofollow"
+                    className="inline-flex items-center gap-1.5 text-sm font-bold underline break-all mt-0.5"
+                    style={{ color: 'var(--orange)' }}
+                  >
+                    <span>{listing.accountUrl}</span>
+                    <ExternalLink className="w-3.5 h-3.5 shrink-0" />
+                  </a>
+                </div>
+              </div>
+            )}
+
+            {/* Monetization Breakdown */}
+            {listing.monetizationStatus !== 'not_applicable' && (
+              <div className="space-y-2">
+                <h2 className="text-sm font-extrabold">Monetization Status</h2>
+                {listing.monetizationStatus === 'non-monetized' ? (
+                  <div className="p-3 rounded-xl bx-soft text-xs font-semibold">
+                    Non-Monetized — Seller declares no active monetization programs on this asset.
+                  </div>
+                ) : (
+                  <div className="space-y-1.5">
+                    {listing.claimedOptions.map((optId) => {
+                      const isVerified = listing.verifiedOptions.includes(optId);
+                      return (
+                        <div
+                          key={optId}
+                          className="p-2.5 rounded-xl bx-soft flex items-center justify-between gap-2 text-xs font-bold"
+                        >
+                          <span>{getMonetizationLabel(optId)}</span>
+                          <span
+                            style={{
+                              color: isVerified ? 'var(--green)' : 'var(--orange)',
+                            }}
+                          >
+                            {isVerified ? 'Active — Verified' : 'Seller Claimed (Pending Verification)'}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Description */}
+            <div>
+              <h2 className="text-sm font-extrabold mb-1.5">Asset Description</h2>
+              <p className="text-sm leading-relaxed whitespace-pre-line" style={{ color: 'var(--text-2)' }}>
+                {listing.description}
+              </p>
+            </div>
+
+            {/* Seller Card + Follow Seller + Direct Message Action */}
+            <div className="p-4 rounded-xl bx-soft flex items-center justify-between gap-3 flex-wrap">
+              <button
+                type="button"
+                onClick={() => onOpenPublicProfile(listing.sellerId)}
+                className="flex items-center gap-3 text-left hover:underline"
+              >
+                <div
+                  className="w-10 h-10 rounded-full grid place-items-center font-extrabold text-sm text-white shrink-0"
+                  style={{ background: 'var(--purple)' }}
+                >
+                  {(listing.sellerName || 'S').slice(0, 2).toUpperCase()}
+                </div>
+                <div>
+                  <div className="flex items-center gap-1.5 font-extrabold text-sm">
+                    <span>{listing.sellerName}</span>
+                    {listing.sellerVerified && (
+                      <ShieldCheck className="w-4 h-4" style={{ color: 'var(--green)' }} />
+                    )}
+                  </div>
+                  <span className="bx-hint">
+                    @{listing.sellerUsername}
+                    {typeof sellerFollowerCount === 'number'
+                      ? ` · ${sellerFollowerCount.toLocaleString('en-US')} follower${sellerFollowerCount === 1 ? '' : 's'}`
+                      : ''}{' '}
+                    · View Public Profile
+                  </span>
+                </div>
+              </button>
+
+              {!isSellerOwner && (
+                <div className="flex flex-wrap items-center gap-2">
+                  {onToggleFollowSeller && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onToggleFollowSeller({
+                          uid: listing.sellerId,
+                          displayName: listing.sellerName,
+                          username: listing.sellerUsername,
+                          nidVerified: listing.sellerVerified,
+                        })
+                      }
+                      aria-pressed={isFollowingSeller}
+                      aria-label={
+                        isFollowingSeller
+                          ? `Unfollow seller ${listing.sellerName}`
+                          : `Follow seller ${listing.sellerName}`
+                      }
+                      className="bx-btn bx-btn-sm whitespace-nowrap shrink-0"
+                      style={
+                        isFollowingSeller
+                          ? {
+                              background: 'var(--surface)',
+                              borderColor: 'var(--green)',
+                              color: 'var(--green)',
+                            }
+                          : undefined
+                      }
+                    >
+                      {isFollowingSeller ? (
+                        <UserCheck className="w-4 h-4" />
+                      ) : (
+                        <UserPlus className="w-4 h-4" />
+                      )}
+                      <span>{isFollowingSeller ? 'Following' : 'Follow Seller'}</span>
+                    </button>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (!userUid) {
+                        onRequireAuthForChat(listing.sellerId, listing.sellerName, listing);
+                        return;
+                      }
+                      onStartChatWithUser(listing.sellerId, listing.sellerName, listing);
+                    }}
+                    className="bx-btn bx-btn-sm whitespace-nowrap shrink-0"
+                  >
+                    <MessageSquare className="w-4 h-4" />
+                    <span>Message Seller</span>
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
-          <button type="button" onClick={onClose} className="bx-icon-btn !w-9 !h-9" aria-label="Close">
-            <X className="w-4 h-4" />
-          </button>
         </div>
 
-        {/* Media Gallery */}
-        <div className="space-y-2">
-          <div
-            className="aspect-[16/9] rounded-xl overflow-hidden flex items-center justify-center border"
-            style={{
-              background: PLATFORM_BANNER_BG[listing.platform],
-              borderColor: 'var(--border-soft)',
-            }}
-          >
-            {listing.images && listing.images[selectedImg] ? (
-              <img
-                src={listing.images[selectedImg]}
-                alt={listing.title}
-                referrerPolicy="no-referrer"
-                className="w-full h-full object-cover"
-              />
-            ) : (
-              <div className="flex flex-col items-center gap-2 text-white">
-                <PlatformIcon id={listing.platform} size={56} />
-                <span className="text-xs font-extrabold uppercase">{listing.subcategory}</span>
+        {/* RIGHT COLUMN (5 cols): Escrow Purchase / Checkout Card & Live Bidding Room */}
+        <div className="lg:col-span-5 lg:sticky lg:top-20 space-y-5">
+          {/* Transparent Commission & Escrow Purchase Module */}
+          <div className="bx-card p-5 sm:p-6 space-y-4">
+            <div className="flex items-center justify-between gap-2 pb-3 border-b" style={{ borderColor: 'var(--border-soft)' }}>
+              <h2 className="text-base font-extrabold">Escrow Purchase Summary</h2>
+              <span className="bx-hint">3-Party Protected</span>
+            </div>
+
+            <div className="space-y-2 text-sm tabular-nums">
+              {listing.status === 'reserved' && resolvedAcceptedBidMinor > 0 && (
+                <div className="flex justify-between text-xs pb-1">
+                  <span style={{ color: 'var(--text-2)' }}>Original Listing Price</span>
+                  <span className="line-through opacity-75">
+                    {formatMoneyFromMinor(
+                      listing.priceMinor,
+                      displayCurrency,
+                      listing.currency,
+                      settings.usdToBdtRate
+                    )}
+                  </span>
+                </div>
+              )}
+              <div className="flex justify-between">
+                <span style={{ color: 'var(--text-2)' }}>
+                  {listing.status === 'reserved' && resolvedAcceptedBidMinor > 0
+                    ? 'Accepted Bid Price'
+                    : 'Base Asset Price'}
+                </span>
+                <strong>
+                  {formatMoneyFromMinor(
+                    breakdown.baseAmountMinor,
+                    displayCurrency,
+                    listing.currency,
+                    settings.usdToBdtRate
+                  )}
+                </strong>
+              </div>
+              <div className="flex justify-between">
+                <span style={{ color: 'var(--text-2)' }}>
+                  Buyer Platform Fee ({breakdown.buyerFeePct}%)
+                </span>
+                <strong>
+                  {formatMoneyFromMinor(
+                    breakdown.buyerFeeMinor,
+                    displayCurrency,
+                    listing.currency,
+                    settings.usdToBdtRate
+                  )}
+                </strong>
+              </div>
+              <div className="h-px my-1" style={{ background: 'var(--border-soft)' }} />
+              <div className="flex justify-between text-base font-extrabold">
+                <span>Total Buyer Payment</span>
+                <span>
+                  {formatMoneyFromMinor(
+                    breakdown.buyerTotalMinor,
+                    displayCurrency,
+                    listing.currency,
+                    settings.usdToBdtRate
+                  )}
+                </span>
+              </div>
+              {isSellerOwner && (
+                <p className="bx-hint pt-1">
+                  Seller Payout Preview: Agreed price minus {breakdown.sellerFeePct}% seller fee ={' '}
+                  <strong>
+                    {formatMoneyFromMinor(
+                      breakdown.sellerPayoutMinor,
+                      displayCurrency,
+                      listing.currency,
+                      settings.usdToBdtRate
+                    )}
+                  </strong>{' '}
+                  net payout after security countdown completion.
+                </p>
+              )}
+            </div>
+
+            {/* Reserved Pending Payment Status Banner & Direct Actions */}
+            {listing.status === 'reserved' && (
+              <div
+                className="p-4 rounded-xl border space-y-3"
+                style={{
+                  background: 'var(--surface-2)',
+                  borderColor: 'var(--orange)',
+                }}
+              >
+                <div className="flex items-start gap-2.5">
+                  <Lock className="w-4 h-4 shrink-0 mt-0.5" style={{ color: 'var(--orange)' }} />
+                  <div className="space-y-1 text-xs">
+                    <div className="font-extrabold text-sm" style={{ color: 'var(--orange)' }}>
+                      Reserved — Pending Buyer Payment
+                    </div>
+                    <p style={{ color: 'var(--text-2)' }}>
+                      {isReservedBuyer
+                        ? `Your bid was accepted! Proceed to Checkout to pay the exact agreed total (${formatMoneyFromMinor(
+                            breakdown.buyerTotalMinor,
+                            displayCurrency,
+                            listing.currency,
+                            settings.usdToBdtRate
+                          )}) and lock funds in Escrow.`
+                        : isSellerOwner
+                        ? 'You accepted a bid on this listing. Both the listing and the accepted bid remain preserved while awaiting buyer payment. Conflicting Buy Now purchases and duplicate bid acceptances are locked.'
+                        : 'A buyer bid has been accepted on this listing and is currently awaiting escrow payment. Conflicting purchases are locked while this reservation is active.'}
+                    </p>
+                  </div>
+                </div>
+
+                {(isReservedBuyer || isSellerOwner) && (
+                  <div className="flex flex-wrap items-center gap-2 pt-1">
+                    {resolvedActiveDealId && (
+                      <button
+                        type="button"
+                        disabled={busyAction}
+                        onClick={() => {
+                          if (isReservedBuyer) {
+                            onStartDealCheckout(resolvedActiveDealId, listing.title);
+                          } else {
+                            onDealOpened(resolvedActiveDealId, 'Opened reserved Deal Room.');
+                          }
+                        }}
+                        className="bx-btn bx-btn-primary bx-btn-sm"
+                      >
+                        <span>
+                          {isReservedBuyer
+                            ? `Pay Accepted Bid (${formatMoneyFromMinor(
+                                breakdown.buyerTotalMinor,
+                                displayCurrency,
+                                listing.currency,
+                                settings.usdToBdtRate
+                              )})`
+                            : 'Open Reserved Deal Room'}
+                        </span>
+                        <ArrowRight className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      disabled={busyAction}
+                      onClick={handleCancelUnpaidReservation}
+                      className="bx-btn bx-btn-sm bx-btn-danger"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                      <span>Cancel Unpaid Reservation &amp; Restore Listing</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {!isSellerOwner && listing.status === 'active' && (
+              <div className="space-y-2">
+                <button
+                  type="button"
+                  disabled={busyAction}
+                  onClick={handleBuyNow}
+                  className="bx-btn bx-btn-yellow w-full text-base justify-center"
+                >
+                  <CreditCard className="w-4 h-4" />
+                  <span>
+                    Buy Now —{' '}
+                    {formatMoneyFromMinor(
+                      breakdown.buyerTotalMinor,
+                      displayCurrency,
+                      listing.currency,
+                      settings.usdToBdtRate
+                    )}
+                  </span>
+                </button>
+                <p className="bx-hint text-center">
+                  Opens secure Escrow Checkout (BEXORA Wallet Balance &amp; Live Payment Methods)
+                </p>
               </div>
             )}
           </div>
 
-          {listing.images && listing.images.length > 1 && (
-            <div className="flex items-center gap-2 overflow-x-auto pb-1">
-              {listing.images.map((src, idx) => (
-                <button
-                  key={idx}
-                  type="button"
-                  onClick={() => setSelectedImg(idx)}
-                  className="w-20 aspect-[16/10] rounded-lg overflow-hidden border-2 shrink-0"
-                  style={{
-                    borderColor: idx === selectedImg ? 'var(--orange)' : 'var(--border-soft)',
-                  }}
-                >
-                  <img src={src} alt={`Thumbnail ${idx + 1}`} className="w-full h-full object-cover" />
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* Key Metrics Strip */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 tabular-nums">
-          <div className="p-3 rounded-xl bx-soft">
-            <span className="text-[11px] font-bold uppercase block" style={{ color: 'var(--text-2)' }}>
-              Account Age
-            </span>
-            <strong className="text-sm font-extrabold">
-              {formatAccountAge(listing.ageYears, listing.ageMonths)}
-            </strong>
-          </div>
-          {listing.platform === 'gaming' ? (
-            <>
-              <div className="p-3 rounded-xl bx-soft">
-                <span className="text-[11px] font-bold uppercase block" style={{ color: 'var(--text-2)' }}>
-                  Game
-                </span>
-                <strong className="text-sm font-extrabold truncate block">
-                  {listing.gameName || 'Gaming'}
-                </strong>
-              </div>
-              <div className="p-3 rounded-xl bx-soft">
-                <span className="text-[11px] font-bold uppercase block" style={{ color: 'var(--text-2)' }}>
-                  Game UID
-                </span>
-                <strong className="text-sm font-extrabold truncate block">
-                  {listing.gameUid || '—'}
-                </strong>
-              </div>
-              <div className="p-3 rounded-xl bx-soft">
-                <span className="text-[11px] font-bold uppercase block" style={{ color: 'var(--text-2)' }}>
-                  Level
-                </span>
-                <strong className="text-sm font-extrabold">{listing.gameLevel ?? listing.metricValue}</strong>
-              </div>
-            </>
-          ) : (
-            <>
-              <div className="p-3 rounded-xl bx-soft">
-                <span className="text-[11px] font-bold uppercase block" style={{ color: 'var(--text-2)' }}>
-                  {metricLabel}
-                </span>
-                <strong className="text-sm font-extrabold">
-                  {listing.metricValue.toLocaleString('en-US')}
-                </strong>
-              </div>
-              <div className="p-3 rounded-xl bx-soft">
-                <span className="text-[11px] font-bold uppercase block" style={{ color: 'var(--text-2)' }}>
-                  Monthly Revenue
-                </span>
-                <strong className="text-sm font-extrabold">
-                  {listing.monthlyRevenueMinor > 0
-                    ? formatMoneyFromMinor(
-                        listing.monthlyRevenueMinor,
-                        displayCurrency,
-                        listing.currency,
-                        settings.usdToBdtRate
-                      )
-                    : '—'}
-                </strong>
-              </div>
-              <div className="p-3 rounded-xl bx-soft">
-                <span className="text-[11px] font-bold uppercase block" style={{ color: 'var(--text-2)' }}>
-                  Protection Policy
-                </span>
-                <strong className="text-sm font-extrabold">
-                  {getProtectionDurationHours(listing.platform, settings)}h Escrow
-                </strong>
-              </div>
-            </>
-          )}
-        </div>
-
-        {/* Public Direct Account/Page URL — Visible to ALL Visitors including Logged-Out */}
-        {listing.accountUrl && (
-          <div className="p-3.5 rounded-xl bx-soft flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-            <div className="min-w-0">
-              <span className="text-xs font-extrabold block" style={{ color: 'var(--text-2)' }}>
-                Public Asset URL (Domain Matched · Seller Declared)
+          {/* Role-Based Bidding Room & Preserved Bid History */}
+          <div className="bx-card p-5 sm:p-6 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h2 className="text-base font-extrabold">
+                {isSellerOwner
+                  ? `Seller Bid Management & History (${visibleBids.length})`
+                  : `Live Bidding Room (${visibleBids.length})`}
+              </h2>
+              <span className="bx-hint">
+                {listing.status === 'reserved' && resolvedAcceptedBidMinor > 0
+                  ? `Accepted bid: ${formatMoneyFromMinor(
+                      resolvedAcceptedBidMinor,
+                      displayCurrency,
+                      listing.currency,
+                      settings.usdToBdtRate
+                    )}`
+                  : highestActiveBidMinor > 0
+                  ? `Highest active bid: ${formatMoneyFromMinor(
+                      highestActiveBidMinor,
+                      displayCurrency,
+                      listing.currency,
+                      settings.usdToBdtRate
+                    )}`
+                  : 'No arbitrary minimum increment'}
               </span>
-              <a
-                href={listing.accountUrl}
-                target="_blank"
-                rel="noopener noreferrer nofollow"
-                className="inline-flex items-center gap-1.5 text-sm font-bold underline break-all mt-0.5"
-                style={{ color: 'var(--orange)' }}
-              >
-                <span>{listing.accountUrl}</span>
-                <ExternalLink className="w-3.5 h-3.5 shrink-0" />
-              </a>
             </div>
-          </div>
-        )}
 
-        {/* Monetization Breakdown */}
-        {listing.monetizationStatus !== 'not_applicable' && (
-          <div className="space-y-2">
-            <h3 className="text-sm font-extrabold">Monetization Status</h3>
-            {listing.monetizationStatus === 'non-monetized' ? (
-              <div className="p-3 rounded-xl bx-soft text-xs font-semibold">
-                Non-Monetized — Seller declares no active monetization programs on this asset.
-              </div>
+            {!isSellerOwner && listing.status === 'active' && (
+              <form onSubmit={handleSubmitBid} className="flex flex-col sm:flex-row gap-2">
+                <label htmlFor="bx-listing-bid-input" className="sr-only">
+                  Enter your bid in {listing.currency}
+                </label>
+                <input
+                  id="bx-listing-bid-input"
+                  type="number"
+                  min="1"
+                  step="any"
+                  inputMode="decimal"
+                  value={bidAmount}
+                  onChange={(e) => {
+                    setBidAmount(e.target.value);
+                    setBidError('');
+                  }}
+                  placeholder={`Enter your bid in ${listing.currency}`}
+                  className="bx-input flex-1"
+                />
+                <button type="submit" disabled={busyAction} className="bx-btn bx-btn-primary">
+                  Place Bid
+                </button>
+              </form>
+            )}
+
+            {bidError && (
+              <p className="text-xs font-bold" style={{ color: 'var(--red)' }}>
+                {bidError}
+              </p>
+            )}
+
+            {visibleBids.length === 0 ? (
+              <p className="bx-hint">No bids recorded on this listing yet.</p>
             ) : (
-              <div className="space-y-1.5">
-                {listing.claimedOptions.map((optId) => {
-                  const isVerified = listing.verifiedOptions.includes(optId);
+              <div className="space-y-2">
+                {visibleBids.map((b) => {
+                  const isOwnBid = Boolean(userUid && b.buyerId === userUid);
+                  const isWithdrawingThis = withdrawingBidId === b.id;
+                  const isAcceptedAwaitingPay = isBidAcceptedAwaitingPaymentStatus(b.status);
+                  const linkedDealId =
+                    b.dealId || (isAcceptedAwaitingPay ? listing.activeDealId : undefined);
+                  const bidTotalWithFee = calculateAcceptedBidDealFinancials(
+                    b.amountMinor,
+                    settings,
+                    listing.priceMinor
+                  );
+
                   return (
                     <div
-                      key={optId}
-                      className="p-2.5 rounded-xl bx-soft flex items-center justify-between gap-2 text-xs font-bold"
+                      key={b.id}
+                      className="p-3 rounded-xl border flex flex-wrap items-center justify-between gap-3"
+                      style={{
+                        background: 'var(--surface-2)',
+                        borderColor:
+                          isAcceptedAwaitingPay || b.status === 'paid'
+                            ? 'var(--orange)'
+                            : 'var(--border-soft)',
+                      }}
                     >
-                      <span>{getMonetizationLabel(optId)}</span>
-                      <span
-                        style={{
-                          color: isVerified ? 'var(--green)' : 'var(--orange)',
-                        }}
-                      >
-                        {isVerified ? 'Active — Verified' : 'Seller Claimed (Pending Verification)'}
-                      </span>
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <div
+                          className="w-8 h-8 rounded-full grid place-items-center text-xs font-extrabold text-white shrink-0"
+                          style={{ background: isOwnBid ? 'var(--orange)' : 'var(--purple)' }}
+                        >
+                          {(b.buyerName || 'B').slice(0, 2).toUpperCase()}
+                        </div>
+                        <div className="min-w-0">
+                          <button
+                            type="button"
+                            onClick={() => onOpenPublicProfile(b.buyerId)}
+                            className="text-xs font-extrabold hover:underline flex items-center gap-1"
+                          >
+                            <span>{b.buyerName}</span>
+                            <span style={{ color: 'var(--text-3)' }}>@{b.buyerUsername}</span>
+                            {isOwnBid && <span style={{ color: 'var(--orange)' }}>(You)</span>}
+                            {b.buyerVerified && (
+                              <ShieldCheck className="w-3.5 h-3.5" style={{ color: 'var(--green)' }} />
+                            )}
+                          </button>
+                          <div className="text-xs tabular-nums font-bold">
+                            {formatMoneyFromMinor(
+                              b.amountMinor,
+                              displayCurrency,
+                              b.currency,
+                              settings.usdToBdtRate
+                            )}{' '}
+                            <span
+                              style={{
+                                color:
+                                  isAcceptedAwaitingPay || b.status === 'paid'
+                                    ? 'var(--orange)'
+                                    : 'var(--text-3)',
+                              }}
+                            >
+                              · {getBidStatusLabel(b.status)}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Context-Sensitive Role Controls */}
+                      <div className="flex flex-wrap items-center gap-2">
+                        {isOwnBid && b.status === 'pending' && (
+                          <button
+                            type="button"
+                            disabled={busyAction || isWithdrawingThis}
+                            onClick={() => handleWithdrawBid(b)}
+                            className="bx-btn bx-btn-sm bx-btn-danger"
+                          >
+                            {isWithdrawingThis ? 'Withdrawing…' : 'Withdraw'}
+                          </button>
+                        )}
+
+                        {isOwnBid && (isAcceptedAwaitingPay || b.status === 'paid') && linkedDealId && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (isAcceptedAwaitingPay) {
+                                onStartDealCheckout(linkedDealId, listing.title);
+                              } else {
+                                onDealOpened(linkedDealId, 'Opened funded 3-Party Deal Room.');
+                              }
+                            }}
+                            className="bx-btn bx-btn-sm bx-btn-primary"
+                          >
+                            <span>
+                              {isAcceptedAwaitingPay
+                                ? `Pay Accepted Bid (${formatMoneyFromMinor(
+                                    bidTotalWithFee.buyerTotalMinor,
+                                    displayCurrency,
+                                    b.currency,
+                                    settings.usdToBdtRate
+                                  )})`
+                                : 'Open Deal Room'}
+                            </span>
+                            <ArrowRight className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+
+                        {isSellerOwner && (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => onStartChatWithUser(b.buyerId, b.buyerName, listing)}
+                              className="bx-btn bx-btn-sm"
+                            >
+                              <MessageSquare className="w-3.5 h-3.5" />
+                              <span>Message</span>
+                            </button>
+                            {(isAcceptedAwaitingPay || b.status === 'paid') && linkedDealId && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  onDealOpened(linkedDealId, 'Opened Deal Room for accepted bid.')
+                                }
+                                className="bx-btn bx-btn-sm bx-btn-primary"
+                              >
+                                <span>Open Deal Room</span>
+                                <ArrowRight className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                            {b.status === 'pending' && listing.status === 'active' && (
+                              <>
+                                <button
+                                  type="button"
+                                  disabled={busyAction}
+                                  onClick={() => handleSellerAcceptBid(b)}
+                                  className="bx-btn bx-btn-sm bx-btn-primary"
+                                >
+                                  <Check className="w-3.5 h-3.5" />
+                                  <span>Accept Bid</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={busyAction}
+                                  onClick={() => handleSellerRejectBid(b)}
+                                  className="bx-btn bx-btn-sm bx-btn-danger"
+                                >
+                                  Reject
+                                </button>
+                              </>
+                            )}
+                          </>
+                        )}
+                      </div>
                     </div>
                   );
                 })}
               </div>
             )}
           </div>
-        )}
-
-        {/* Description */}
-        <div>
-          <h3 className="text-sm font-extrabold mb-1.5">Asset Description</h3>
-          <p className="text-sm leading-relaxed whitespace-pre-line" style={{ color: 'var(--text-2)' }}>
-            {listing.description}
-          </p>
-        </div>
-
-        {/* Seller Card + Direct Message Action */}
-        <div className="p-4 rounded-xl bx-soft flex items-center justify-between gap-3 flex-wrap">
-          <button
-            type="button"
-            onClick={() => {
-              onClose();
-              onOpenPublicProfile(listing.sellerId);
-            }}
-            className="flex items-center gap-3 text-left hover:underline"
-          >
-            <div
-              className="w-10 h-10 rounded-full grid place-items-center font-extrabold text-sm text-white shrink-0"
-              style={{ background: 'var(--purple)' }}
-            >
-              {(listing.sellerName || 'S').slice(0, 2).toUpperCase()}
-            </div>
-            <div>
-              <div className="flex items-center gap-1.5 font-extrabold text-sm">
-                <span>{listing.sellerName}</span>
-                {listing.sellerVerified && (
-                  <ShieldCheck className="w-4 h-4" style={{ color: 'var(--green)' }} />
-                )}
-              </div>
-              <span className="bx-hint">@{listing.sellerUsername} · View Public Profile</span>
-            </div>
-          </button>
-
-          {!isSellerOwner && (
-            <button
-              type="button"
-              onClick={() => {
-                if (!userUid) {
-                  onRequireAuth();
-                  return;
-                }
-                onStartChatWithUser(listing.sellerId, listing.sellerName, listing);
-              }}
-              className="bx-btn bx-btn-sm"
-            >
-              <MessageSquare className="w-4 h-4" />
-              <span>Message Seller</span>
-            </button>
-          )}
-        </div>
-
-        {/* Transparent Commission & Escrow Purchase Module */}
-        <div className="p-4 rounded-xl bx-soft space-y-2 text-sm tabular-nums">
-          {listing.status === 'reserved' && resolvedAcceptedBidMinor > 0 && (
-            <div className="flex justify-between text-xs pb-1">
-              <span style={{ color: 'var(--text-2)' }}>Original Listing Price</span>
-              <span className="line-through opacity-75">
-                {formatMoneyFromMinor(
-                  listing.priceMinor,
-                  displayCurrency,
-                  listing.currency,
-                  settings.usdToBdtRate
-                )}
-              </span>
-            </div>
-          )}
-          <div className="flex justify-between">
-            <span style={{ color: 'var(--text-2)' }}>
-              {listing.status === 'reserved' && resolvedAcceptedBidMinor > 0
-                ? 'Accepted Bid Price'
-                : 'Base Asset Price'}
-            </span>
-            <strong>
-              {formatMoneyFromMinor(
-                breakdown.baseAmountMinor,
-                displayCurrency,
-                listing.currency,
-                settings.usdToBdtRate
-              )}
-            </strong>
-          </div>
-          <div className="flex justify-between">
-            <span style={{ color: 'var(--text-2)' }}>
-              Buyer Platform Fee ({breakdown.buyerFeePct}%)
-            </span>
-            <strong>
-              {formatMoneyFromMinor(
-                breakdown.buyerFeeMinor,
-                displayCurrency,
-                listing.currency,
-                settings.usdToBdtRate
-              )}
-            </strong>
-          </div>
-          <div className="h-px my-1" style={{ background: 'var(--border-soft)' }} />
-          <div className="flex justify-between text-base font-extrabold">
-            <span>Total Buyer Payment</span>
-            <span>
-              {formatMoneyFromMinor(
-                breakdown.buyerTotalMinor,
-                displayCurrency,
-                listing.currency,
-                settings.usdToBdtRate
-              )}
-            </span>
-          </div>
-          {isSellerOwner && (
-            <p className="bx-hint pt-1">
-              Seller Payout Preview: Agreed price minus {breakdown.sellerFeePct}% seller fee ={' '}
-              <strong>
-                {formatMoneyFromMinor(
-                  breakdown.sellerPayoutMinor,
-                  displayCurrency,
-                  listing.currency,
-                  settings.usdToBdtRate
-                )}
-              </strong>{' '}
-              net payout after security countdown completion.
-            </p>
-          )}
-        </div>
-
-        {/* Reserved Pending Payment Status Banner & Direct Actions */}
-        {listing.status === 'reserved' && (
-          <div
-            className="p-4 rounded-xl border space-y-3"
-            style={{
-              background: 'var(--surface)',
-              borderColor: 'var(--orange)',
-            }}
-          >
-            <div className="flex items-start gap-2.5">
-              <Lock className="w-4 h-4 shrink-0 mt-0.5" style={{ color: 'var(--orange)' }} />
-              <div className="space-y-1 text-xs">
-                <div className="font-extrabold text-sm" style={{ color: 'var(--orange)' }}>
-                  Reserved — Pending Buyer Payment
-                </div>
-                <p style={{ color: 'var(--text-2)' }}>
-                  {isReservedBuyer
-                    ? `Your bid was accepted! Pay the exact agreed total (${formatMoneyFromMinor(
-                        breakdown.buyerTotalMinor,
-                        displayCurrency,
-                        listing.currency,
-                        settings.usdToBdtRate
-                      )}) in the Deal Room to lock funds in Escrow.`
-                    : isSellerOwner
-                    ? 'You accepted a bid on this listing. Both the listing and the accepted bid remain preserved while awaiting buyer wallet payment. Conflicting Buy Now purchases and duplicate bid acceptances are locked.'
-                    : 'A buyer bid has been accepted on this listing and is currently awaiting escrow payment. Conflicting purchases are locked while this reservation is active.'}
-                </p>
-              </div>
-            </div>
-
-            {(isReservedBuyer || isSellerOwner) && (
-              <div className="flex flex-wrap items-center gap-2 pt-1">
-                {resolvedActiveDealId && (
-                  <button
-                    type="button"
-                    disabled={busyAction}
-                    onClick={() =>
-                      onDealOpened(
-                        resolvedActiveDealId,
-                        isReservedBuyer
-                          ? 'Complete your exact accepted-bid wallet payment to activate the 3-Party Deal Room.'
-                          : 'Opened reserved Deal Room.'
-                      )
-                    }
-                    className="bx-btn bx-btn-primary bx-btn-sm"
-                  >
-                    <span>
-                      {isReservedBuyer
-                        ? `Pay Accepted Bid (${formatMoneyFromMinor(
-                            breakdown.buyerTotalMinor,
-                            displayCurrency,
-                            listing.currency,
-                            settings.usdToBdtRate
-                          )})`
-                        : 'Open Reserved Deal Room'}
-                    </span>
-                    <ArrowRight className="w-3.5 h-3.5" />
-                  </button>
-                )}
-                <button
-                  type="button"
-                  disabled={busyAction}
-                  onClick={handleCancelUnpaidReservation}
-                  className="bx-btn bx-btn-sm bx-btn-danger"
-                >
-                  <RotateCcw className="w-3.5 h-3.5" />
-                  <span>Cancel Unpaid Reservation &amp; Restore Listing</span>
-                </button>
-              </div>
-            )}
-          </div>
-        )}
-
-        {!isSellerOwner && listing.status === 'active' && (
-          <button
-            type="button"
-            disabled={busyAction}
-            onClick={handleBuyNow}
-            className="bx-btn bx-btn-yellow w-full text-base"
-          >
-            <span>
-              {busyAction
-                ? 'Processing Escrow Purchase…'
-                : `Buy Now with Wallet — ${formatMoneyFromMinor(
-                    breakdown.buyerTotalMinor,
-                    displayCurrency,
-                    listing.currency,
-                    settings.usdToBdtRate
-                  )}`}
-            </span>
-          </button>
-        )}
-
-        {/* Role-Based Bidding Room & Preserved Bid History */}
-        <div className="p-4 rounded-xl bx-soft space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <h3 className="text-sm font-extrabold">
-              {isSellerOwner
-                ? `Seller Bid Management & History (${visibleBids.length})`
-                : `Live Bidding Room (${visibleBids.length})`}
-            </h3>
-            <span className="bx-hint">
-              {listing.status === 'reserved' && resolvedAcceptedBidMinor > 0
-                ? `Accepted bid: ${formatMoneyFromMinor(
-                    resolvedAcceptedBidMinor,
-                    displayCurrency,
-                    listing.currency,
-                    settings.usdToBdtRate
-                  )}`
-                : highestActiveBidMinor > 0
-                ? `Highest active bid: ${formatMoneyFromMinor(
-                    highestActiveBidMinor,
-                    displayCurrency,
-                    listing.currency,
-                    settings.usdToBdtRate
-                  )}`
-                : 'No arbitrary minimum increment'}
-            </span>
-          </div>
-
-          {!isSellerOwner && listing.status === 'active' && (
-            <form onSubmit={handleSubmitBid} className="flex flex-col sm:flex-row gap-2">
-              <input
-                type="number"
-                min="1"
-                step="any"
-                inputMode="decimal"
-                value={bidAmount}
-                onChange={(e) => {
-                  setBidAmount(e.target.value);
-                  setBidError('');
-                }}
-                placeholder={`Enter your bid in ${listing.currency}`}
-                className="bx-input flex-1"
-              />
-              <button type="submit" disabled={busyAction} className="bx-btn bx-btn-primary">
-                Place Bid
-              </button>
-            </form>
-          )}
-
-          {bidError && (
-            <p className="text-xs font-bold" style={{ color: 'var(--red)' }}>
-              {bidError}
-            </p>
-          )}
-
-          {visibleBids.length === 0 ? (
-            <p className="bx-hint">No bids recorded on this listing yet.</p>
-          ) : (
-            <div className="space-y-2">
-              {visibleBids.map((b) => {
-                const isOwnBid = Boolean(userUid && b.buyerId === userUid);
-                const isWithdrawingThis = withdrawingBidId === b.id;
-                const isAcceptedAwaitingPay = isBidAcceptedAwaitingPaymentStatus(b.status);
-                const linkedDealId = b.dealId || (isAcceptedAwaitingPay ? listing.activeDealId : undefined);
-                const bidTotalWithFee = calculateAcceptedBidDealFinancials(
-                  b.amountMinor,
-                  settings,
-                  listing.priceMinor
-                );
-
-                return (
-                  <div
-                    key={b.id}
-                    className="p-3 rounded-xl border flex flex-wrap items-center justify-between gap-3"
-                    style={{
-                      background: 'var(--surface)',
-                      borderColor:
-                        isAcceptedAwaitingPay || b.status === 'paid'
-                          ? 'var(--orange)'
-                          : 'var(--border-soft)',
-                    }}
-                  >
-                    <div className="flex items-center gap-2.5 min-w-0">
-                      <div
-                        className="w-8 h-8 rounded-full grid place-items-center text-xs font-extrabold text-white shrink-0"
-                        style={{ background: isOwnBid ? 'var(--orange)' : 'var(--purple)' }}
-                      >
-                        {(b.buyerName || 'B').slice(0, 2).toUpperCase()}
-                      </div>
-                      <div className="min-w-0">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            onClose();
-                            onOpenPublicProfile(b.buyerId);
-                          }}
-                          className="text-xs font-extrabold hover:underline flex items-center gap-1"
-                        >
-                          <span>{b.buyerName}</span>
-                          <span style={{ color: 'var(--text-3)' }}>@{b.buyerUsername}</span>
-                          {isOwnBid && <span style={{ color: 'var(--orange)' }}>(You)</span>}
-                          {b.buyerVerified && (
-                            <ShieldCheck className="w-3.5 h-3.5" style={{ color: 'var(--green)' }} />
-                          )}
-                        </button>
-                        <div className="text-xs tabular-nums font-bold">
-                          {formatMoneyFromMinor(
-                            b.amountMinor,
-                            displayCurrency,
-                            b.currency,
-                            settings.usdToBdtRate
-                          )}{' '}
-                          <span
-                            style={{
-                              color:
-                                isAcceptedAwaitingPay || b.status === 'paid'
-                                  ? 'var(--orange)'
-                                  : 'var(--text-3)',
-                            }}
-                          >
-                            · {getBidStatusLabel(b.status)}
-                          </span>
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Context-Sensitive Role Controls */}
-                    <div className="flex flex-wrap items-center gap-2">
-                      {isOwnBid && b.status === 'pending' && (
-                        <button
-                          type="button"
-                          disabled={busyAction || isWithdrawingThis}
-                          onClick={() => handleWithdrawBid(b)}
-                          className="bx-btn bx-btn-sm bx-btn-danger"
-                        >
-                          {isWithdrawingThis ? 'Withdrawing…' : 'Withdraw'}
-                        </button>
-                      )}
-
-                      {isOwnBid && (isAcceptedAwaitingPay || b.status === 'paid') && linkedDealId && (
-                        <button
-                          type="button"
-                          onClick={() =>
-                            onDealOpened(
-                              linkedDealId,
-                              isAcceptedAwaitingPay
-                                ? `Pay ${formatMoneyFromMinor(
-                                    bidTotalWithFee.buyerTotalMinor,
-                                    displayCurrency,
-                                    b.currency,
-                                    settings.usdToBdtRate
-                                  )} in Deal Room.`
-                                : 'Opened funded 3-Party Deal Room.'
-                            )
-                          }
-                          className="bx-btn bx-btn-sm bx-btn-primary"
-                        >
-                          <span>{isAcceptedAwaitingPay ? 'Pay Accepted Bid' : 'Open Deal Room'}</span>
-                          <ArrowRight className="w-3.5 h-3.5" />
-                        </button>
-                      )}
-
-                      {isSellerOwner && (
-                        <>
-                          <button
-                            type="button"
-                            onClick={() => onStartChatWithUser(b.buyerId, b.buyerName, listing)}
-                            className="bx-btn bx-btn-sm"
-                          >
-                            <MessageSquare className="w-3.5 h-3.5" />
-                            <span>Message</span>
-                          </button>
-                          {(isAcceptedAwaitingPay || b.status === 'paid') && linkedDealId && (
-                            <button
-                              type="button"
-                              onClick={() => onDealOpened(linkedDealId, 'Opened Deal Room for accepted bid.')}
-                              className="bx-btn bx-btn-sm bx-btn-primary"
-                            >
-                              <span>Open Deal Room</span>
-                              <ArrowRight className="w-3.5 h-3.5" />
-                            </button>
-                          )}
-                          {b.status === 'pending' && listing.status === 'active' && (
-                            <>
-                              <button
-                                type="button"
-                                disabled={busyAction}
-                                onClick={() => handleSellerAcceptBid(b)}
-                                className="bx-btn bx-btn-sm bx-btn-primary"
-                              >
-                                <Check className="w-3.5 h-3.5" />
-                                <span>Accept Bid</span>
-                              </button>
-                              <button
-                                type="button"
-                                disabled={busyAction}
-                                onClick={() => handleSellerRejectBid(b)}
-                                className="bx-btn bx-btn-sm bx-btn-danger"
-                              >
-                                Reject
-                              </button>
-                            </>
-                          )}
-                        </>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
         </div>
       </div>
-    </div>
+    </section>
   );
 };

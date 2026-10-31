@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ShieldCheck } from 'lucide-react';
+import { Heart, ShieldCheck } from 'lucide-react';
 import { CurrencyCode, MarketplaceListing } from '../types';
 import {
   formatAccountAge,
@@ -15,6 +15,8 @@ interface ListingCardProps {
   usdToBdtRate: number;
   onOpen: (l: MarketplaceListing) => void;
   onOpenSellerProfile?: (sellerId: string) => void;
+  isFavorited?: boolean;
+  onToggleFavorite?: (l: MarketplaceListing) => void;
 }
 
 export const ListingCard: React.FC<ListingCardProps> = ({
@@ -23,6 +25,8 @@ export const ListingCard: React.FC<ListingCardProps> = ({
   usdToBdtRate,
   onOpen,
   onOpenSellerProfile,
+  isFavorited = false,
+  onToggleFavorite,
 }) => {
   const [imgFailed, setImgFailed] = useState(false);
   const platformDef = PLATFORM_CATALOG[listing.platform];
@@ -52,42 +56,73 @@ export const ListingCard: React.FC<ListingCardProps> = ({
 
   return (
     <article className="bx-card overflow-hidden flex flex-col min-w-0 hover:-translate-y-0.5">
-      {/* 16:10 Media Showcase with Zero-Broken-Image Resilient Fallback */}
-      <button
-        type="button"
-        onClick={() => onOpen(listing)}
-        className="relative aspect-[16/10] w-full overflow-hidden flex items-center justify-center text-left"
-        style={{ background: PLATFORM_BANNER_BG[listing.platform] }}
-        aria-label={`Open listing ${listing.title}`}
-      >
-        {hasImage ? (
-          <img
-            src={listing.images[0]}
-            alt={listing.title}
-            referrerPolicy="no-referrer"
-            onError={() => setImgFailed(true)}
-            className="w-full h-full object-cover"
-          />
-        ) : (
-          <div className="flex flex-col items-center justify-center gap-2 text-white">
-            <PlatformIcon id={listing.platform} size={44} />
-            <span className="text-xs font-extrabold tracking-wide uppercase opacity-90">
-              {listing.subcategory || platformDef.name}
-            </span>
-          </div>
+      {/* 16:10 Media Showcase with Zero-Broken-Image Resilient Fallback + Save to Favorites Heart */}
+      <div className="relative aspect-[16/10] w-full overflow-hidden">
+        <button
+          type="button"
+          onClick={() => onOpen(listing)}
+          className="w-full h-full flex items-center justify-center text-left"
+          style={{ background: PLATFORM_BANNER_BG[listing.platform] }}
+          aria-label={`Open listing ${listing.title}`}
+        >
+          {hasImage ? (
+            <img
+              src={listing.images[0]}
+              alt={listing.title}
+              referrerPolicy="no-referrer"
+              onError={() => setImgFailed(true)}
+              className="w-full h-full object-cover"
+            />
+          ) : (
+            <div className="flex flex-col items-center justify-center gap-2 text-white">
+              <PlatformIcon id={listing.platform} size={44} />
+              <span className="text-xs font-extrabold tracking-wide uppercase opacity-90">
+                {listing.subcategory || platformDef.name}
+              </span>
+            </div>
+          )}
+          {isReserved && (
+            <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/85 via-black/65 to-transparent px-3 py-2 text-[11px] font-bold text-amber-300">
+              Reserved — Pending Buyer Payment
+            </div>
+          )}
+        </button>
+
+        {onToggleFavorite && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggleFavorite(listing);
+            }}
+            aria-label={
+              isFavorited
+                ? `Remove ${listing.title} from favorites`
+                : `Save ${listing.title} to favorites`
+            }
+            aria-pressed={isFavorited}
+            title={isFavorited ? 'Saved in Favorites — click to remove' : 'Save to Favorites'}
+            className="absolute top-2.5 right-2.5 z-10 w-10 h-10 rounded-full grid place-items-center border transition-transform hover:scale-105 active:scale-95"
+            style={{
+              background: isFavorited ? '#FFE4E6' : 'rgba(18, 18, 22, 0.72)',
+              borderColor: isFavorited ? '#E11D48' : 'rgba(255, 255, 255, 0.28)',
+              color: isFavorited ? '#E11D48' : '#FFFFFF',
+            }}
+          >
+            <Heart className={`w-4 h-4 ${isFavorited ? 'fill-current' : ''}`} />
+          </button>
         )}
-        {isReserved && (
-          <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/85 via-black/65 to-transparent px-3 py-2 text-[11px] font-bold text-amber-300">
-            Reserved — Pending Buyer Payment
-          </div>
-        )}
-      </button>
+      </div>
 
       {/* Card Body — Clean Unboxed Metadata Discipline */}
       <div className="p-4 flex flex-col gap-2.5 flex-1 min-w-0">
-        <div className="flex items-center gap-1.5 text-xs font-semibold truncate" style={{ color: 'var(--text-2)' }}>
-          <span>{platformDef.name}</span>
-          <span aria-hidden="true">·</span>
+        <div className="flex items-center gap-1.5 text-xs font-semibold flex-wrap" style={{ color: 'var(--text-2)' }}>
+          {!listing.subcategory.toLowerCase().startsWith(platformDef.name.toLowerCase()) && (
+            <>
+              <span>{platformDef.name}</span>
+              <span aria-hidden="true">·</span>
+            </>
+          )}
           <span>{listing.subcategory}</span>
           <span aria-hidden="true">·</span>
           <span>{formatAccountAge(listing.ageYears, listing.ageMonths)}</span>

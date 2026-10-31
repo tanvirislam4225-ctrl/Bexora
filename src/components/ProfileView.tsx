@@ -10,9 +10,11 @@ import {
 } from 'firebase/auth';
 import {
   collection,
+  deleteField,
   doc,
   getDoc,
   getDocs,
+  onSnapshot,
   query,
   runTransaction,
   serverTimestamp,
@@ -21,12 +23,15 @@ import {
 } from 'firebase/firestore';
 import {
   ArrowLeft,
+  Bell,
   Camera,
   CheckCircle2,
   Clock,
   Eye,
   EyeOff,
   FileCheck2,
+  Gavel,
+  Heart,
   KeyRound,
   Mail,
   MapPin,
@@ -38,16 +43,21 @@ import {
   Star,
   Upload,
   UserCheck,
+  UserPlus,
+  Users,
   Wallet,
 } from 'lucide-react';
 import {
   BidRecord,
   CurrencyCode,
+  DealRecord,
+  FavoriteRecord,
   IdentityVerificationRecord,
   MarketplaceListing,
   PrivateUser,
   PublicProfile,
   ReviewRecord,
+  SellerFollowRecord,
 } from '../types';
 import {
   auth,
@@ -63,11 +73,14 @@ import {
   calculateAverageRating,
   formatMoneyFromMinor,
   getBidStatusLabel,
+  getListingStatusBadgeMeta,
   isBidAcceptedAwaitingPaymentStatus,
   normalizeUsername,
   validateStrongPassword,
   validateUsername,
 } from '../lib/marketplaceLogic';
+import { resolveSellerFollowerCount } from '../lib/engagementLogic';
+import type { FollowTargetSellerSummary } from '../lib/engagementService';
 import { ListingCard } from './ListingCard';
 import { emitUserNotification } from '../lib/notificationService';
 
@@ -79,11 +92,23 @@ interface OwnerProfileProps {
   myListings: MarketplaceListing[];
   myBids?: BidRecord[];
   activeListings?: MarketplaceListing[];
+  favorites?: ReadonlyArray<FavoriteRecord>;
+  followedSellers?: ReadonlyArray<SellerFollowRecord>;
+  deals?: ReadonlyArray<DealRecord>;
+  unreadNotificationCount?: number;
+  favoriteListingIds?: ReadonlySet<string>;
+  onToggleFavorite?: (l: MarketplaceListing) => void;
   displayCurrency: CurrencyCode;
   usdToBdtRate: number;
   onOpenListing: (l: MarketplaceListing) => void;
+  onEditListing?: (l: MarketplaceListing) => void;
   onOpenListingById?: (listingId: string) => void;
   onOpenDeal?: (dealId: string) => void;
+  onOpenFavoritesPage?: () => void;
+  onOpenMyBidsPage?: () => void;
+  onOpenFollowingPage?: () => void;
+  onOpenDealsPage?: () => void;
+  onOpenNotificationCenter?: () => void;
   onOpenWallet: () => void;
   onOpenPublicSelf: () => void;
   onAuthTokenRefreshed?: () => Promise<void> | void;
@@ -94,6 +119,10 @@ interface VisitorProfileProps {
   mode: 'visitor';
   targetUid: string;
   viewerUid: string | null;
+  isFollowingSeller?: boolean;
+  onToggleFollowSeller?: (seller: FollowTargetSellerSummary) => void;
+  favoriteListingIds?: ReadonlySet<string>;
+  onToggleFavorite?: (l: MarketplaceListing) => void;
   displayCurrency: CurrencyCode;
   usdToBdtRate: number;
   onBack: () => void;
@@ -113,6 +142,10 @@ export const ProfileView: React.FC<ProfileViewProps> = (props) => {
 const VisitorProfileSection: React.FC<VisitorProfileProps> = ({
   targetUid,
   viewerUid,
+  isFollowingSeller = false,
+  onToggleFollowSeller,
+  favoriteListingIds,
+  onToggleFavorite,
   displayCurrency,
   usdToBdtRate,
   onBack,
@@ -126,11 +159,12 @@ const VisitorProfileSection: React.FC<VisitorProfileProps> = ({
 
   useEffect(() => {
     let active = true;
-    async function loadPublicData() {
-      setLoading(true);
-      try {
-        // Strictly read ONLY public collections (zero privateUsers or identityVerifications reads)
-        const pubSnap = await getDoc(doc(db, 'publicProfiles', targetUid));
+    setLoading(true);
+
+    // Real-time public profile subscription so followerCount updates immediately on Follow/Unfollow
+    const unsubPub = onSnapshot(
+      doc(db, 'publicProfiles', targetUid),
+      (pubSnap) => {
         if (!active) return;
         if (pubSnap.exists()) {
           const d = pubSnap.data();
@@ -148,11 +182,21 @@ const VisitorProfileSection: React.FC<VisitorProfileProps> = ({
             completedPurchases: Number(d.completedPurchases || 0),
             ratingSum: Number(d.ratingSum || 0),
             ratingCount: Number(d.ratingCount || 0),
+            followerCount: d.followerCount !== undefined ? Number(d.followerCount || 0) : 0,
           });
         } else {
           setPubProfile(null);
         }
+        setLoading(false);
+      },
+      (err) => {
+        console.error('Error subscribing to public profile:', err);
+        if (active) setLoading(false);
+      }
+    );
 
+    async function loadListingsAndReviews() {
+      try {
         const listQ = query(
           collection(db, 'listings'),
           where('sellerId', '==', targetUid),
@@ -218,14 +262,13 @@ const VisitorProfileSection: React.FC<VisitorProfileProps> = ({
         loadedReviews.sort((a, b) => b.createdAtMs - a.createdAtMs);
         setReviews(loadedReviews);
       } catch (err) {
-        console.error('Error loading public profile:', err);
-      } finally {
-        if (active) setLoading(false);
+        console.error('Error loading public listings/reviews:', err);
       }
     }
-    loadPublicData();
+    void loadListingsAndReviews();
     return () => {
       active = false;
+      unsubPub();
     };
   }, [targetUid]);
 
@@ -317,35 +360,78 @@ const VisitorProfileSection: React.FC<VisitorProfileProps> = ({
             </div>
           </div>
 
-          {viewerUid !== targetUid && sellerListings.length > 0 && (
-            <button
-              type="button"
-              onClick={() => onMessageSeller(pubProfile.uid, pubProfile.displayName, sellerListings[0])}
-              className="bx-btn bx-btn-primary px-5 py-2.5 text-sm font-extrabold inline-flex items-center gap-2"
-            >
-              <MessageSquare className="w-4 h-4" />
-              Message Seller
-            </button>
+          {viewerUid !== targetUid && (
+            <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+              {onToggleFollowSeller && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    onToggleFollowSeller({
+                      uid: pubProfile.uid,
+                      displayName: pubProfile.displayName,
+                      username: pubProfile.username,
+                      avatarUrl: pubProfile.avatarUrl,
+                      nidVerified: pubProfile.nidVerified,
+                    })
+                  }
+                  aria-pressed={isFollowingSeller}
+                  aria-label={
+                    isFollowingSeller
+                      ? `Unfollow seller ${pubProfile.displayName}`
+                      : `Follow seller ${pubProfile.displayName}`
+                  }
+                  className={`bx-btn px-4 py-2.5 text-sm font-extrabold inline-flex items-center gap-2 whitespace-nowrap ${
+                    isFollowingSeller ? 'bx-btn-ghost' : 'bx-btn-primary'
+                  }`}
+                >
+                  {isFollowingSeller ? (
+                    <>
+                      <UserCheck className="w-4 h-4 text-[var(--green)]" />
+                      <span>Following</span>
+                    </>
+                  ) : (
+                    <>
+                      <UserPlus className="w-4 h-4" />
+                      <span>Follow Seller</span>
+                    </>
+                  )}
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => onMessageSeller(pubProfile.uid, pubProfile.displayName, sellerListings[0])}
+                className="bx-btn bx-btn-ghost px-4 py-2.5 text-sm font-extrabold inline-flex items-center gap-2 whitespace-nowrap"
+              >
+                <MessageSquare className="w-4 h-4 text-[#FF6500]" />
+                <span>Message Seller</span>
+              </button>
+            </div>
           )}
         </div>
 
         <div className="px-6 sm:px-8 pb-6 space-y-6">
           {pubProfile.bio && <p className="text-sm leading-relaxed max-w-3xl">{pubProfile.bio}</p>}
 
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2">
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 pt-2">
+            <div className="p-3.5 border-2 border-[var(--bx-border)] bg-[var(--bx-surface-alt)]">
+              <div className="text-xs font-bold uppercase opacity-70">Followers</div>
+              <div className="text-xl font-black mt-1 tabular-nums">
+                {resolveSellerFollowerCount(pubProfile)}
+              </div>
+            </div>
             <div className="p-3.5 border-2 border-[var(--bx-border)] bg-[var(--bx-surface-alt)]">
               <div className="text-xs font-bold uppercase opacity-70">Completed Sales</div>
-              <div className="text-xl font-black mt-1">{pubProfile.completedSales}</div>
+              <div className="text-xl font-black mt-1 tabular-nums">{pubProfile.completedSales}</div>
             </div>
             <div className="p-3.5 border-2 border-[var(--bx-border)] bg-[var(--bx-surface-alt)]">
               <div className="text-xs font-bold uppercase opacity-70">Completed Purchases</div>
-              <div className="text-xl font-black mt-1">{pubProfile.completedPurchases}</div>
+              <div className="text-xl font-black mt-1 tabular-nums">{pubProfile.completedPurchases}</div>
             </div>
             <div className="p-3.5 border-2 border-[var(--bx-border)] bg-[var(--bx-surface-alt)]">
               <div className="text-xs font-bold uppercase opacity-70">Active Listings</div>
-              <div className="text-xl font-black mt-1">{sellerListings.length}</div>
+              <div className="text-xl font-black mt-1 tabular-nums">{sellerListings.length}</div>
             </div>
-            <div className="p-3.5 border-2 border-[var(--bx-border)] bg-[var(--bx-surface-alt)]">
+            <div className="p-3.5 border-2 border-[var(--bx-border)] bg-[var(--bx-surface-alt)] col-span-2 sm:col-span-1">
               <div className="text-xs font-bold uppercase opacity-70">Seller Rating</div>
               <div className="text-base font-black mt-1 flex items-center gap-1.5">
                 <Star className="w-4 h-4 text-[#FF6500] fill-[#FF6500]" />
@@ -372,6 +458,8 @@ const VisitorProfileSection: React.FC<VisitorProfileProps> = ({
                 displayCurrency={displayCurrency}
                 usdToBdtRate={usdToBdtRate}
                 onOpen={onOpenListing}
+                isFavorited={favoriteListingIds ? favoriteListingIds.has(item.id) : false}
+                onToggleFavorite={onToggleFavorite}
               />
             ))}
           </div>
@@ -415,18 +503,32 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
   myListings,
   myBids = [],
   activeListings = [],
+  favorites = [],
+  followedSellers = [],
+  deals = [],
+  unreadNotificationCount = 0,
+  favoriteListingIds,
+  onToggleFavorite,
   displayCurrency,
   usdToBdtRate,
   onOpenListing,
+  onEditListing,
   onOpenListingById,
   onOpenDeal,
+  onOpenFavoritesPage,
+  onOpenMyBidsPage,
+  onOpenFollowingPage,
+  onOpenDealsPage,
+  onOpenNotificationCenter,
   onOpenWallet,
   onOpenPublicSelf,
   onAuthTokenRefreshed,
   onFlash,
 }) => {
   const [activeTab, setActiveTab] = useState<OwnerTab>('overview');
-  const [listingFilter, setListingFilter] = useState<'all' | 'active' | 'reserved' | 'pending' | 'draft' | 'rejected' | 'sold'>('all');
+  const [listingFilter, setListingFilter] = useState<
+    'all' | 'active' | 'reserved' | 'pending' | 'draft' | 'rejected' | 'suspended' | 'sold'
+  >('all');
   const [reviews, setReviews] = useState<ReviewRecord[]>([]);
 
   // Edit Profile State
@@ -885,7 +987,7 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
     if (!file) return;
     setNidErr('');
     try {
-      const compressed = await validateAndProcessImageFile(file, 1024, 0.78);
+      const compressed = await validateAndProcessImageFile(file, 1100, 0.72, 155_000);
       setNidFrontData(compressed);
       setNidFrontName(file.name);
     } catch (err) {
@@ -900,7 +1002,7 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
     if (!file) return;
     setNidErr('');
     try {
-      const compressed = await validateAndProcessImageFile(file, 1024, 0.78);
+      const compressed = await validateAndProcessImageFile(file, 1100, 0.72, 155_000);
       setNidBackData(compressed);
       setNidBackName(file.name);
     } catch (err) {
@@ -947,6 +1049,8 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
             frontImageData: nidFrontData,
             backImageData: nidBackData,
             status: 'pending_review',
+            rejectionReason: deleteField(),
+            reviewedBy: deleteField(),
             submittedAt: serverTimestamp(),
             updatedAt: serverTimestamp(),
           });
@@ -954,6 +1058,7 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
 
         tx.update(privRef, {
           nidStatus: 'pending_review',
+          nidRejectionReason: deleteField(),
           updatedAt: serverTimestamp(),
         });
       });
@@ -974,7 +1079,7 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
 
       onFlash('NID Front & Back documents submitted privately for Admin Review.');
     } catch (err) {
-      setNidErr(err instanceof Error ? err.message : 'Failed to submit NID documents.');
+      setNidErr(extractUserFacingFirestoreError(err, 'Failed to submit NID documents.'));
     } finally {
       setNidBusy(false);
     }
@@ -1086,42 +1191,237 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
 
       {/* TAB: OVERVIEW */}
       {activeTab === 'overview' && (
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
-          <div className="bx-card p-5 space-y-2">
-            <h2 className="text-sm font-black uppercase tracking-wide opacity-75">Trade Summary</h2>
-            <div className="text-2xl font-black">{profile.completedSales + profile.completedPurchases}</div>
-            <p className="text-xs opacity-75">
-              {profile.completedSales} Completed Sales · {profile.completedPurchases} Completed Purchases
-            </p>
-          </div>
-          <div className="bx-card p-5 space-y-2">
-            <h2 className="text-sm font-black uppercase tracking-wide opacity-75">Security & Verification</h2>
-            <ul className="text-xs font-bold space-y-1.5">
-              <li className="flex items-center justify-between">
-                <span>Email Verification:</span>
-                <span className={privateUser.emailVerified || auth.currentUser?.emailVerified ? 'text-emerald-600' : 'text-amber-600'}>
-                  {privateUser.emailVerified || auth.currentUser?.emailVerified ? 'Verified' : 'Unverified'}
-                </span>
-              </li>
-              <li className="flex items-center justify-between">
-                <span>Phone Verification:</span>
-                <span className={privateUser.phoneVerified ? 'text-emerald-600' : 'text-amber-600'}>
-                  {privateUser.phoneVerified ? 'Verified' : 'Unverified'}
-                </span>
-              </li>
-              <li className="flex items-center justify-between">
-                <span>NID Identity:</span>
-                <span>{nidBadgeLabel}</span>
-              </li>
-            </ul>
-          </div>
-          <div className="bx-card p-5 space-y-2">
-            <h2 className="text-sm font-black uppercase tracking-wide opacity-75">Escrow Reserve</h2>
-            <div className="text-2xl font-black">
-              {formatMoneyFromMinor(privateUser.reservedBalanceMinor, displayCurrency, 'BDT', usdToBdtRate)}
+        <div className="space-y-6">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+            <div className="bx-card p-5 space-y-2">
+              <h2 className="text-sm font-black uppercase tracking-wide opacity-75">Trade Summary</h2>
+              <div className="text-2xl font-black tabular-nums">
+                {profile.completedSales + profile.completedPurchases}
+              </div>
+              <p className="text-xs opacity-75">
+                {profile.completedSales} Completed Sales · {profile.completedPurchases} Completed Purchases ·{' '}
+                {resolveSellerFollowerCount(profile)} Followers
+              </p>
             </div>
-            <p className="text-xs opacity-75">Reserved for pending withdrawal requests.</p>
+            <div className="bx-card p-5 space-y-2">
+              <h2 className="text-sm font-black uppercase tracking-wide opacity-75">Security &amp; Verification</h2>
+              <ul className="text-xs font-bold space-y-1.5">
+                <li className="flex items-center justify-between">
+                  <span>Email Verification:</span>
+                  <span className={privateUser.emailVerified || auth.currentUser?.emailVerified ? 'text-emerald-600' : 'text-amber-600'}>
+                    {privateUser.emailVerified || auth.currentUser?.emailVerified ? 'Verified' : 'Unverified'}
+                  </span>
+                </li>
+                <li className="flex items-center justify-between">
+                  <span>Phone Verification:</span>
+                  <span className={privateUser.phoneVerified ? 'text-emerald-600' : 'text-amber-600'}>
+                    {privateUser.phoneVerified ? 'Verified' : 'Unverified'}
+                  </span>
+                </li>
+                <li className="flex items-center justify-between">
+                  <span>NID Identity:</span>
+                  <span>{nidBadgeLabel}</span>
+                </li>
+              </ul>
+            </div>
+            <div className="bx-card p-5 space-y-2">
+              <h2 className="text-sm font-black uppercase tracking-wide opacity-75">Escrow Reserve</h2>
+              <div className="text-2xl font-black tabular-nums">
+                {formatMoneyFromMinor(privateUser.reservedBalanceMinor, displayCurrency, 'BDT', usdToBdtRate)}
+              </div>
+              <p className="text-xs opacity-75">Reserved for pending withdrawal requests.</p>
+            </div>
           </div>
+
+          {/* MY ACTIVITY OVERVIEW (Real Synchronized Counts & Direct Navigation) */}
+          <section className="bx-card p-5 sm:p-6 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--bx-border)] pb-3">
+              <div>
+                <h2 className="text-base sm:text-lg font-black tracking-tight">My Activity Overview</h2>
+                <p className="text-xs opacity-75">
+                  Live summary of your saved Favorites, bids, followed sellers, listings, escrow deals, and unread alerts.
+                </p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+              {/* 1. Saved Favorites */}
+              <div className="p-4 border-2 border-[var(--bx-border)] bg-[var(--bx-surface-alt)] flex flex-col justify-between gap-3">
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-extrabold uppercase tracking-wide opacity-75 inline-flex items-center gap-1.5">
+                      <Heart className="w-3.5 h-3.5 text-[#FF6500]" />
+                      Saved Favorites
+                    </span>
+                    <span className="text-lg font-black tabular-nums">{favorites.length}</span>
+                  </div>
+                  <p className="text-xs opacity-80 line-clamp-1">
+                    {favorites.length > 0
+                      ? `Latest: ${favorites[0].title}`
+                      : 'Heart any listing to save it privately'}
+                  </p>
+                </div>
+                {onOpenFavoritesPage && (
+                  <button
+                    type="button"
+                    onClick={onOpenFavoritesPage}
+                    className="bx-btn bx-btn-ghost bx-btn-sm text-xs font-extrabold justify-center"
+                  >
+                    Open Favorites →
+                  </button>
+                )}
+              </div>
+
+              {/* 2. Active & Historical Bids */}
+              <div className="p-4 border-2 border-[var(--bx-border)] bg-[var(--bx-surface-alt)] flex flex-col justify-between gap-3">
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-extrabold uppercase tracking-wide opacity-75 inline-flex items-center gap-1.5">
+                      <Gavel className="w-3.5 h-3.5 text-[#FF6500]" />
+                      My Bids
+                    </span>
+                    <span className="text-lg font-black tabular-nums">{myBids.length}</span>
+                  </div>
+                  <p className="text-xs opacity-80">
+                    {myBids.filter((b) => b.status === 'pending').length} Pending ·{' '}
+                    {
+                      myBids.filter(
+                        (b) =>
+                          b.status === 'accepted_pending_payment' ||
+                          b.status === 'accepted' ||
+                          b.status === 'paid'
+                      ).length
+                    }{' '}
+                    Accepted / Deal
+                  </p>
+                </div>
+                {onOpenMyBidsPage && (
+                  <button
+                    type="button"
+                    onClick={onOpenMyBidsPage}
+                    className="bx-btn bx-btn-ghost bx-btn-sm text-xs font-extrabold justify-center"
+                  >
+                    Manage My Bids →
+                  </button>
+                )}
+              </div>
+
+              {/* 3. Followed Sellers */}
+              <div className="p-4 border-2 border-[var(--bx-border)] bg-[var(--bx-surface-alt)] flex flex-col justify-between gap-3">
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-extrabold uppercase tracking-wide opacity-75 inline-flex items-center gap-1.5">
+                      <Users className="w-3.5 h-3.5 text-[#FF6500]" />
+                      Followed Sellers
+                    </span>
+                    <span className="text-lg font-black tabular-nums">{followedSellers.length}</span>
+                  </div>
+                  <p className="text-xs opacity-80 line-clamp-1">
+                    {followedSellers.length > 0
+                      ? `Following @${followedSellers[0].sellerUsername}${
+                          followedSellers.length > 1 ? ` +${followedSellers.length - 1} more` : ''
+                        }`
+                      : 'Follow verified sellers for instant listing alerts'}
+                  </p>
+                </div>
+                {onOpenFollowingPage && (
+                  <button
+                    type="button"
+                    onClick={onOpenFollowingPage}
+                    className="bx-btn bx-btn-ghost bx-btn-sm text-xs font-extrabold justify-center"
+                  >
+                    Open Following →
+                  </button>
+                )}
+              </div>
+
+              {/* 4. Listing Updates */}
+              <div className="p-4 border-2 border-[var(--bx-border)] bg-[var(--bx-surface-alt)] flex flex-col justify-between gap-3">
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-extrabold uppercase tracking-wide opacity-75">
+                      My Listings
+                    </span>
+                    <span className="text-lg font-black tabular-nums">{myListings.length}</span>
+                  </div>
+                  <p className="text-xs opacity-80">
+                    {myListings.filter((l) => l.status === 'active').length} Live ·{' '}
+                    {myListings.filter((l) => l.status === 'pending').length} In Review ·{' '}
+                    {myListings.filter((l) => l.status === 'rejected' || l.status === 'reserved').length}{' '}
+                    Action / Reserved
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('listings')}
+                  className="bx-btn bx-btn-ghost bx-btn-sm text-xs font-extrabold justify-center"
+                >
+                  Review My Listings →
+                </button>
+              </div>
+
+              {/* 5. Escrow Deals */}
+              <div className="p-4 border-2 border-[var(--bx-border)] bg-[var(--bx-surface-alt)] flex flex-col justify-between gap-3">
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-extrabold uppercase tracking-wide opacity-75 inline-flex items-center gap-1.5">
+                      <ShieldCheck className="w-3.5 h-3.5 text-[#FF6500]" />
+                      Escrow Deals
+                    </span>
+                    <span className="text-lg font-black tabular-nums">{deals.length}</span>
+                  </div>
+                  <p className="text-xs opacity-80">
+                    {
+                      deals.filter(
+                        (d) => d.status !== 'settled' && d.status !== 'refunded' && d.status !== 'cancelled'
+                      ).length
+                    }{' '}
+                    Active · {deals.filter((d) => d.status === 'settled').length} Settled
+                  </p>
+                </div>
+                {onOpenDealsPage && (
+                  <button
+                    type="button"
+                    onClick={onOpenDealsPage}
+                    className="bx-btn bx-btn-ghost bx-btn-sm text-xs font-extrabold justify-center"
+                  >
+                    Open Deal Rooms →
+                  </button>
+                )}
+              </div>
+
+              {/* 6. Unread Notifications */}
+              <div className="p-4 border-2 border-[var(--bx-border)] bg-[var(--bx-surface-alt)] flex flex-col justify-between gap-3">
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-extrabold uppercase tracking-wide opacity-75 inline-flex items-center gap-1.5">
+                      <Bell className="w-3.5 h-3.5 text-[#FF6500]" />
+                      Unread Alerts
+                    </span>
+                    <span className="text-lg font-black tabular-nums text-[#FF6500]">
+                      {unreadNotificationCount}
+                    </span>
+                  </div>
+                  <p className="text-xs opacity-80">
+                    {unreadNotificationCount > 0
+                      ? `${unreadNotificationCount} unread notification${
+                          unreadNotificationCount === 1 ? '' : 's'
+                        } waiting`
+                      : 'All caught up in your Notification Center'}
+                  </p>
+                </div>
+                {onOpenNotificationCenter && (
+                  <button
+                    type="button"
+                    onClick={onOpenNotificationCenter}
+                    className="bx-btn bx-btn-ghost bx-btn-sm text-xs font-extrabold justify-center"
+                  >
+                    Open Notifications →
+                  </button>
+                )}
+              </div>
+            </div>
+          </section>
         </div>
       )}
 
@@ -1129,7 +1429,9 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
       {activeTab === 'listings' && (
         <div className="space-y-4">
           <div className="flex flex-wrap gap-2">
-            {(['all', 'active', 'reserved', 'pending', 'draft', 'rejected', 'sold'] as const).map((st) => (
+            {(
+              ['all', 'active', 'reserved', 'pending', 'draft', 'rejected', 'suspended', 'sold'] as const
+            ).map((st) => (
               <button
                 key={st}
                 type="button"
@@ -1151,38 +1453,51 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
-              {filteredListings.map((item) => (
-                <div key={item.id} className="space-y-2">
-                  <ListingCard
-                    listing={item}
-                    displayCurrency={displayCurrency}
-                    usdToBdtRate={usdToBdtRate}
-                    onOpen={onOpenListing}
-                  />
-                  <div className="px-3 py-2 border-2 border-[var(--bx-border)] bg-[var(--bx-surface-alt)] flex items-center justify-between gap-2 text-xs font-bold">
-                    <span>
-                      Status:{' '}
-                      {item.status === 'reserved'
-                        ? 'RESERVED · PENDING BUYER PAYMENT'
-                        : item.status.toUpperCase()}
-                    </span>
-                    {item.activeDealId && onOpenDeal && (item.status === 'reserved' || item.status === 'sold') && (
-                      <button
-                        type="button"
-                        onClick={() => onOpenDeal(item.activeDealId!)}
-                        className="text-[#FF6500] hover:underline shrink-0"
-                      >
-                        Open Deal Room →
-                      </button>
-                    )}
-                    {item.rejectionReason && (
-                      <span className="text-red-600 truncate max-w-[180px]" title={item.rejectionReason}>
-                        Reason: {item.rejectionReason}
-                      </span>
-                    )}
+              {filteredListings.map((item) => {
+                const badgeMeta = getListingStatusBadgeMeta(item.status);
+                return (
+                  <div key={item.id} className="space-y-2">
+                    <ListingCard
+                      listing={item}
+                      displayCurrency={displayCurrency}
+                      usdToBdtRate={usdToBdtRate}
+                      onOpen={onOpenListing}
+                      isFavorited={favoriteListingIds ? favoriteListingIds.has(item.id) : false}
+                      onToggleFavorite={onToggleFavorite}
+                    />
+                    <div className="px-3 py-2.5 border-2 border-[var(--bx-border)] bg-[var(--bx-surface-alt)] space-y-2 text-xs font-bold">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span>Status: {badgeMeta.label}</span>
+                        {item.activeDealId &&
+                          onOpenDeal &&
+                          (item.status === 'reserved' || item.status === 'sold') && (
+                            <button
+                              type="button"
+                              onClick={() => onOpenDeal(item.activeDealId!)}
+                              className="text-[#FF6500] hover:underline shrink-0"
+                            >
+                              Open Deal Room →
+                            </button>
+                          )}
+                      </div>
+                      {item.rejectionReason && (
+                        <p className="text-red-600 text-[11px] leading-snug break-words">
+                          Moderator Note: {item.rejectionReason}
+                        </p>
+                      )}
+                      {onEditListing && (item.status === 'draft' || item.status === 'rejected') && (
+                        <button
+                          type="button"
+                          onClick={() => onEditListing(item)}
+                          className="bx-btn bx-btn-primary bx-btn-sm w-full justify-center"
+                        >
+                          {item.status === 'draft' ? 'Edit & Submit Draft' : 'Edit & Resubmit Listing'}
+                        </button>
+                      )}
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>
@@ -1493,7 +1808,7 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
               <input
                 ref={avatarInputRef}
                 type="file"
-                accept="image/jpeg,image/png,image/webp"
+                accept="image/jpeg,image/jpg,image/png,image/webp"
                 onChange={handleAvatarUpload}
                 className="hidden"
               />
@@ -1757,7 +2072,7 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
                     ref={nidFrontInputRef}
                     id="bx-nid-front-file"
                     type="file"
-                    accept="image/jpeg,image/png,image/webp"
+                    accept="image/jpeg,image/jpg,image/png,image/webp"
                     onChange={handleSelectNidFront}
                     className="hidden"
                   />
@@ -1786,7 +2101,7 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
                     >
                       <Upload className="w-6 h-6 text-[#FF6500]" />
                       <span className="text-xs font-extrabold">Upload Front Image</span>
-                      <span className="text-[11px] opacity-70">JPEG, PNG, WebP (Max 5 MB)</span>
+                      <span className="text-[11px] opacity-70">JPEG, JPG, PNG, WebP (Max 8 MB)</span>
                     </button>
                   )}
                 </div>
@@ -1802,7 +2117,7 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
                     ref={nidBackInputRef}
                     id="bx-nid-back-file"
                     type="file"
-                    accept="image/jpeg,image/png,image/webp"
+                    accept="image/jpeg,image/jpg,image/png,image/webp"
                     onChange={handleSelectNidBack}
                     className="hidden"
                   />

@@ -8,6 +8,7 @@ import {
   DEAL_ROOM_VIBRATION_PATTERN,
   DEFAULT_NOTIFICATION_PREFERENCES,
   detectBrowserPushEnvironment,
+  FCM_OFFICIAL_DEFAULT_VAPID_PUBLIC_KEY,
   getDealRoomVibrationPattern,
   isValidVapidPublicKey,
   NOTIFICATION_SOUND_CATALOG,
@@ -19,7 +20,10 @@ import {
   STANDARD_DEAL_VIBRATION_PATTERN,
   STRONG_DEAL_VIBRATION_PATTERN,
 } from './soundAndPushConfig';
-import { classifyWebPushRegistrationError } from './pushNotifications';
+import {
+  classifyWebPushRegistrationError,
+  resolveConfiguredVapidPublicKey,
+} from './pushNotifications';
 import type { NotificationRecord } from '../types';
 
 function makeNotification(overrides: Partial<NotificationRecord> & { id: string }): NotificationRecord {
@@ -61,6 +65,41 @@ test('VAPID validator accepts genuine 65-byte uncompressed P-256 public key and 
 
   const forgedBytes = Buffer.alloc(65, 0x02);
   assert.equal(isValidVapidPublicKey(forgedBytes.toString('base64url')), false);
+
+  // Official Firebase Cloud Messaging built-in managed public VAPID key (`DEFAULT_VAPID_KEY`) is valid 65-byte 0x04 P-256
+  assert.equal(isValidVapidPublicKey(FCM_OFFICIAL_DEFAULT_VAPID_PUBLIC_KEY), true);
+});
+
+test('resolveConfiguredVapidPublicKey uses official FCM managed default public key automatically and eliminates unresolved env errors', () => {
+  // Empty / unset env resolves cleanly to official FCM built-in public VAPID key
+  const defaultResolved = resolveConfiguredVapidPublicKey(null, '');
+  assert.equal(defaultResolved.key, FCM_OFFICIAL_DEFAULT_VAPID_PUBLIC_KEY);
+  assert.equal(defaultResolved.source, 'fcm_default');
+  assert.equal(defaultResolved.hasMalformedEnvValue, false);
+
+  // Explicit custom P-256 public certificate overrides default
+  const ecdh = crypto.createECDH('prime256v1');
+  ecdh.generateKeys();
+  const customPub = ecdh.getPublicKey(null, 'uncompressed').toString('base64url');
+  const envResolved = resolveConfiguredVapidPublicKey(null, customPub);
+  assert.equal(envResolved.key, customPub);
+  assert.equal(envResolved.source, 'env');
+  assert.equal(envResolved.hasMalformedEnvValue, false);
+
+  // Public settings fallback overrides default when env is unset
+  const pubSettingsResolved = resolveConfiguredVapidPublicKey(customPub, '');
+  assert.equal(pubSettingsResolved.key, customPub);
+  assert.equal(pubSettingsResolved.source, 'public_settings');
+
+  // Malformed non-placeholder env string is still caught accurately
+  const malformedResolved = resolveConfiguredVapidPublicKey(null, 'NOT_A_VALID_KEY_123');
+  assert.equal(malformedResolved.key, '');
+  assert.equal(malformedResolved.hasMalformedEnvValue, true);
+
+  // .env.example must not declare unresolved FIREBASE_SERVICE_ACCOUNT_JSON="" or VITE_FIREBASE_VAPID_KEY=""
+  const envExample = fs.readFileSync(path.join(process.cwd(), '.env.example'), 'utf8');
+  assert.doesNotMatch(envExample, /^FIREBASE_SERVICE_ACCOUNT_JSON=/m);
+  assert.doesNotMatch(envExample, /^VITE_FIREBASE_VAPID_KEY=/m);
 });
 
 test('Default notification preferences preserve Sample 2 normal sound, Sample 4 deal alert sound, and Strong vibration', () => {

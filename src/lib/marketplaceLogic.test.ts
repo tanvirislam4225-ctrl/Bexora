@@ -28,7 +28,14 @@ import {
   validateLoginInput,
   validateRegistrationInput,
   validatePasswordResetInput,
+  sanitizeCustomerAuthMessage,
+  getListingStatusBadgeMeta,
+  normalizeDraftListingFields,
 } from './marketplaceLogic';
+import {
+  computeWordPressWebhookSignatures,
+  verifyWordPressWebhookRequest,
+} from './serverWebhookSecurity';
 
 test('Commission Engine: ৳100 accepted deal with 5% buyer fee and 5% seller fee', () => {
   // ৳100 = 10,000 paisa (minor units)
@@ -423,3 +430,97 @@ test('Auth Form Validators validate Login, Registration, and Password Reset inpu
   assert.equal(validReset.cleanEmail, 'member@gmail.com');
 });
 
+test('Customer Auth Message Sanitizer strips Firebase/Cloud Console links and internal project IDs', () => {
+  const rawLeak =
+    'Email/Password sign-in is disabled in Firebase Console (project responsive-dragon-tmn89). Open https://console.firebase.google.com/project/responsive-dragon-tmn89/authentication/providers';
+  const clean = sanitizeCustomerAuthMessage(rawLeak);
+  assert.doesNotMatch(clean, /responsive-dragon-tmn89/);
+  assert.doesNotMatch(clean, /console\.firebase\.google\.com/);
+  assert.match(clean, /Connect with Google/);
+
+  const normalMsg = 'Incorrect email or password. Double-check your credentials.';
+  assert.equal(sanitizeCustomerAuthMessage(normalMsg), normalMsg);
+});
+
+test('Listing Status Badge Meta & Draft Field Normalization preserve Firestore rules invariants', () => {
+  assert.equal(getListingStatusBadgeMeta('suspended').label, 'Suspended by Admin');
+  assert.equal(getListingStatusBadgeMeta('draft').label, 'Draft (Saved Privately)');
+  assert.equal(getListingStatusBadgeMeta('active').label, 'Approved & Live');
+
+  const draft = normalizeDraftListingFields({
+    title: 'Hi',
+    description: 'Short note',
+    priceBdt: 0,
+    ageYears: '0',
+    ageMonths: '0',
+  });
+  assert.ok(draft.title.length >= 8);
+  assert.ok(draft.description.length >= 20);
+  assert.ok(draft.priceMinor > 0);
+  assert.equal(draft.ageMonths, 1);
+});
+
+test('WordPress Raw-Body HMAC Webhook Security verifies exact payload, blocks tampered bodies, enforces timestamp skew, and blocks replays', () => {
+  const secret = 'wp_live_secret_998877';
+  const rawBody = JSON.stringify({
+    paymentReference: 'bxw_123456',
+    status: 'completed',
+    transactionId: 'TRX-889900',
+  });
+  const nowMs = 1_780_000_000_000;
+  const timestampSec = Math.floor(nowMs / 1000);
+  const sigs = computeWordPressWebhookSignatures(rawBody, secret, String(timestampSec));
+  const replayCache = new Map<string, number>();
+
+  // 1. Valid timestamped hex signature succeeds once
+  const firstVerify = verifyWordPressWebhookRequest({
+    rawBody,
+    secret,
+    signatureHeader: `sha256=${sigs.timestampedHex || sigs.hex}`,
+    timestampHeader: String(timestampSec),
+    eventId: 'evt_wp_1',
+    nowMs,
+    replayCache,
+  });
+  assert.equal(firstVerify.ok, true);
+
+  // 2. Replaying the exact same eventId / signature is blocked
+  const replayAttempt = verifyWordPressWebhookRequest({
+    rawBody,
+    secret,
+    signatureHeader: `sha256=${sigs.timestampedHex || sigs.hex}`,
+    timestampHeader: String(timestampSec),
+    eventId: 'evt_wp_1',
+    nowMs: nowMs + 1_000,
+    replayCache,
+  });
+  assert.equal(replayAttempt.ok, false);
+  assert.equal(replayAttempt.code, 'replay_detected');
+
+  // 3. Tampered raw body with original signature fails verification
+  const tamperedVerify = verifyWordPressWebhookRequest({
+    rawBody: rawBody.replace('123456', '999999'),
+    secret,
+    signatureHeader: sigs.base64,
+    eventId: 'evt_wp_2',
+    nowMs,
+    replayCache,
+  });
+  assert.equal(tamperedVerify.ok, false);
+  assert.equal(tamperedVerify.code, 'invalid_signature');
+
+  // 4. Stale timestamp (>5m skew) is rejected
+  const staleTs = timestampSec - 900;
+  const staleSigs = computeWordPressWebhookSignatures(rawBody, secret, String(staleTs));
+  const staleVerify = verifyWordPressWebhookRequest({
+    rawBody,
+    secret,
+    signatureHeader: staleSigs.timestampedHex,
+    timestampHeader: String(staleTs),
+    eventId: 'evt_wp_3',
+    nowMs,
+    replayCache,
+  });
+  assert.equal(staleVerify.ok, false);
+  assert.equal(staleVerify.code, 'stale_timestamp');
+});

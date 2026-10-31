@@ -1,28 +1,42 @@
 import React, { useEffect, useState } from 'react';
-import { collection, getDocs, limit, query } from 'firebase/firestore';
-import { ShieldCheck, Star, Trophy, UserCheck } from 'lucide-react';
+import { collection, limit, onSnapshot, query } from 'firebase/firestore';
+import { ShieldCheck, Star, Trophy, UserCheck, UserPlus } from 'lucide-react';
 import { PublicProfile } from '../types';
 import { db } from '../lib/firebase';
+import { canUserFollowSeller } from '../lib/engagementLogic';
 
 interface TopSellersViewProps {
   onOpenPublicProfile: (uid: string) => void;
+  viewerUid?: string | null;
+  followedSellerIds?: ReadonlySet<string>;
+  onToggleFollowSeller?: (seller: {
+    uid: string;
+    displayName: string;
+    username: string;
+    avatarUrl?: string;
+    nidVerified: boolean;
+  }) => void;
 }
 
-export const TopSellersView: React.FC<TopSellersViewProps> = ({ onOpenPublicProfile }) => {
+export const TopSellersView: React.FC<TopSellersViewProps> = ({
+  onOpenPublicProfile,
+  viewerUid = null,
+  followedSellerIds,
+  onToggleFollowSeller,
+}) => {
   const [sellers, setSellers] = useState<PublicProfile[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    let active = true;
-    async function loadSellers() {
-      setLoading(true);
-      try {
-        const snap = await getDocs(query(collection(db, 'publicProfiles'), limit(60)));
-        if (!active) return;
+    setLoading(true);
+    const q = query(collection(db, 'publicProfiles'), limit(60));
+    const unsub = onSnapshot(
+      q,
+      (snap) => {
         const list: PublicProfile[] = snap.docs.map((d) => {
           const data = d.data();
           return {
-            uid: data.uid,
+            uid: data.uid || d.id,
             displayName: data.displayName || 'Member',
             username: data.username || 'member',
             bio: data.bio || '',
@@ -34,6 +48,10 @@ export const TopSellersView: React.FC<TopSellersViewProps> = ({ onOpenPublicProf
             completedPurchases: Number(data.completedPurchases || 0),
             ratingSum: Number(data.ratingSum || 0),
             ratingCount: Number(data.ratingCount || 0),
+            followerCount:
+              typeof data.followerCount === 'number' && Number.isFinite(data.followerCount)
+                ? Math.max(0, Math.floor(data.followerCount))
+                : 0,
           };
         });
 
@@ -47,16 +65,14 @@ export const TopSellersView: React.FC<TopSellersViewProps> = ({ onOpenPublicProf
         });
 
         setSellers(list);
-      } catch (err) {
+        setLoading(false);
+      },
+      (err) => {
         console.error('Error loading sellers directory:', err);
-      } finally {
-        if (active) setLoading(false);
+        setLoading(false);
       }
-    }
-    loadSellers();
-    return () => {
-      active = false;
-    };
+    );
+    return () => unsub();
   }, []);
 
   return (
@@ -69,7 +85,7 @@ export const TopSellersView: React.FC<TopSellersViewProps> = ({ onOpenPublicProf
           </div>
           <h1 className="text-2xl sm:text-3xl font-black tracking-tight">Top Sellers & Verified Members</h1>
           <p className="text-sm opacity-75 mt-1">
-            Ranked strictly by settled escrow transactions and authentic post-deal buyer ratings. New accounts start with no ratings.
+            Ranked strictly by settled escrow transactions and authentic post-deal buyer ratings. Follow sellers to receive instant alerts when they publish new listings.
           </p>
         </div>
       </div>
@@ -92,38 +108,59 @@ export const TopSellersView: React.FC<TopSellersViewProps> = ({ onOpenPublicProf
             const avgLabel = hasRatings
               ? `${(s.ratingSum / s.ratingCount).toFixed(1)} (${s.ratingCount})`
               : 'No ratings yet';
+            const isFollowing = Boolean(followedSellerIds?.has(s.uid));
+            const canFollow = canUserFollowSeller(viewerUid, s.uid);
+            const followerTotal = s.followerCount ?? 0;
+
             return (
               <article key={s.uid} className="bx-card p-5 flex flex-col justify-between gap-4">
                 <div className="space-y-3">
                   <div className="flex items-start justify-between gap-3">
-                    <div className="flex items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => onOpenPublicProfile(s.uid)}
+                      className="flex items-center gap-3 text-left min-w-0 hover:underline"
+                    >
                       <div className="w-12 h-12 rounded-lg border-2 border-[var(--bx-border)] bg-[var(--bx-surface-alt)] overflow-hidden flex items-center justify-center font-black shrink-0">
                         {s.avatarUrl ? (
-                          <img src={s.avatarUrl} alt={s.displayName} className="w-full h-full object-cover" />
+                          <img
+                            src={s.avatarUrl}
+                            alt={s.displayName}
+                            referrerPolicy="no-referrer"
+                            className="w-full h-full object-cover"
+                          />
                         ) : (
                           <span>{s.displayName.slice(0, 2).toUpperCase()}</span>
                         )}
                       </div>
-                      <div>
-                        <h2 className="font-black text-base leading-tight">{s.displayName}</h2>
-                        <p className="text-xs font-bold opacity-70">@{s.username}</p>
+                      <div className="min-w-0">
+                        <h2 className="font-black text-base leading-tight truncate">{s.displayName}</h2>
+                        <div className="flex items-center gap-1.5 text-xs font-bold opacity-70 min-w-0">
+                          <span className="truncate">@{s.username}</span>
+                          <span aria-hidden="true" className="shrink-0">·</span>
+                          <span className="shrink-0 whitespace-nowrap tabular-nums">
+                            {followerTotal.toLocaleString('en-US')} follower
+                            {followerTotal === 1 ? '' : 's'}
+                          </span>
+                        </div>
                       </div>
-                    </div>
-                    <span className="text-xs font-black px-2 py-0.5 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)]">
+                    </button>
+                    <span className="text-xs font-black px-2 py-0.5 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)] shrink-0">
                       #{idx + 1}
                     </span>
                   </div>
 
-                  <div className="flex flex-wrap gap-1.5">
+                  <div className="flex flex-wrap gap-1.5 text-xs font-bold" style={{ color: 'var(--text-2)' }}>
                     {s.nidVerified && (
-                      <span className="inline-flex items-center gap-1 text-[11px] font-extrabold px-2 py-0.5 bg-emerald-600 text-white border border-black">
-                        <ShieldCheck className="w-3 h-3" />
+                      <span className="inline-flex items-center gap-1" style={{ color: 'var(--green)' }}>
+                        <ShieldCheck className="w-3.5 h-3.5" />
                         NID Verified
                       </span>
                     )}
+                    {s.nidVerified && s.completedTrader && <span aria-hidden="true">·</span>}
                     {s.completedTrader && (
-                      <span className="inline-flex items-center gap-1 text-[11px] font-extrabold px-2 py-0.5 bg-[#793A91] text-white border border-black">
-                        <UserCheck className="w-3 h-3" />
+                      <span className="inline-flex items-center gap-1" style={{ color: 'var(--purple)' }}>
+                        <UserCheck className="w-3.5 h-3.5" />
                         Completed Trader
                       </span>
                     )}
@@ -132,21 +169,60 @@ export const TopSellersView: React.FC<TopSellersViewProps> = ({ onOpenPublicProf
                   {s.bio && <p className="text-xs opacity-80 line-clamp-2">{s.bio}</p>}
                 </div>
 
-                <div className="pt-3 border-t border-[var(--bx-border)] flex items-center justify-between">
-                  <div className="text-xs font-bold space-y-0.5">
+                <div className="pt-3 border-t border-[var(--bx-border)] flex items-center justify-between gap-2 flex-wrap">
+                  <div className="text-xs font-bold space-y-0.5 tabular-nums">
                     <div>Settled Sales: {s.completedSales}</div>
                     <div className="inline-flex items-center gap-1 text-[#FF6500]">
                       <Star className="w-3.5 h-3.5 fill-[#FF6500]" />
                       <span>{avgLabel}</span>
                     </div>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => onOpenPublicProfile(s.uid)}
-                    className="bx-btn bx-btn-ghost px-3 py-1.5 text-xs font-extrabold"
-                  >
-                    View Profile
-                  </button>
+                  <div className="flex items-center gap-2 shrink-0">
+                    {onToggleFollowSeller && canFollow && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          onToggleFollowSeller({
+                            uid: s.uid,
+                            displayName: s.displayName,
+                            username: s.username,
+                            avatarUrl: s.avatarUrl,
+                            nidVerified: s.nidVerified,
+                          })
+                        }
+                        aria-pressed={isFollowing}
+                        aria-label={
+                          isFollowing
+                            ? `Unfollow seller ${s.displayName}`
+                            : `Follow seller ${s.displayName}`
+                        }
+                        className="bx-btn bx-btn-sm whitespace-nowrap shrink-0"
+                        style={
+                          isFollowing
+                            ? {
+                                background: 'var(--surface)',
+                                borderColor: 'var(--green)',
+                                color: 'var(--green)',
+                              }
+                            : undefined
+                        }
+                      >
+                        {isFollowing ? (
+                          <UserCheck className="w-3.5 h-3.5" />
+                        ) : (
+                          <UserPlus className="w-3.5 h-3.5" />
+                        )}
+                        <span>{isFollowing ? 'Following' : 'Follow'}</span>
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => onOpenPublicProfile(s.uid)}
+                      className="bx-btn bx-btn-ghost px-3 py-1.5 text-xs font-extrabold whitespace-nowrap shrink-0"
+                    >
+                      View Profile
+                    </button>
+                  </div>
                 </div>
               </article>
             );
@@ -156,3 +232,4 @@ export const TopSellersView: React.FC<TopSellersViewProps> = ({ onOpenPublicProf
     </div>
   );
 };
+

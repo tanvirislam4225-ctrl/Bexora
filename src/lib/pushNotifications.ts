@@ -5,6 +5,7 @@ import { deterministicHashHex } from './notificationLogic';
 import {
   clearLocalNotificationSessionData,
   detectBrowserPushEnvironment,
+  FCM_OFFICIAL_DEFAULT_VAPID_PUBLIC_KEY,
   isValidVapidPublicKey,
   loadLocalNotificationPreferences,
 } from './soundAndPushConfig';
@@ -27,6 +28,9 @@ export interface ServerFcmDiagnosticStatus {
   projectId: string;
   projectNumber: string;
   appId: string;
+  adminSdkInitialized: boolean;
+  credentialSource: 'managed_adc' | 'service_account_env' | 'none';
+  vapidMode: 'custom_env' | 'fcm_managed_default';
   envVapidConfigured: boolean;
   envVapidValid: boolean;
   fcmV1ApiStatus: 'enabled_verified' | 'disabled' | 'unable_to_verify';
@@ -44,11 +48,13 @@ export interface ServerFcmDiagnosticStatus {
   detailMessage: string;
 }
 
+export type VapidKeySource = 'env' | 'public_settings' | 'fcm_default' | 'none';
+
 export interface WebPushStateSnapshot {
   status: WebPushStatus;
   permission: NotificationPermission | 'unsupported';
   vapidConfigured: boolean;
-  vapidSource: 'env' | 'public_settings' | 'none';
+  vapidSource: VapidKeySource;
   activeTokenCount: number;
   iosRequiresHomeScreenInstall: boolean;
   deviceLabel: string;
@@ -81,21 +87,43 @@ function isPlaceholderVapidEnvValue(raw: string): boolean {
   );
 }
 
-export function resolveConfiguredVapidPublicKey(explicitFallback?: string | null): {
+export function resolveConfiguredVapidPublicKey(
+  explicitFallback?: string | null,
+  envOverrideForTest?: string | null
+): {
   key: string;
-  source: 'env' | 'public_settings' | 'none';
+  source: VapidKeySource;
   hasMalformedEnvValue: boolean;
 } {
-  const rawEnv = String(import.meta.env.VITE_FIREBASE_VAPID_KEY || '').trim();
+  const rawEnv = String(
+    envOverrideForTest !== undefined && envOverrideForTest !== null
+      ? envOverrideForTest
+      : import.meta.env.VITE_FIREBASE_VAPID_KEY || ''
+  ).trim();
   const hasNonPlaceholderEnv = !isPlaceholderVapidEnvValue(rawEnv);
-  if (hasNonPlaceholderEnv && isValidVapidPublicKey(rawEnv)) {
-    return { key: rawEnv, source: 'env', hasMalformedEnvValue: false };
+
+  // 1. Explicit custom env certificate (if set and distinct from FCM built-in default)
+  if (hasNonPlaceholderEnv) {
+    if (!isValidVapidPublicKey(rawEnv)) {
+      return { key: '', source: 'none', hasMalformedEnvValue: true };
+    }
+    if (rawEnv !== FCM_OFFICIAL_DEFAULT_VAPID_PUBLIC_KEY) {
+      return { key: rawEnv, source: 'env', hasMalformedEnvValue: false };
+    }
   }
+
+  // 2. Admin-configured custom public certificate in Firestore `/publicConfig/settings`
   const candidate = String(explicitFallback ?? cachedRuntimePublicVapidKey ?? '').trim();
-  if (isValidVapidPublicKey(candidate)) {
-    return { key: candidate, source: 'public_settings', hasMalformedEnvValue: hasNonPlaceholderEnv };
+  if (isValidVapidPublicKey(candidate) && candidate !== FCM_OFFICIAL_DEFAULT_VAPID_PUBLIC_KEY) {
+    return { key: candidate, source: 'public_settings', hasMalformedEnvValue: false };
   }
-  return { key: '', source: 'none', hasMalformedEnvValue: hasNonPlaceholderEnv };
+
+  // 3. Official Firebase Cloud Messaging built-in managed public VAPID key (`DEFAULT_VAPID_KEY`)
+  return {
+    key: FCM_OFFICIAL_DEFAULT_VAPID_PUBLIC_KEY,
+    source: 'fcm_default',
+    hasMalformedEnvValue: false,
+  };
 }
 
 /**
@@ -142,7 +170,7 @@ export function classifyWebPushRegistrationError(err: unknown): {
     return {
       status: 'fcm_api_disabled',
       message:
-        'FCM Registration API (fcmregistrations.googleapis.com) must be enabled in Google Cloud Console for project responsive-dragon-tmn89 before browser push tokens can be issued.',
+        'Background browser push registration is temporarily unavailable while cloud push services are being finalized. Real-time in-app alerts and chimes remain active.',
     };
   }
 
@@ -171,6 +199,43 @@ export async function fetchServerFcmStatus(): Promise<ServerFcmDiagnosticStatus 
     return (await res.json()) as ServerFcmDiagnosticStatus;
   } catch {
     return null;
+  }
+}
+
+export async function enableFcmCloudApisViaServer(): Promise<{
+  ok: boolean;
+  fcmRegistrationsApiStatus?: string;
+  message: string;
+}> {
+  try {
+    const idToken = auth.currentUser ? await auth.currentUser.getIdToken().catch(() => '') : '';
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    };
+    if (idToken) {
+      headers.Authorization = `Bearer ${idToken}`;
+    }
+    const res = await fetch('/api/fcm/enable-cloud-apis', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({}),
+    });
+    const data = (await res.json()) as {
+      ok?: boolean;
+      fcmRegistrationsApiStatus?: string;
+      message?: string;
+    };
+    return {
+      ok: Boolean(data.ok),
+      fcmRegistrationsApiStatus: data.fcmRegistrationsApiStatus,
+      message: String(data.message || 'Completed Google Cloud FCM API enablement check.'),
+    };
+  } catch {
+    return {
+      ok: false,
+      message: 'Could not reach server FCM enablement endpoint. Check connectivity and retry.',
+    };
   }
 }
 
@@ -364,15 +429,11 @@ export async function inspectWebPushState(
       deviceLabel: envInfo.deviceLabel,
       serverDiagnostics: serverDiag,
       detailMessage:
-        'VITE_FIREBASE_VAPID_KEY contains an invalid format. Provide only the 87–88 char base64url P-256 public certificate from Firebase Console > Cloud Messaging > Web Push certificates.',
+        'Background Web Push certificate format needs administrator verification. Real-time in-app notifications and chimes remain active.',
     };
   }
 
   if (!resolvedVapid.key) {
-    const regDisabledHint =
-      serverDiag?.fcmRegistrationsApiStatus === 'disabled'
-        ? ' Note: Enable fcmregistrations.googleapis.com in Google Cloud Console on responsive-dragon-tmn89 first if "Generate key pair" fails in Firebase Console.'
-        : '';
     return {
       status: 'vapid_key_missing',
       permission,
@@ -382,7 +443,8 @@ export async function inspectWebPushState(
       iosRequiresHomeScreenInstall: false,
       deviceLabel: envInfo.deviceLabel,
       serverDiagnostics: serverDiag,
-      detailMessage: `In-app notifications & chimes are active. Background Web Push awaits VITE_FIREBASE_VAPID_KEY from Project Settings > Cloud Messaging.${regDisabledHint}`,
+      detailMessage:
+        'Real-time in-app notifications & chimes are active. Background Web Push will activate automatically once push certificates are enabled.',
     };
   }
 
@@ -397,7 +459,7 @@ export async function inspectWebPushState(
       deviceLabel: envInfo.deviceLabel,
       serverDiagnostics: serverDiag,
       detailMessage:
-        'FCM Registration API (fcmregistrations.googleapis.com) is currently disabled in Google Cloud project responsive-dragon-tmn89. Enable it in Cloud Console to issue browser tokens.',
+        'Real-time in-app notifications & chimes are active. Background browser push registration is temporarily pending cloud activation.',
     };
   }
 
@@ -411,10 +473,7 @@ export async function inspectWebPushState(
       iosRequiresHomeScreenInstall: false,
       deviceLabel: envInfo.deviceLabel,
       serverDiagnostics: serverDiag,
-      detailMessage:
-        serverDiag?.fcmSendApiStatus === 'permission_denied'
-          ? `Registered on ${activeTokenCount} device(s). Grant roles/firebasecloudmessaging.admin on responsive-dragon-tmn89 for server-dispatched closed-tab push.`
-          : `Background push notifications are active for ${activeTokenCount} device(s).`,
+      detailMessage: `Background push notifications are active for ${activeTokenCount} device(s).`,
     };
   }
 
@@ -491,14 +550,14 @@ export async function enableWebPushForCurrentUser(
         ok: false,
         status: 'invalid_vapid_key',
         message:
-          'VITE_FIREBASE_VAPID_KEY is malformed. Provide only the genuine 87–88 character base64url P-256 public certificate from Firebase Console > Cloud Messaging.',
+          'Background Web Push certificate format needs administrator verification. In-app notifications and chimes remain active.',
       };
     }
     return {
       ok: false,
       status: 'vapid_key_missing',
       message:
-        'VITE_FIREBASE_VAPID_KEY is not configured yet. Enable fcmregistrations.googleapis.com on responsive-dragon-tmn89, generate the Web Push public certificate in Firebase Console > Project Settings > Cloud Messaging, and set VITE_FIREBASE_VAPID_KEY.',
+        'Background Web Push is not yet configured by the administrator. Real-time in-app notifications and chimes remain active.',
     };
   }
 

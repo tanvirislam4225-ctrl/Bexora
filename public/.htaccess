@@ -3,6 +3,7 @@
   AddType application/javascript .js .mjs
   AddType image/svg+xml .svg
   AddType image/x-icon .ico
+  AddType audio/wav .wav
 </IfModule>
 
 <IfModule mod_rewrite.c>

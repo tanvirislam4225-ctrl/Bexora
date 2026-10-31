@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { addDoc, collection, doc, runTransaction, serverTimestamp } from 'firebase/firestore';
-import { ArrowDownLeft, ArrowUpRight, Copy, Upload, X } from 'lucide-react';
+import { ArrowDownLeft, ArrowLeft, ArrowUpRight, Copy, ShieldCheck, Upload } from 'lucide-react';
 import {
   CurrencyCode,
   DepositRequestRecord,
@@ -15,6 +15,8 @@ import { emitUserNotification } from '../lib/notificationService';
 
 interface WalletModalProps {
   onClose: () => void;
+  returnToCheckoutLabel?: string | null;
+  onReturnToCheckout?: () => void;
   userUid: string;
   profile: PublicProfile;
   privateUser: PrivateUser;
@@ -27,6 +29,8 @@ interface WalletModalProps {
 
 export const WalletModal: React.FC<WalletModalProps> = ({
   onClose,
+  returnToCheckoutLabel = null,
+  onReturnToCheckout,
   userUid,
   profile,
   privateUser,
@@ -250,55 +254,94 @@ export const WalletModal: React.FC<WalletModalProps> = ({
   };
 
   return (
-    <div
-      className="fixed inset-0 z-50 bg-black/65 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4"
-      onClick={onClose}
-      role="dialog"
-      aria-modal="true"
-      aria-label="Wallet and Manual Balance"
-    >
-      <div
-        className="bx-card w-full max-w-lg max-h-[92vh] overflow-y-auto rounded-t-3xl sm:rounded-2xl p-5 sm:p-6 space-y-5"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between gap-3">
-          <h2 className="text-lg font-extrabold">BEXORA Wallet</h2>
-          <button type="button" onClick={onClose} className="bx-icon-btn !w-9 !h-9" aria-label="Close">
-            <X className="w-4 h-4" />
+    <section className="bx-wrap py-6 sm:py-8 space-y-6" aria-label="BEXORA Wallet">
+      {/* Top Navigation & Optional Return-to-Checkout Bar */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        {onReturnToCheckout ? (
+          <button
+            type="button"
+            onClick={onReturnToCheckout}
+            className="bx-btn bx-btn-primary bx-btn-sm inline-flex items-center gap-2"
+          >
+            <ArrowLeft className="w-4 h-4" />
+            <span>{returnToCheckoutLabel || 'Return to Checkout'}</span>
           </button>
-        </div>
+        ) : (
+          <button
+            type="button"
+            onClick={onClose}
+            className="bx-btn bx-btn-sm inline-flex items-center gap-2"
+          >
+            <ArrowLeft className="w-4 h-4" />
+            <span>Back to Marketplace</span>
+          </button>
+        )}
 
-        {/* Balance Banner */}
-        <div
-          className="p-5 rounded-2xl text-white space-y-1 tabular-nums"
-          style={{ background: 'var(--orange)' }}
-        >
-          <span className="text-xs font-extrabold uppercase tracking-wider opacity-90">
-            Available Wallet Balance
-          </span>
-          <div className="text-3xl font-extrabold">
-            {formatMoneyFromMinor(
-              privateUser.walletBalanceMinor,
-              displayCurrency,
-              'BDT',
-              settings.usdToBdtRate
-            )}
-          </div>
-          {privateUser.reservedBalanceMinor > 0 && (
-            <p className="text-xs opacity-90 font-semibold">
-              Reserved for pending withdrawal:{' '}
+        <span className="bx-hint">
+          Verified Escrow Wallet · Instant Checkout Balance
+        </span>
+      </div>
+
+      {/* Full-Screen 2-Column Wallet Layout */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+        {/* Left Column: Balance Card & Escrow Notes */}
+        <div className="lg:col-span-5 space-y-4">
+          <div
+            className="p-6 rounded-2xl text-white space-y-1.5 tabular-nums border"
+            style={{ background: 'var(--orange)', borderColor: 'var(--border-strong)' }}
+          >
+            <span className="text-xs font-extrabold uppercase tracking-wider opacity-90">
+              Available Wallet Balance
+            </span>
+            <div className="text-3xl sm:text-4xl font-black">
               {formatMoneyFromMinor(
-                privateUser.reservedBalanceMinor,
+                privateUser.walletBalanceMinor,
                 displayCurrency,
                 'BDT',
                 settings.usdToBdtRate
               )}
+            </div>
+            {privateUser.reservedBalanceMinor > 0 && (
+              <p className="text-xs opacity-95 font-semibold pt-1">
+                Reserved for pending withdrawal:{' '}
+                {formatMoneyFromMinor(
+                  privateUser.reservedBalanceMinor,
+                  displayCurrency,
+                  'BDT',
+                  settings.usdToBdtRate
+                )}
+              </p>
+            )}
+          </div>
+
+          <div className="bx-card p-5 space-y-3 text-xs">
+            <div className="flex items-center gap-2 font-extrabold text-sm">
+              <ShieldCheck className="w-4 h-4" style={{ color: 'var(--green)' }} />
+              <span>How Wallet Balance Powers Escrow</span>
+            </div>
+            <p style={{ color: 'var(--text-2)' }}>
+              Your BEXORA Wallet balance can be used immediately at Checkout for Buy Now purchases and Accepted Bid Deal Rooms without waiting for external gateway redirects.
             </p>
-          )}
+            {onReturnToCheckout && (
+              <button
+                type="button"
+                onClick={onReturnToCheckout}
+                className="bx-btn bx-btn-yellow w-full justify-center"
+              >
+                <ArrowLeft className="w-4 h-4" />
+                <span>{returnToCheckoutLabel || 'Return to Your Saved Checkout'}</span>
+              </button>
+            )}
+          </div>
         </div>
 
-        {/* Segmented Tabs */}
-        <div className="grid grid-cols-3 gap-1.5 p-1.5 rounded-xl bx-soft">
+        {/* Right Column: Add Balance / Withdraw / History Card */}
+        <div className="lg:col-span-7">
+          <div className="bx-card p-5 sm:p-6 space-y-5">
+            <h1 className="text-xl font-black">BEXORA Wallet &amp; Balance</h1>
+
+            {/* Segmented Tabs */}
+            <div className="grid grid-cols-3 gap-1.5 p-1.5 rounded-xl bx-soft">
           {[
             ['deposit', 'Add Balance'],
             ['withdraw', 'Withdraw'],
@@ -593,7 +636,9 @@ export const WalletModal: React.FC<WalletModalProps> = ({
             </div>
           </div>
         )}
+          </div>
+        </div>
       </div>
-    </div>
+    </section>
   );
 };

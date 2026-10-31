@@ -1,18 +1,27 @@
 import React from 'react';
 import { PlatformId } from '../types';
 
-export const BexoraLogo: React.FC<{ compact?: boolean }> = ({ compact = false }) => {
+export const BexoraLogo: React.FC<{
+  compact?: boolean;
+  siteName?: string;
+  logoUrl?: string;
+}> = ({ compact = false, siteName = 'BEXORA', logoUrl }) => {
+  const resolvedName = (siteName || 'BEXORA').trim() || 'BEXORA';
+  const resolvedLogo = logoUrl && logoUrl.trim() ? logoUrl.trim() : './icon.svg';
   return (
     <span className="inline-flex items-center gap-2.5 select-none shrink-0">
       <img
-        src="./icon.svg"
-        alt="BEXORA official mark"
+        src={resolvedLogo}
+        alt={`${resolvedName} official mark`}
         width={compact ? 32 : 36}
         height={compact ? 32 : 36}
         className="w-8 h-8 md:w-9 md:h-9 rounded-lg object-contain shrink-0"
       />
-      <span className="font-extrabold text-lg md:text-xl tracking-tight whitespace-nowrap" style={{ color: 'var(--text)' }}>
-        BEXORA
+      <span
+        className="font-extrabold text-lg md:text-xl tracking-tight whitespace-nowrap"
+        style={{ color: 'var(--text)' }}
+      >
+        {resolvedName}
       </span>
     </span>
   );

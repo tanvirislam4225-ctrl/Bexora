@@ -9,8 +9,19 @@ import type {
 
 export interface SafeInternalDestination {
   raw: string;
-  kind: 'view' | 'wallet' | 'profile_tab' | 'listing' | 'deal' | 'chat';
-  view?: 'home' | 'market' | 'sellers' | 'chat' | 'deals' | 'profile' | 'admin';
+  kind: 'view' | 'wallet' | 'profile_tab' | 'listing' | 'deal' | 'chat' | 'seller';
+  view?:
+    | 'home'
+    | 'market'
+    | 'sellers'
+    | 'favorites'
+    | 'my-bids'
+    | 'following'
+    | 'chat'
+    | 'deals'
+    | 'profile'
+    | 'public-profile'
+    | 'admin';
   profileTab?: 'settings' | 'nid';
   targetId?: string;
   ctaLabel: string;
@@ -25,6 +36,9 @@ const STATIC_VIEW_DESTINATIONS: Record<
   home: { kind: 'view', view: 'home', ctaLabel: 'Go to Home' },
   market: { kind: 'view', view: 'market', ctaLabel: 'Browse Marketplace' },
   sellers: { kind: 'view', view: 'sellers', ctaLabel: 'View Sellers' },
+  favorites: { kind: 'view', view: 'favorites', ctaLabel: 'Open Favorites' },
+  'my-bids': { kind: 'view', view: 'my-bids', ctaLabel: 'Open My Bids' },
+  following: { kind: 'view', view: 'following', ctaLabel: 'Open Following' },
   chat: { kind: 'view', view: 'chat', ctaLabel: 'Open Messages' },
   deals: { kind: 'view', view: 'deals', ctaLabel: 'Open Escrow Deals' },
   profile: { kind: 'view', view: 'profile', ctaLabel: 'Open My Profile' },
@@ -132,6 +146,15 @@ export function sanitizeNotificationDestination(dest?: string | null): SafeInter
   }
   if (prefix === 'chat') {
     return { raw: trimmed, kind: 'chat', view: 'chat', targetId: entityId, ctaLabel: 'Open Conversation' };
+  }
+  if (prefix === 'seller') {
+    return {
+      raw: trimmed,
+      kind: 'seller',
+      view: 'public-profile',
+      targetId: entityId,
+      ctaLabel: 'View Seller Profile',
+    };
   }
 
   return null;
@@ -429,4 +452,51 @@ export function filterNotificationsForRecipient(
 ): NotificationRecord[] {
   if (!uid) return [];
   return sortNotificationsNewestFirst(items.filter((item) => item && item.recipientId === uid));
+}
+
+export type NotificationInboxFilter =
+  | 'all'
+  | 'followed_sellers'
+  | 'bids'
+  | 'deals_wallet'
+  | 'security_system';
+
+export function isFollowedSellerNewListingNotification(
+  item: Pick<NotificationRecord, 'id' | 'category' | 'title' | 'referenceLabel'>
+): boolean {
+  if (!item || item.category !== 'listing') return false;
+  const idLower = String(item.id || '').toLowerCase();
+  const titleLower = String(item.title || '').toLowerCase();
+  const refLower = String(item.referenceLabel || '').toLowerCase();
+  return (
+    idLower.includes('seller_new_listing') ||
+    titleLower.includes('new listing from') ||
+    refLower.startsWith('followed seller')
+  );
+}
+
+export function matchesNotificationInboxFilter(
+  item: NotificationRecord,
+  filter: NotificationInboxFilter
+): boolean {
+  if (!item) return false;
+  switch (filter) {
+    case 'all':
+      return true;
+    case 'followed_sellers':
+      return isFollowedSellerNewListingNotification(item);
+    case 'bids':
+      return item.category === 'bid';
+    case 'deals_wallet':
+      return item.category === 'deal' || item.category === 'dispute' || item.category === 'wallet';
+    case 'security_system':
+      return (
+        item.category === 'account' ||
+        item.category === 'security' ||
+        item.category === 'verification' ||
+        item.category === 'announcement' ||
+        item.category === 'system' ||
+        (item.category === 'listing' && !isFollowedSellerNewListingNotification(item))
+      );
+  }
 }

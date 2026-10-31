@@ -5,7 +5,7 @@ import {
   verifyPasswordResetCode,
 } from 'firebase/auth';
 import { doc, serverTimestamp, updateDoc } from 'firebase/firestore';
-import { CheckCircle2, Eye, EyeOff, KeyRound, MailCheck, ShieldAlert, X } from 'lucide-react';
+import { ArrowLeft, CheckCircle2, Eye, EyeOff, KeyRound, MailCheck, ShieldAlert } from 'lucide-react';
 import { auth, db, formatFirebaseAuthError, safeRefreshCurrentUserToken } from '../lib/firebase';
 import { validateStrongPassword } from '../lib/marketplaceLogic';
 import { emitUserNotification } from '../lib/notificationService';
@@ -153,33 +153,29 @@ export const FirebaseAuthActionModal: React.FC<FirebaseAuthActionModalProps> = (
   };
 
   return (
-    <div
-      className="fixed inset-0 z-50 bg-black/65 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4"
-      onClick={onClose}
-      role="dialog"
-      aria-modal="true"
+    <section
+      className="bx-wrap py-8 sm:py-12 space-y-6"
       aria-label={
         action.mode === 'verifyEmail' ? 'Email verification' : 'Reset forgotten password'
       }
     >
-      <div
-        className="bx-card w-full max-w-md max-h-[92vh] overflow-y-auto rounded-t-3xl sm:rounded-2xl p-5 sm:p-6 space-y-5"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between gap-3">
-          <BexoraLogo compact />
-          <button
-            type="button"
-            onClick={onClose}
-            className="bx-icon-btn !w-9 !h-9"
-            aria-label="Close action dialog"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
+      <div className="max-w-xl mx-auto">
+        <button
+          type="button"
+          onClick={onClose}
+          className="bx-btn bx-btn-sm inline-flex items-center gap-2 mb-5"
+        >
+          <ArrowLeft className="w-4 h-4" />
+          <span>Back to BEXORA</span>
+        </button>
 
-        <div className="space-y-1">
-          <h2 className="text-lg font-extrabold flex items-center gap-2">
+        <div className="bx-card p-6 sm:p-8 space-y-5">
+          <div className="flex items-center justify-between gap-3">
+            <BexoraLogo compact />
+          </div>
+
+          <div className="space-y-1">
+            <h1 className="text-xl font-extrabold flex items-center gap-2">
             {action.mode === 'verifyEmail' ? (
               <>
                 <MailCheck className="w-5 h-5" style={{ color: 'var(--orange)' }} />
@@ -191,7 +187,7 @@ export const FirebaseAuthActionModal: React.FC<FirebaseAuthActionModalProps> = (
                 <span>Set a New Password</span>
               </>
             )}
-          </h2>
+          </h1>
           {targetEmail && (
             <p className="bx-hint">
               Account: <strong>{targetEmail}</strong>
@@ -371,7 +367,8 @@ export const FirebaseAuthActionModal: React.FC<FirebaseAuthActionModalProps> = (
             </button>
           </div>
         )}
+        </div>
       </div>
-    </div>
+    </section>
   );
 };

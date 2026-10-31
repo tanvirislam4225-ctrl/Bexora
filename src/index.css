@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *, .dark, .dark *));
 
 /* ============================= BEXORA DESIGN TOKENS ============================= */
 :root,
@@ -87,9 +88,18 @@
 }
 
 html,
+body,
+#root {
+  width: 100%;
+  max-width: 100%;
+  min-height: 100dvh;
+  margin: 0;
+  padding: 0;
+}
+
+html,
 body {
   overflow-x: hidden;
-  max-width: 100%;
   -webkit-text-size-adjust: 100%;
 }
 
@@ -100,7 +110,6 @@ body {
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
   transition: background-color 0.2s ease, color 0.2s ease;
-  min-height: 100vh;
 }
 
 button,
@@ -129,14 +138,16 @@ button {
 @layer components {
 .bx-wrap {
   width: 100%;
-  max-width: 1260px;
+  max-width: 1280px;
   margin: 0 auto;
-  padding: 0 16px;
+  padding-left: 16px;
+  padding-right: 16px;
 }
 
 @media (min-width: 768px) {
   .bx-wrap {
-    padding: 0 28px;
+    padding-left: 24px;
+    padding-right: 24px;
   }
 }
 

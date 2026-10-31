@@ -38,8 +38,11 @@ import {
   formatNotificationTimestamp,
   formatUnreadBadgeCount,
   getNotificationCategoryLabel,
+  isFollowedSellerNewListingNotification,
+  matchesNotificationInboxFilter,
   sanitizeNotificationDestination,
   sortNotificationsNewestFirst,
+  type NotificationInboxFilter,
   type SafeInternalDestination,
 } from '../lib/notificationLogic';
 import {
@@ -69,6 +72,7 @@ interface NotificationCenterProps {
   onMarkAllRead: () => Promise<void>;
   onNavigateDestination: (dest: SafeInternalDestination) => void;
   onOpenAuth: () => void;
+  externalOpenSignal?: number;
 }
 
 function renderCategoryIcon(category: NotificationCategory, severity: NotificationSeverity) {
@@ -102,9 +106,11 @@ export const NotificationCenter: React.FC<NotificationCenterProps> = ({
   onMarkAllRead,
   onNavigateDestination,
   onOpenAuth,
+  externalOpenSignal,
 }) => {
   const [open, setOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<'inbox' | 'settings'>('inbox');
+  const [inboxFilter, setInboxFilter] = useState<NotificationInboxFilter>('all');
   const [selectedNotificationId, setSelectedNotificationId] = useState<string | null>(null);
   const [markingAll, setMarkingAll] = useState(false);
   const [markingOneId, setMarkingOneId] = useState<string | null>(null);
@@ -118,9 +124,21 @@ export const NotificationCenter: React.FC<NotificationCenterProps> = ({
   const bellButtonRef = useRef<HTMLButtonElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
 
+  useEffect(() => {
+    if (externalOpenSignal && externalOpenSignal > 0) {
+      setActiveTab('inbox');
+      setOpen(true);
+    }
+  }, [externalOpenSignal]);
+
   const sortedNotifications = useMemo(
     () => sortNotificationsNewestFirst(notifications),
     [notifications]
+  );
+
+  const filteredNotifications = useMemo(
+    () => sortedNotifications.filter((n) => matchesNotificationInboxFilter(n, inboxFilter)),
+    [sortedNotifications, inboxFilter]
   );
 
   const unreadCount = useMemo(
@@ -436,6 +454,40 @@ export const NotificationCenter: React.FC<NotificationCenterProps> = ({
 
               {activeTab === 'inbox' ? (
                 <>
+                  {/* Category Filter Tabs */}
+                  <div
+                    role="group"
+                    aria-label="Filter notifications by category"
+                    className="px-3 py-2 border-b border-[var(--border-soft)] bg-[var(--surface-2)] flex items-center gap-1.5 overflow-x-auto shrink-0"
+                  >
+                    {(
+                      [
+                        { id: 'all', label: 'All' },
+                        { id: 'followed_sellers', label: 'Followed Sellers' },
+                        { id: 'bids', label: 'Bids' },
+                        { id: 'deals_wallet', label: 'Deals & Wallet' },
+                        { id: 'security_system', label: 'Account & Security' },
+                      ] as const
+                    ).map((tab) => {
+                      const active = inboxFilter === tab.id;
+                      return (
+                        <button
+                          key={tab.id}
+                          type="button"
+                          onClick={() => setInboxFilter(tab.id)}
+                          aria-pressed={active}
+                          className={`px-2.5 py-1 rounded-md text-[11px] font-extrabold whitespace-nowrap shrink-0 transition-colors ${
+                            active
+                              ? 'bg-[var(--text)] text-[var(--bg)]'
+                              : 'bg-[var(--surface)] text-[var(--text-2)] hover:text-[var(--text)] border border-[var(--border-soft)]'
+                          }`}
+                        >
+                          {tab.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+
                   {/* Notification List Body */}
                   <div className="flex-1 overflow-y-auto divide-y divide-[var(--border-soft)]">
                     {loading ? (
@@ -456,8 +508,8 @@ export const NotificationCenter: React.FC<NotificationCenterProps> = ({
                           </p>
                           <p className="text-xs font-medium text-[var(--text-2)] max-w-xs mx-auto leading-relaxed">
                             {userUid
-                              ? 'Real-time updates for bids, paid 3-party Deal Rooms, wallet credits, verification reviews, and security alerts will appear here.'
-                              : 'Platform announcements appear here for everyone. Sign in to view personal bids, Deal Rooms, wallet updates, and security alerts.'}
+                              ? 'Real-time updates for followed sellers, bids, paid 3-party Deal Rooms, wallet credits, verification reviews, and security alerts will appear here.'
+                              : 'Platform announcements appear here for everyone. Sign in to view followed seller alerts, personal bids, Deal Rooms, wallet updates, and security alerts.'}
                           </p>
                         </div>
                         {!userUid && (
@@ -473,12 +525,26 @@ export const NotificationCenter: React.FC<NotificationCenterProps> = ({
                           </button>
                         )}
                       </div>
+                    ) : filteredNotifications.length === 0 ? (
+                      <div className="p-8 text-center space-y-2.5">
+                        <p className="text-xs font-black text-[var(--text)]">
+                          No notifications in this category yet
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => setInboxFilter('all')}
+                          className="bx-btn bx-btn-sm !min-h-[30px] !px-3 !py-1 text-xs font-extrabold mx-auto whitespace-nowrap"
+                        >
+                          Show All Notifications
+                        </button>
+                      </div>
                     ) : (
-                      sortedNotifications.map((item) => {
+                      filteredNotifications.map((item) => {
                         const isUnread = !item.read;
                         const isSyncingThis = markingOneId === item.id;
                         const kind = resolveNotificationAlertKind(item);
                         const isDealRoomCreated = kind === 'deal_room_created';
+                        const isFollowedListing = isFollowedSellerNewListingNotification(item);
                         return (
                           <article
                             key={item.id}
@@ -494,6 +560,8 @@ export const NotificationCenter: React.FC<NotificationCenterProps> = ({
                                 <span className="font-extrabold text-[var(--text)] truncate">
                                   {isDealRoomCreated
                                     ? 'Paid Deal Room'
+                                    : isFollowedListing
+                                    ? 'Followed Seller · New Listing'
                                     : getNotificationCategoryLabel(item.category)}
                                 </span>
                                 <span aria-hidden="true">·</span>
@@ -615,14 +683,20 @@ export const NotificationCenter: React.FC<NotificationCenterProps> = ({
                         >
                           {pushBusy ? 'Updating…' : 'Disable Push'}
                         </button>
-                      ) : userUid && pushState?.status === 'ready_to_enable' ? (
+                      ) : userUid &&
+                        (pushState?.status === 'ready_to_enable' ||
+                          pushState?.status === 'fcm_api_disabled') ? (
                         <button
                           type="button"
                           disabled={pushBusy}
                           onClick={() => void handleEnablePush()}
                           className="bx-btn bx-btn-primary bx-btn-sm !min-h-[32px] !px-3 !py-1 text-[11px] font-extrabold whitespace-nowrap shrink-0"
                         >
-                          {pushBusy ? 'Enabling…' : 'Enable Push'}
+                          {pushBusy
+                            ? 'Enabling…'
+                            : pushState.status === 'fcm_api_disabled'
+                            ? 'Retry Push'
+                            : 'Enable Push'}
                         </button>
                       ) : !userUid ? (
                         <button
@@ -696,7 +770,67 @@ export const NotificationCenter: React.FC<NotificationCenterProps> = ({
                     )}
                   </section>
 
-                  {/* 2. Chime Toggles & Selectable Sound Profiles */}
+                  {/* 2. Optional Notification Categories */}
+                  <section className="p-3.5 rounded-xl border border-[var(--border-soft)] bg-[var(--surface)] space-y-3">
+                    <div className="flex items-center justify-between">
+                      <h3 className="text-xs font-black text-[var(--text)] flex items-center gap-1.5">
+                        <Bell className="w-4 h-4 text-[var(--orange)]" />
+                        Notification Categories &amp; Optional Alerts
+                      </h3>
+                    </div>
+
+                    <label className="flex items-center justify-between gap-3 py-1 cursor-pointer">
+                      <div>
+                        <div className="font-extrabold text-[var(--text)]">
+                          Followed Seller New Listings
+                        </div>
+                        <div className="text-[11px] text-[var(--text-2)]">
+                          Instant alert when a seller you follow publishes a newly approved listing
+                        </div>
+                      </div>
+                      <input
+                        type="checkbox"
+                        checked={preferences.followedSellerListingsEnabled !== false}
+                        onChange={(e) =>
+                          onUpdatePreferences({
+                            ...preferences,
+                            followedSellerListingsEnabled: e.target.checked,
+                          })
+                        }
+                        className="w-4 h-4 accent-[#FF6500] shrink-0"
+                      />
+                    </label>
+
+                    <div className="border-t border-[var(--border-soft)] pt-2.5">
+                      <label className="flex items-center justify-between gap-3 cursor-pointer">
+                        <div>
+                          <div className="font-extrabold text-[var(--text)]">
+                            Marketplace Bid Activity
+                          </div>
+                          <div className="text-[11px] text-[var(--text-2)]">
+                            Alerts for incoming pending bids, declined bids, and buyer bid withdrawals
+                          </div>
+                        </div>
+                        <input
+                          type="checkbox"
+                          checked={preferences.bidUpdatesEnabled !== false}
+                          onChange={(e) =>
+                            onUpdatePreferences({
+                              ...preferences,
+                              bidUpdatesEnabled: e.target.checked,
+                            })
+                          }
+                          className="w-4 h-4 accent-[#FF6500] shrink-0"
+                        />
+                      </label>
+                    </div>
+
+                    <p className="text-[11px] font-medium text-[var(--text-2)] border-t border-[var(--border-soft)] pt-2 leading-snug">
+                      Critical Escrow Deal Room, Wallet &amp; Payment, Verification, and Account Security notifications remain active to protect your transactions.
+                    </p>
+                  </section>
+
+                  {/* 3. Chime Toggles & Selectable Sound Profiles */}
                   <section className="p-3.5 rounded-xl border border-[var(--border-soft)] bg-[var(--surface)] space-y-3">
                     <div className="flex items-center justify-between">
                       <h3 className="text-xs font-black text-[var(--text)] flex items-center gap-1.5">
@@ -1027,7 +1161,9 @@ export const NotificationCenter: React.FC<NotificationCenterProps> = ({
                       selectedNotification.severity
                     )}
                     <span className="font-extrabold text-[var(--text)]">
-                      {getNotificationCategoryLabel(selectedNotification.category)}
+                      {isFollowedSellerNewListingNotification(selectedNotification)
+                        ? 'Followed Seller · New Listing'
+                        : getNotificationCategoryLabel(selectedNotification.category)}
                     </span>
                     <span aria-hidden="true">·</span>
                     <span className="text-[var(--green)] font-extrabold">

@@ -49,7 +49,7 @@ service cloud.firestore {
         && data.keys().hasOnly([
           'uid', 'displayName', 'username', 'bio', 'avatarUrl', 'coverUrl', 'location',
           'nidVerified', 'completedTrader', 'completedSales', 'completedPurchases',
-          'ratingSum', 'ratingCount', 'createdAt', 'updatedAt'
+          'ratingSum', 'ratingCount', 'followerCount', 'createdAt', 'updatedAt'
         ])
         && data.uid == uid
         && data.displayName is string && data.displayName.size() >= 2 && data.displayName.size() <= 80
@@ -64,6 +64,7 @@ service cloud.firestore {
         && data.completedPurchases is int && data.completedPurchases >= 0
         && data.ratingSum is int && data.ratingSum >= 0
         && data.ratingCount is int && data.ratingCount >= 0
+        && (!('followerCount' in data) || (data.followerCount is int && data.followerCount >= 0))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -78,7 +79,8 @@ service cloud.firestore {
         && prefs.keys().hasOnly([
           'inAppSoundEnabled', 'dealAlertSoundEnabled', 'adminAlertSoundEnabled',
           'vibrationEnabled', 'vibrationStrength', 'lockScreenPrivacyMode',
-          'normalSoundId', 'dealAlertSoundId', 'adminAlertSoundId'
+          'normalSoundId', 'dealAlertSoundId', 'adminAlertSoundId',
+          'followedSellerListingsEnabled', 'bidUpdatesEnabled'
         ])
         && prefs.inAppSoundEnabled is bool
         && prefs.dealAlertSoundEnabled is bool
@@ -88,7 +90,9 @@ service cloud.firestore {
         && prefs.lockScreenPrivacyMode in ['minimal', 'standard']
         && prefs.normalSoundId in ['01_soft_normal', '02_crisp_normal', '03_premium_deal', '04_urgent_deal']
         && prefs.dealAlertSoundId in ['01_soft_normal', '02_crisp_normal', '03_premium_deal', '04_urgent_deal']
-        && prefs.adminAlertSoundId in ['01_soft_normal', '02_crisp_normal', '03_premium_deal', '04_urgent_deal'];
+        && prefs.adminAlertSoundId in ['01_soft_normal', '02_crisp_normal', '03_premium_deal', '04_urgent_deal']
+        && (!('followedSellerListingsEnabled' in prefs) || prefs.followedSellerListingsEnabled is bool)
+        && (!('bidUpdatesEnabled' in prefs) || prefs.bidUpdatesEnabled is bool);
     }
 
     function isValidPrivateUser(data, uid) {
@@ -167,7 +171,7 @@ service cloud.firestore {
           'ageYears', 'ageMonths', 'metricValue', 'monthlyRevenueMinor',
           'accountUrl', 'urlValidationStatus', 'gameName', 'gameUid', 'gameLevel',
           'images', 'activeDealId', 'acceptedBidAmountMinor', 'reservedBuyerId',
-          'status', 'rejectionReason', 'views',
+          'status', 'rejectionReason', 'views', 'firstPublishedAtMs',
           'createdAt', 'updatedAt'
         ])
         && data.sellerId is string && data.sellerId.size() >= 1 && data.sellerId.size() <= 128
@@ -197,9 +201,10 @@ service cloud.firestore {
         && (!('activeDealId' in data) || (data.activeDealId is string && isValidId(data.activeDealId)))
         && (!('acceptedBidAmountMinor' in data) || (data.acceptedBidAmountMinor is int && data.acceptedBidAmountMinor > 0))
         && (!('reservedBuyerId' in data) || (data.reservedBuyerId is string && isValidId(data.reservedBuyerId)))
-        && data.status in ['draft', 'pending', 'active', 'reserved', 'sold', 'rejected', 'archived']
+        && data.status in ['draft', 'pending', 'active', 'reserved', 'sold', 'rejected', 'suspended', 'archived']
         && (!('rejectionReason' in data) || (data.rejectionReason is string && data.rejectionReason.size() <= 500))
         && data.views is int && data.views >= 0
+        && (!('firstPublishedAtMs' in data) || (data.firstPublishedAtMs is int && data.firstPublishedAtMs >= 0))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -459,7 +464,7 @@ service cloud.firestore {
         && data.keys().hasOnly([
           'userId', 'userName', 'method', 'payoutAccount',
           'amountMinor', 'currency', 'status', 'referenceId',
-          'rejectionReason', 'createdAt', 'updatedAt'
+          'rejectionReason', 'reviewedBy', 'reviewedAtMs', 'createdAt', 'updatedAt'
         ])
         && data.userId is string && data.userId.size() <= 128
         && data.userName is string && data.userName.size() <= 80
@@ -470,6 +475,8 @@ service cloud.firestore {
         && data.status in ['pending', 'paid', 'rejected']
         && (!('referenceId' in data) || (data.referenceId is string && data.referenceId.size() <= 80))
         && (!('rejectionReason' in data) || (data.rejectionReason is string && data.rejectionReason.size() <= 500))
+        && (!('reviewedBy' in data) || (data.reviewedBy is string && data.reviewedBy.size() <= 128))
+        && (!('reviewedAtMs' in data) || (data.reviewedAtMs is int && data.reviewedAtMs >= 0))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -515,6 +522,9 @@ service cloud.firestore {
           'disabledMonetizationIds', 'gamingTitles',
           'protectionHoursYoutube', 'protectionHoursFacebook', 'protectionHoursDefault',
           'customProtectionWindowsEnabled', 'fcmVapidPublicKey',
+          'wordpressPaymentEnabled', 'wordpressSiteUrl', 'wordpressBridgeEndpoint',
+          'siteName', 'brandTagline', 'logoUrl',
+          'noticeBannerEnabled', 'noticeBannerText', 'enabledLanguages',
           'updatedAt'
         ])
         && data.buyerFeeEnabled is bool
@@ -536,6 +546,15 @@ service cloud.firestore {
         && data.protectionHoursDefault is int && data.protectionHoursDefault >= 1 && data.protectionHoursDefault <= 720
         && (!('customProtectionWindowsEnabled' in data) || data.customProtectionWindowsEnabled is bool)
         && (!('fcmVapidPublicKey' in data) || (data.fcmVapidPublicKey is string && data.fcmVapidPublicKey.size() <= 100 && data.fcmVapidPublicKey.matches('^$|^[A-Za-z0-9_\\-]{84,92}$')))
+        && (!('wordpressPaymentEnabled' in data) || data.wordpressPaymentEnabled is bool)
+        && (!('wordpressSiteUrl' in data) || (data.wordpressSiteUrl is string && data.wordpressSiteUrl.size() <= 200 && data.wordpressSiteUrl.matches('^$|^https://[A-Za-z0-9.\\-/:_]+$')))
+        && (!('wordpressBridgeEndpoint' in data) || (data.wordpressBridgeEndpoint is string && data.wordpressBridgeEndpoint.size() <= 100 && data.wordpressBridgeEndpoint.matches('^/[A-Za-z0-9_/\\-]+$')))
+        && (!('siteName' in data) || (data.siteName is string && data.siteName.size() <= 60))
+        && (!('brandTagline' in data) || (data.brandTagline is string && data.brandTagline.size() <= 140))
+        && (!('logoUrl' in data) || (data.logoUrl is string && data.logoUrl.size() <= 300 && data.logoUrl.matches('^$|^\\./icon\\.svg$|^https://[A-Za-z0-9.\\-/:_?=&%]+$')))
+        && (!('noticeBannerEnabled' in data) || data.noticeBannerEnabled is bool)
+        && (!('noticeBannerText' in data) || (data.noticeBannerText is string && data.noticeBannerText.size() <= 280))
+        && (!('enabledLanguages' in data) || (data.enabledLanguages is list && data.enabledLanguages.size() >= 1 && data.enabledLanguages.size() <= 5 && data.enabledLanguages.hasOnly(['en', 'bn', 'hi', 'ar', 'ur'])))
         && data.updatedAt is timestamp;
     }
 
@@ -646,6 +665,54 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function isValidFavorite(data) {
+      return data.keys().hasAll([
+          'userId', 'listingId', 'sellerId', 'sellerName', 'sellerUsername',
+          'title', 'platform', 'subcategory', 'priceMinor', 'currency',
+          'createdAtMs', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'userId', 'listingId', 'sellerId', 'sellerName', 'sellerUsername',
+          'title', 'platform', 'subcategory', 'priceMinor', 'currency',
+          'thumbnailUrl', 'createdAtMs', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.userId)
+        && isValidId(data.listingId)
+        && isValidId(data.sellerId)
+        && data.sellerName is string && data.sellerName.size() >= 1 && data.sellerName.size() <= 80
+        && data.sellerUsername is string && data.sellerUsername.size() >= 1 && data.sellerUsername.size() <= 40
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 140
+        && data.platform in ['youtube', 'facebook', 'instagram', 'tiktok', 'telegram', 'website', 'domain', 'gaming']
+        && data.subcategory is string && data.subcategory.size() >= 1 && data.subcategory.size() <= 80
+        && data.priceMinor is int && data.priceMinor >= 100
+        && data.currency in ['BDT', 'USD']
+        && (!('thumbnailUrl' in data) || (data.thumbnailUrl is string && data.thumbnailUrl.size() <= 350000))
+        && data.createdAtMs is int && data.createdAtMs >= 0
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidSellerFollow(data) {
+      return data.keys().hasAll([
+          'followerId', 'sellerId', 'sellerName', 'sellerUsername',
+          'sellerVerified', 'createdAtMs', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'followerId', 'sellerId', 'sellerName', 'sellerUsername',
+          'sellerAvatarUrl', 'sellerVerified', 'createdAtMs', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.followerId)
+        && isValidId(data.sellerId)
+        && data.followerId != data.sellerId
+        && data.sellerName is string && data.sellerName.size() >= 1 && data.sellerName.size() <= 80
+        && data.sellerUsername is string && data.sellerUsername.size() >= 1 && data.sellerUsername.size() <= 40
+        && (!('sellerAvatarUrl' in data) || (data.sellerAvatarUrl is string && data.sellerAvatarUrl.size() <= 350000))
+        && data.sellerVerified is bool
+        && data.createdAtMs is int && data.createdAtMs >= 0
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
     // 0. Health Connection Test Path (Read-only doc lookup)
     match /test/{docId} {
       allow get: if docId == 'connection';
@@ -666,6 +733,7 @@ service cloud.firestore {
         && incoming().completedPurchases == 0
         && incoming().ratingSum == 0
         && incoming().ratingCount == 0
+        && (!('followerCount' in incoming()) || incoming().followerCount == 0)
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time;
       allow update: if isSignedIn()
@@ -687,6 +755,22 @@ service cloud.firestore {
             && incoming().ratingCount == existing().ratingCount + 1
             && incoming().ratingSum >= existing().ratingSum + 1
             && incoming().ratingSum <= existing().ratingSum + 5
+          )
+          || (
+            // Non-self follower atomically creating sellerFollows increments seller followerCount by 1
+            request.auth.uid != userId
+            && incoming().diff(existing()).affectedKeys().hasOnly(['followerCount', 'updatedAt'])
+            && !exists(/databases/$(database)/documents/sellerFollows/$('fol_' + request.auth.uid + '_' + userId))
+            && existsAfter(/databases/$(database)/documents/sellerFollows/$('fol_' + request.auth.uid + '_' + userId))
+            && incoming().followerCount == (('followerCount' in existing() ? existing().followerCount : 0) + 1)
+          )
+          || (
+            // Non-self follower atomically deleting sellerFollows decrements seller followerCount by 1
+            request.auth.uid != userId
+            && incoming().diff(existing()).affectedKeys().hasOnly(['followerCount', 'updatedAt'])
+            && exists(/databases/$(database)/documents/sellerFollows/$('fol_' + request.auth.uid + '_' + userId))
+            && !existsAfter(/databases/$(database)/documents/sellerFollows/$('fol_' + request.auth.uid + '_' + userId))
+            && incoming().followerCount == (('followerCount' in existing() && existing().followerCount > 0) ? existing().followerCount - 1 : 0)
           )
         );
       allow delete: if false;
@@ -717,10 +801,14 @@ service cloud.firestore {
           || (
             request.auth.uid == userId
             && incoming().diff(existing()).affectedKeys().hasOnly([
-              'email', 'phone', 'emailVerified', 'phoneVerified', 'nidStatus',
+              'email', 'phone', 'emailVerified', 'phoneVerified', 'nidStatus', 'nidRejectionReason',
               'preferredLanguage', 'preferredCurrency', 'notificationPrefs', 'updatedAt'
             ])
             && (incoming().nidStatus == existing().nidStatus || incoming().nidStatus == 'pending_review')
+            && (
+              !('nidRejectionReason' in incoming())
+              || ('nidRejectionReason' in existing() && incoming().nidRejectionReason == existing().nidRejectionReason)
+            )
             && (incoming().emailVerified == existing().emailVerified || (incoming().emailVerified == true && request.auth.token.email_verified == true))
             && (incoming().phoneVerified == existing().phoneVerified || (incoming().phoneVerified == true && ('phone_number' in request.auth.token && request.auth.token.phone_number is string)))
           )
@@ -832,7 +920,11 @@ service cloud.firestore {
             request.auth.uid == userId
             && existing().status == 'rejected'
             && incoming().status == 'pending_review'
-            && incoming().diff(existing()).affectedKeys().hasOnly(['frontImageData', 'backImageData', 'status', 'submittedAt', 'updatedAt'])
+            && !('rejectionReason' in incoming())
+            && !('reviewedBy' in incoming())
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'frontImageData', 'backImageData', 'status', 'rejectionReason', 'reviewedBy', 'submittedAt', 'updatedAt'
+            ])
           )
         );
       allow delete: if false;
@@ -854,6 +946,7 @@ service cloud.firestore {
         && incoming().status in ['draft', 'pending']
         && incoming().verifiedOptions.size() == 0
         && incoming().views == 0
+        && !('firstPublishedAtMs' in incoming())
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time;
       allow update: if isSignedIn()
@@ -867,18 +960,22 @@ service cloud.firestore {
             && incoming().updatedAt == request.time
           )
           || (
-            // Seller editing own non-sold and non-reserved listing resets verification to pending
+            // Seller editing own draft/pending/active/rejected/archived listing (never sold/reserved/suspended) resets verifiedOptions to []
             existing().sellerId == request.auth.uid
-            && existing().status != 'sold'
-            && existing().status != 'reserved'
+            && existing().status in ['draft', 'pending', 'active', 'rejected', 'archived']
             && incoming().status in ['draft', 'pending', 'archived']
-            && incoming().verifiedOptions == existing().verifiedOptions
+            && incoming().verifiedOptions.size() == 0
+            && incoming().views == existing().views
+            && (
+              !('rejectionReason' in incoming())
+              || ('rejectionReason' in existing() && incoming().rejectionReason == existing().rejectionReason)
+            )
             && incoming().updatedAt == request.time
             && incoming().diff(existing()).affectedKeys().hasOnly([
               'title', 'description', 'priceMinor', 'subcategory', 'monetizationStatus',
-              'claimedOptions', 'verificationState', 'ageYears', 'ageMonths',
+              'claimedOptions', 'verifiedOptions', 'verificationState', 'ageYears', 'ageMonths',
               'metricValue', 'monthlyRevenueMinor', 'accountUrl', 'urlValidationStatus',
-              'gameName', 'gameUid', 'gameLevel', 'images', 'status', 'updatedAt'
+              'gameName', 'gameUid', 'gameLevel', 'images', 'status', 'rejectionReason', 'updatedAt'
             ])
           )
           || (
@@ -1412,7 +1509,9 @@ service cloud.firestore {
         && incoming().amountMinor == existing().amountMinor
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
-        && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'referenceId', 'rejectionReason', 'updatedAt']);
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'status', 'referenceId', 'rejectionReason', 'reviewedBy', 'reviewedAtMs', 'updatedAt'
+        ]);
       allow delete: if false;
     }
 
@@ -1452,7 +1551,7 @@ service cloud.firestore {
       allow update, delete: if false;
     }
 
-    // 15. Public Platform Settings (Support contacts, fees, categories)
+    // 15. Public Platform Settings (Support contacts, fees, categories, branding)
     match /publicConfig/{docId} {
       allow get: if isValidId(docId);
       allow list: if false;
@@ -1471,6 +1570,9 @@ service cloud.firestore {
           'disabledMonetizationIds', 'gamingTitles',
           'protectionHoursYoutube', 'protectionHoursFacebook', 'protectionHoursDefault',
           'customProtectionWindowsEnabled', 'fcmVapidPublicKey',
+          'wordpressPaymentEnabled', 'wordpressSiteUrl', 'wordpressBridgeEndpoint',
+          'siteName', 'brandTagline', 'logoUrl',
+          'noticeBannerEnabled', 'noticeBannerText', 'enabledLanguages',
           'updatedAt'
         ]);
       allow delete: if false;
@@ -1644,6 +1746,61 @@ service cloud.firestore {
           'title', 'preview', 'body', 'severity', 'destination', 'active', 'updatedAt'
         ]);
       allow delete: if isAdmin() && isValidId(announcementId);
+    }
+
+    // 20. Strictly Owner-Private Saved Marketplace Favorites
+    match /favorites/{favoriteId} {
+      allow get: if isSignedIn() && isValidId(favoriteId) && (
+        resource == null || existing().userId == request.auth.uid
+      );
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isSignedIn()
+        && isValidId(favoriteId)
+        && isValidFavorite(incoming())
+        && incoming().userId == request.auth.uid
+        && favoriteId == ('fav_' + request.auth.uid + '_' + incoming().listingId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && exists(/databases/$(database)/documents/listings/$(incoming().listingId))
+        && get(/databases/$(database)/documents/listings/$(incoming().listingId)).data.status in ['active', 'reserved', 'sold'];
+      allow update: if false;
+      allow delete: if isSignedIn()
+        && isValidId(favoriteId)
+        && existing().userId == request.auth.uid;
+    }
+
+    // 21. Seller Follow Subscriptions (Atomically Paired with publicProfiles.followerCount)
+    match /sellerFollows/{followId} {
+      allow get: if isSignedIn() && isValidId(followId) && (
+        resource == null
+        || existing().followerId == request.auth.uid
+        || isAdmin()
+      );
+      allow list: if isSignedIn() && (
+        resource.data.followerId == request.auth.uid
+        || isAdmin()
+      );
+      allow create: if isSignedIn()
+        && isValidId(followId)
+        && isValidSellerFollow(incoming())
+        && incoming().followerId == request.auth.uid
+        && followId == ('fol_' + request.auth.uid + '_' + incoming().sellerId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && exists(/databases/$(database)/documents/publicProfiles/$(incoming().sellerId))
+        && getAfter(/databases/$(database)/documents/publicProfiles/$(incoming().sellerId)).data.followerCount
+           == (('followerCount' in get(/databases/$(database)/documents/publicProfiles/$(incoming().sellerId)).data
+             ? get(/databases/$(database)/documents/publicProfiles/$(incoming().sellerId)).data.followerCount
+             : 0) + 1);
+      allow update: if false;
+      allow delete: if isSignedIn()
+        && isValidId(followId)
+        && existing().followerId == request.auth.uid
+        && getAfter(/databases/$(database)/documents/publicProfiles/$(existing().sellerId)).data.followerCount
+           == (('followerCount' in get(/databases/$(database)/documents/publicProfiles/$(existing().sellerId)).data
+             && get(/databases/$(database)/documents/publicProfiles/$(existing().sellerId)).data.followerCount > 0)
+             ? get(/databases/$(database)/documents/publicProfiles/$(existing().sellerId)).data.followerCount - 1
+             : 0);
     }
   }
 }

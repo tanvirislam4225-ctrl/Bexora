@@ -14,6 +14,7 @@ import {
   AlertTriangle,
   CheckCircle2,
   Clock,
+  CreditCard,
   FileCheck2,
   ImagePlus,
   Lock,
@@ -122,6 +123,8 @@ const ProtectionCountdown: React.FC<{
   );
 };
 
+import { computeCheckoutWalletState } from '../lib/checkoutAndIntentLogic';
+
 interface DealsViewProps {
   userUid: string | null;
   profile: PublicProfile | null;
@@ -132,6 +135,7 @@ interface DealsViewProps {
   initialDealId: string | null;
   onRequireAuth: () => void;
   onOpenWallet: () => void;
+  onOpenDealCheckout?: (dealId: string) => void;
   onFlash: (msg: string) => void;
 }
 
@@ -145,6 +149,7 @@ export const DealsView: React.FC<DealsViewProps> = ({
   initialDealId,
   onRequireAuth,
   onOpenWallet,
+  onOpenDealCheckout,
   onFlash,
 }) => {
   const [selectedDealId, setSelectedDealId] = useState<string | null>(initialDealId);
@@ -340,10 +345,15 @@ export const DealsView: React.FC<DealsViewProps> = ({
     setLightboxIndex(startIndex);
   };
 
-  // PART 2: Exact Accepted-Bid Payment (Bid + 5% Buyer Fee)
+  // PART 2: Exact Accepted-Bid Payment (Bid + Buyer Fee)
   const handlePayAcceptedDeal = async () => {
     if (!activeDeal || !isBuyer || !privateUser) return;
-    if (privateUser.walletBalanceMinor < activeDeal.buyerTotalMinor) {
+    const walletCheck = computeCheckoutWalletState(
+      privateUser.walletBalanceMinor,
+      { buyerTotalMinor: activeDeal.buyerTotalMinor, currency: activeDeal.currency },
+      settings.usdToBdtRate
+    );
+    if (!walletCheck.hasSufficientBalance) {
       setErrMsg(
         `Insufficient wallet balance. Required: ${formatMoneyFromMinor(
           activeDeal.buyerTotalMinor,
@@ -390,7 +400,7 @@ export const DealsView: React.FC<DealsViewProps> = ({
         }
 
         const bal = Number(pSnap.data()?.walletBalanceMinor) || 0;
-        if (bal < activeDeal.buyerTotalMinor) {
+        if (bal < walletCheck.requiredInWalletCurrencyMinor) {
           throw new Error('Insufficient wallet balance.');
         }
 
@@ -410,7 +420,7 @@ export const DealsView: React.FC<DealsViewProps> = ({
         }
 
         tx.update(privRef, {
-          walletBalanceMinor: bal - activeDeal.buyerTotalMinor,
+          walletBalanceMinor: bal - walletCheck.requiredInWalletCurrencyMinor,
           updatedAt: serverTimestamp(),
         });
 
@@ -1310,17 +1320,37 @@ export const DealsView: React.FC<DealsViewProps> = ({
                   <div className="flex flex-wrap items-center gap-2.5">
                     {isBuyer && (
                       <>
+                        {onOpenDealCheckout && (
+                          <button
+                            type="button"
+                            disabled={busy}
+                            onClick={() => onOpenDealCheckout(activeDeal.id)}
+                            className="bx-btn bx-btn-yellow"
+                          >
+                            <CreditCard className="w-4 h-4" />
+                            <span>
+                              Proceed to Checkout (
+                              {formatMoneyFromMinor(
+                                activeDeal.buyerTotalMinor,
+                                displayCurrency,
+                                activeDeal.currency,
+                                settings.usdToBdtRate
+                              )}
+                              )
+                            </span>
+                          </button>
+                        )}
                         <button
                           type="button"
                           disabled={busy}
                           onClick={handlePayAcceptedDeal}
-                          className="bx-btn bx-btn-yellow"
+                          className={onOpenDealCheckout ? 'bx-btn bx-btn-primary bx-btn-sm' : 'bx-btn bx-btn-yellow'}
                         >
                           <Wallet className="w-4 h-4" />
                           <span>
                             {busy
                               ? 'Locking Funds in Escrow…'
-                              : `Pay Exact Total (${formatMoneyFromMinor(
+                              : `Quick Wallet Pay (${formatMoneyFromMinor(
                                   activeDeal.buyerTotalMinor,
                                   displayCurrency,
                                   activeDeal.currency,
@@ -1328,11 +1358,15 @@ export const DealsView: React.FC<DealsViewProps> = ({
                                 )})`}
                           </span>
                         </button>
-                        {(privateUser?.walletBalanceMinor || 0) < activeDeal.buyerTotalMinor && (
+                        {!computeCheckoutWalletState(
+                          privateUser?.walletBalanceMinor || 0,
+                          { buyerTotalMinor: activeDeal.buyerTotalMinor, currency: activeDeal.currency },
+                          settings.usdToBdtRate
+                        ).hasSufficientBalance && (
                           <button
                             type="button"
                             onClick={onOpenWallet}
-                            className="bx-btn bx-btn-primary bx-btn-sm"
+                            className="bx-btn bx-btn-sm"
                           >
                             Deposit Funds to Wallet
                           </button>

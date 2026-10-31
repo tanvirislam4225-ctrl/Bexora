@@ -18,6 +18,7 @@
         "completedPurchases": { "type": "integer" },
         "ratingSum": { "type": "integer" },
         "ratingCount": { "type": "integer" },
+        "followerCount": { "type": "integer" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -58,7 +59,9 @@
         "lockScreenPrivacyMode": { "type": "string", "enum": ["minimal", "standard"] },
         "normalSoundId": { "type": "string", "enum": ["01_soft_normal", "02_crisp_normal", "03_premium_deal", "04_urgent_deal"] },
         "dealAlertSoundId": { "type": "string", "enum": ["01_soft_normal", "02_crisp_normal", "03_premium_deal", "04_urgent_deal"] },
-        "adminAlertSoundId": { "type": "string", "enum": ["01_soft_normal", "02_crisp_normal", "03_premium_deal", "04_urgent_deal"] }
+        "adminAlertSoundId": { "type": "string", "enum": ["01_soft_normal", "02_crisp_normal", "03_premium_deal", "04_urgent_deal"] },
+        "followedSellerListingsEnabled": { "type": "boolean" },
+        "bidUpdatesEnabled": { "type": "boolean" }
       },
       "required": [
         "inAppSoundEnabled",
@@ -143,9 +146,10 @@
         "activeDealId": { "type": "string", "maxLength": 128 },
         "acceptedBidAmountMinor": { "type": "integer" },
         "reservedBuyerId": { "type": "string", "maxLength": 128 },
-        "status": { "type": "string", "enum": ["draft", "pending", "active", "reserved", "sold", "rejected", "archived"] },
+        "status": { "type": "string", "enum": ["draft", "pending", "active", "reserved", "sold", "rejected", "suspended", "archived"] },
         "rejectionReason": { "type": "string", "maxLength": 500 },
         "views": { "type": "integer" },
+        "firstPublishedAtMs": { "type": "integer" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -405,6 +409,8 @@
         "status": { "type": "string", "enum": ["pending", "paid", "rejected"] },
         "referenceId": { "type": "string", "maxLength": 80 },
         "rejectionReason": { "type": "string", "maxLength": 500 },
+        "reviewedBy": { "type": "string", "maxLength": 128 },
+        "reviewedAtMs": { "type": "integer" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -464,6 +470,15 @@
         "protectionHoursDefault": { "type": "integer" },
         "customProtectionWindowsEnabled": { "type": "boolean" },
         "fcmVapidPublicKey": { "type": "string", "maxLength": 100, "pattern": "^$|^[A-Za-z0-9_\\-]{84,92}$" },
+        "wordpressPaymentEnabled": { "type": "boolean" },
+        "wordpressSiteUrl": { "type": "string", "maxLength": 200, "pattern": "^$|^https://[A-Za-z0-9.\\-/:_]+$" },
+        "wordpressBridgeEndpoint": { "type": "string", "maxLength": 100, "pattern": "^/[A-Za-z0-9_/\\-]+$" },
+        "siteName": { "type": "string", "maxLength": 60 },
+        "brandTagline": { "type": "string", "maxLength": 140 },
+        "logoUrl": { "type": "string", "maxLength": 300, "pattern": "^$|^\\./icon\\.svg$|^https://[A-Za-z0-9.\\-/:_?=&%]+$" },
+        "noticeBannerEnabled": { "type": "boolean" },
+        "noticeBannerText": { "type": "string", "maxLength": 280 },
+        "enabledLanguages": { "type": "array", "maxLength": 5 },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": [
@@ -600,6 +615,68 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["title", "preview", "body", "severity", "destination", "active", "authorId", "createdAtMs", "createdAt", "updatedAt"]
+    },
+    "Favorite": {
+      "title": "Favorite",
+      "description": "Strictly owner-private saved marketplace listing with snapshot metadata for unavailable/sold fallback.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "listingId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "sellerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "sellerName": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "sellerUsername": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 140 },
+        "platform": { "type": "string", "enum": ["youtube", "facebook", "instagram", "tiktok", "telegram", "website", "domain", "gaming"] },
+        "subcategory": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "priceMinor": { "type": "integer" },
+        "currency": { "type": "string", "enum": ["BDT", "USD"] },
+        "thumbnailUrl": { "type": "string", "maxLength": 350000 },
+        "createdAtMs": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "userId",
+        "listingId",
+        "sellerId",
+        "sellerName",
+        "sellerUsername",
+        "title",
+        "platform",
+        "subcategory",
+        "priceMinor",
+        "currency",
+        "createdAtMs",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "SellerFollow": {
+      "title": "SellerFollow",
+      "description": "Authenticated user-to-seller follow relationship atomically paired with publicProfiles.followerCount.",
+      "type": "object",
+      "properties": {
+        "followerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "sellerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "sellerName": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "sellerUsername": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "sellerAvatarUrl": { "type": "string", "maxLength": 350000 },
+        "sellerVerified": { "type": "boolean" },
+        "createdAtMs": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "followerId",
+        "sellerId",
+        "sellerName",
+        "sellerUsername",
+        "sellerVerified",
+        "createdAtMs",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -702,6 +779,14 @@
     "/announcements/{announcementId}": {
       "schema": "Announcement",
       "description": "Admin-managed platform announcements."
+    },
+    "/favorites/{favoriteId}": {
+      "schema": "Favorite",
+      "description": "Strictly owner-private saved marketplace listings."
+    },
+    "/sellerFollows/{followId}": {
+      "schema": "SellerFollow",
+      "description": "Follower-to-seller subscriptions paired atomically with seller followerCount."
     }
   }
 }

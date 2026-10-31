@@ -29,6 +29,7 @@ import {
   Eye,
   FileCheck2,
   FolderCog,
+  Globe,
   Headset,
   History,
   Image as ImageIcon,
@@ -60,6 +61,7 @@ import {
   DealTransferSubmission,
   DepositRequestRecord,
   IdentityVerificationRecord,
+  LanguageCode,
   MarketplaceListing,
   NotificationCategory,
   NotificationSeverity,
@@ -68,9 +70,13 @@ import {
 } from '../types';
 import {
   BOOTSTRAPPED_SUPERADMIN_EMAIL,
+  DEFAULT_FIREBASE_AUTH_DOMAINS_URL,
+  DEFAULT_FIREBASE_AUTH_PROVIDERS_URL,
+  DEFAULT_TOKEN_SERVICE_ACTIVATION_URL,
   auth,
   db,
   detectFirebaseAuthCapabilities,
+  requestServerEnableTokenService,
 } from '../lib/firebase';
 import {
   appendDealAuditEvent,
@@ -84,6 +90,7 @@ import {
   DEFAULT_PUBLIC_SETTINGS,
   formatMoneyFromMinor,
   getDealStatusLabel,
+  getListingStatusBadgeMeta,
   getMonetizationLabel,
   getProtectionDurationHours,
   isDealPaidOrBeyond,
@@ -92,6 +99,13 @@ import {
   PLATFORM_LIST,
 } from '../lib/marketplaceLogic';
 import {
+  validateWordPressSiteUrl,
+  WordPressGatewayDiscoveryState,
+} from '../lib/checkoutAndIntentLogic';
+import { shouldTriggerFollowerPublicationAlert } from '../lib/engagementLogic';
+import { fanoutNewListingToFollowers } from '../lib/engagementService';
+import {
+  enableFcmCloudApisViaServer,
   fetchServerFcmStatus,
   type ServerFcmDiagnosticStatus,
 } from '../lib/pushNotifications';
@@ -100,6 +114,7 @@ import {
   NOTIFICATION_SOUND_CATALOG,
   playNotificationSoundById,
 } from '../lib/soundAndPushConfig';
+import { SUPPORTED_LANGUAGES } from '../lib/i18n';
 import { ImageLightboxModal } from './ImageLightboxModal';
 
 interface AdminDashboardProps {
@@ -193,6 +208,21 @@ async function savePublicSettingsSafe(
           protectionHoursDefault: Number(snap.data().protectionHoursDefault ?? 40),
           customProtectionWindowsEnabled: Boolean(snap.data().customProtectionWindowsEnabled),
           fcmVapidPublicKey: String(snap.data().fcmVapidPublicKey ?? ''),
+          wordpressPaymentEnabled: Boolean(snap.data().wordpressPaymentEnabled),
+          wordpressSiteUrl: String(snap.data().wordpressSiteUrl ?? ''),
+          wordpressBridgeEndpoint: String(
+            snap.data().wordpressBridgeEndpoint ?? '/wp-json/bexora/v1'
+          ),
+          siteName: String(snap.data().siteName ?? DEFAULT_PUBLIC_SETTINGS.siteName ?? 'BEXORA'),
+          brandTagline: String(snap.data().brandTagline ?? DEFAULT_PUBLIC_SETTINGS.brandTagline ?? ''),
+          logoUrl: String(snap.data().logoUrl ?? DEFAULT_PUBLIC_SETTINGS.logoUrl ?? ''),
+          noticeBannerEnabled: Boolean(snap.data().noticeBannerEnabled),
+          noticeBannerText: String(snap.data().noticeBannerText ?? ''),
+          enabledLanguages: Array.isArray(snap.data().enabledLanguages)
+            ? (snap.data().enabledLanguages.filter((c: unknown) =>
+                ['en', 'bn', 'hi', 'ar', 'ur'].includes(String(c))
+              ) as LanguageCode[])
+            : DEFAULT_PUBLIC_SETTINGS.enabledLanguages || ['en', 'bn', 'hi', 'ar', 'ur'],
         }
       : { ...DEFAULT_PUBLIC_SETTINGS };
 
@@ -298,15 +328,36 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [protDef, setProtDef] = useState(String(settings.protectionHoursDefault));
   const [customProtEnabled, setCustomProtEnabled] = useState(Boolean(settings.customProtectionWindowsEnabled));
 
-  // Support Contact Form State
+  // Support Contact & Editable Branding/Notice Form State
   const [supWa, setSupWa] = useState(settings.supportWhatsapp);
   const [supTg, setSupTg] = useState(settings.supportTelegram);
   const [supEmail, setSupEmail] = useState(settings.supportEmail);
+  const [siteNameInput, setSiteNameInput] = useState(settings.siteName || 'BEXORA');
+  const [brandTaglineInput, setBrandTaglineInput] = useState(settings.brandTagline || '');
+  const [logoUrlInput, setLogoUrlInput] = useState(settings.logoUrl || '');
+  const [noticeBannerEnabledInput, setNoticeBannerEnabledInput] = useState(
+    Boolean(settings.noticeBannerEnabled)
+  );
+  const [noticeBannerTextInput, setNoticeBannerTextInput] = useState(
+    settings.noticeBannerText || ''
+  );
+  const [enabledLanguagesInput, setEnabledLanguagesInput] = useState<LanguageCode[]>(
+    settings.enabledLanguages && settings.enabledLanguages.length > 0
+      ? settings.enabledLanguages
+      : ['en', 'bn', 'hi', 'ar', 'ur']
+  );
 
-  // Manual Payment Numbers Form State
+  // Manual Payment Numbers & WordPress Live Payment Bridge Form State
   const [bkashNum, setBkashNum] = useState(settings.bkashNumber);
   const [nagadNum, setNagadNum] = useState(settings.nagadNumber);
   const [rocketNum, setRocketNum] = useState(settings.rocketNumber);
+  const [wpEnabled, setWpEnabled] = useState(Boolean(settings.wordpressPaymentEnabled));
+  const [wpSiteUrl, setWpSiteUrl] = useState(settings.wordpressSiteUrl || '');
+  const [wpBridgeEndpoint, setWpBridgeEndpoint] = useState(
+    settings.wordpressBridgeEndpoint || '/wp-json/bexora/v1'
+  );
+  const [testingWpBridge, setTestingWpBridge] = useState(false);
+  const [wpTestResult, setWpTestResult] = useState<WordPressGatewayDiscoveryState | null>(null);
 
   // Role Management Form State
   const [targetRoleUid, setTargetRoleUid] = useState('');
@@ -317,6 +368,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [aiMessages, setAiMessages] = useState<{ role: 'admin' | 'ai'; text: string }[]>([]);
   const [aiBusy, setAiBusy] = useState(false);
   const [healthSnapshot, setHealthSnapshot] = useState<Record<string, unknown> | null>(null);
+  const [enablingCloudService, setEnablingCloudService] = useState<string | null>(null);
   const [newPropTitle, setNewPropTitle] = useState('');
   const [newPropCategory, setNewPropCategory] = useState<'bugfix' | 'security' | 'feature' | 'performance'>('feature');
   const [newPropSeverity, setNewPropSeverity] = useState<'low' | 'medium' | 'high' | 'critical'>('medium');
@@ -340,9 +392,22 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     setSupWa(settings.supportWhatsapp);
     setSupTg(settings.supportTelegram);
     setSupEmail(settings.supportEmail);
+    setSiteNameInput(settings.siteName || 'BEXORA');
+    setBrandTaglineInput(settings.brandTagline || '');
+    setLogoUrlInput(settings.logoUrl || '');
+    setNoticeBannerEnabledInput(Boolean(settings.noticeBannerEnabled));
+    setNoticeBannerTextInput(settings.noticeBannerText || '');
+    setEnabledLanguagesInput(
+      settings.enabledLanguages && settings.enabledLanguages.length > 0
+        ? settings.enabledLanguages
+        : ['en', 'bn', 'hi', 'ar', 'ur']
+    );
     setBkashNum(settings.bkashNumber);
     setNagadNum(settings.nagadNumber);
     setRocketNum(settings.rocketNumber);
+    setWpEnabled(Boolean(settings.wordpressPaymentEnabled));
+    setWpSiteUrl(settings.wordpressSiteUrl || '');
+    setWpBridgeEndpoint(settings.wordpressBridgeEndpoint || '/wp-json/bexora/v1');
     setVapidPublicKeyInput(settings.fcmVapidPublicKey || '');
   }, [settings]);
 
@@ -436,6 +501,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               status: ld.status,
               rejectionReason: ld.rejectionReason,
               views: Number(ld.views || 0),
+              firstPublishedAtMs: ld.firstPublishedAtMs ? Number(ld.firstPublishedAtMs) : undefined,
               createdAtMs: ld.createdAt?.toMillis ? ld.createdAt.toMillis() : Date.now(),
             };
           });
@@ -513,6 +579,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               status: wd.status,
               referenceId: wd.referenceId,
               rejectionReason: wd.rejectionReason,
+              reviewedBy: wd.reviewedBy,
+              reviewedAtMs: wd.reviewedAtMs ? Number(wd.reviewedAtMs) : undefined,
               createdAtMs: wd.createdAt?.toMillis ? wd.createdAt.toMillis() : Date.now(),
             };
           });
@@ -830,7 +898,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const fetchSystemHealth = async () => {
     const authCapabilities = await detectFirebaseAuthCapabilities(true).catch(() => null);
     try {
-      const resp = await fetch('/api/health');
+      const idToken = auth.currentUser ? await auth.currentUser.getIdToken() : '';
+      let resp = await fetch('/api/admin/system-health?refresh=1', {
+        headers: idToken ? { Authorization: `Bearer ${idToken}` } : undefined,
+      });
+      if (!resp.ok) {
+        resp = await fetch('/api/health');
+      }
       if (resp.ok) {
         const json = await resp.json();
         setHealthSnapshot({
@@ -855,6 +929,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
   };
 
+  const handleEnableCloudServiceFromHealth = async (kind: 'token_service' | 'fcm_apis') => {
+    setEnablingCloudService(kind);
+    try {
+      if (kind === 'token_service') {
+        const res = await requestServerEnableTokenService();
+        onFlash(res.message);
+      } else {
+        const res = await enableFcmCloudApisViaServer();
+        onFlash(res.message);
+      }
+      await fetchSystemHealth();
+    } catch (err) {
+      onFlash(err instanceof Error ? err.message : 'Cloud API enablement request failed.');
+    } finally {
+      setEnablingCloudService(null);
+    }
+  };
+
   useEffect(() => {
     if (section === 'aidev' && aiTab === 'health') {
       fetchSystemHealth();
@@ -869,9 +961,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
     setRunningAiOcr(true);
     try {
+      const idToken = auth.currentUser ? await auth.currentUser.getIdToken() : '';
       const resp = await fetch('/api/ai/verify-evidence', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
+        },
         body: JSON.stringify({
           platform: listing.platform,
           claimedOptions: listing.claimedOptions,
@@ -879,6 +975,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         }),
       });
       const data = await resp.json();
+      if (!resp.ok) {
+        onFlash(String(data.error || 'AI screenshot check blocked or unavailable.'));
+        return;
+      }
       const summary = String(data.summary || 'Queued for manual review.').slice(0, 1900);
       const method = String(data.method || 'manual_queue_fallback').slice(0, 75);
       await updateDoc(doc(db, 'listingEvidence', listing.id), {
@@ -904,10 +1004,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             : 'eligible_not_active'
           : 'not_claimed';
 
+      const isFirstPublish = shouldTriggerFollowerPublicationAlert(
+        listing.status,
+        'active',
+        listing.firstPublishedAtMs
+      );
+      const publishNowMs = Date.now();
+      const verifiedOpts = listing.monetizationStatus === 'monetized' ? verifiedSelections : [];
+
       await updateDoc(doc(db, 'listings', listing.id), {
         status: 'active',
-        verifiedOptions: listing.monetizationStatus === 'monetized' ? verifiedSelections : [],
+        verifiedOptions: verifiedOpts,
         verificationState: nextVerState,
+        rejectionReason: deleteField(),
+        ...(isFirstPublish ? { firstPublishedAtMs: publishNowMs } : {}),
         updatedAt: serverTimestamp(),
       });
       await writeAuditLog(
@@ -933,6 +1043,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         referenceLabel: listing.title.slice(0, 80),
         destination: `listing:${listing.id}`,
       });
+
+      if (isFirstPublish) {
+        void fanoutNewListingToFollowers(adminUid, {
+          ...listing,
+          status: 'active',
+          verifiedOptions: verifiedOpts,
+          verificationState: nextVerState,
+          firstPublishedAtMs: publishNowMs,
+        }).catch(() => {
+          // Never block or revert listing publication on follower notification delivery error
+        });
+      }
+
       onFlash('Listing approved and published to Marketplace!');
       setSelectedListingId(null);
     } catch (err) {
@@ -969,6 +1092,83 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       onFlash('Listing rejected with note sent to seller.');
     } catch (err) {
       onFlash(err instanceof Error ? err.message : 'Failed to reject listing.');
+    }
+  };
+
+  const handleSuspendListing = async (listing: MarketplaceListing) => {
+    if (listing.status === 'reserved' || listing.status === 'sold') {
+      onFlash('Cannot suspend a listing that has an active reservation or completed escrow deal.');
+      return;
+    }
+    const cleanReason =
+      rejectReason.trim() || 'Listing temporarily suspended by BEXORA Moderation pending compliance review.';
+    try {
+      await updateDoc(doc(db, 'listings', listing.id), {
+        status: 'suspended',
+        rejectionReason: cleanReason.slice(0, 500),
+        updatedAt: serverTimestamp(),
+      });
+      await writeAuditLog(
+        adminUid,
+        'suspend_listing',
+        'listing',
+        listing.id,
+        `Suspended listing "${listing.title}": ${cleanReason}`
+      );
+      await emitUserNotification({
+        recipientId: listing.sellerId,
+        actorRole: 'admin',
+        eventKey: `listing_suspended_${listing.id}_${Date.now()}`,
+        category: 'listing',
+        severity: 'warning',
+        title: 'Listing Paused by Moderation',
+        preview: `"${listing.title}" has been temporarily suspended from public search.`,
+        body: `Your listing "${listing.title}" was temporarily suspended by BEXORA Moderation.\n\nModerator Note: ${cleanReason}\n\nContact BEXORA Support if you have questions or supporting verification documents.`,
+        refType: 'listing',
+        refId: listing.id,
+        referenceLabel: listing.title.slice(0, 80),
+        destination: 'profile',
+      });
+      setRejectReason('');
+      setSelectedListingId(null);
+      onFlash('Listing suspended from public marketplace.');
+    } catch (err) {
+      onFlash(err instanceof Error ? err.message : 'Failed to suspend listing.');
+    }
+  };
+
+  const handleRestoreSuspendedListing = async (listing: MarketplaceListing) => {
+    try {
+      await updateDoc(doc(db, 'listings', listing.id), {
+        status: 'active',
+        rejectionReason: deleteField(),
+        updatedAt: serverTimestamp(),
+      });
+      await writeAuditLog(
+        adminUid,
+        'restore_suspended_listing',
+        'listing',
+        listing.id,
+        `Restored suspended listing "${listing.title}" to active`
+      );
+      await emitUserNotification({
+        recipientId: listing.sellerId,
+        actorRole: 'admin',
+        eventKey: `listing_restored_${listing.id}_${Date.now()}`,
+        category: 'listing',
+        severity: 'success',
+        title: 'Listing Restored to Marketplace',
+        preview: `"${listing.title}" is active again on BEXORA.`,
+        body: `Your listing "${listing.title}" has been reviewed and restored to active status on the BEXORA Marketplace.`,
+        refType: 'listing',
+        refId: listing.id,
+        referenceLabel: listing.title.slice(0, 80),
+        destination: `listing:${listing.id}`,
+      });
+      setSelectedListingId(null);
+      onFlash('Suspended listing restored to live Marketplace!');
+    } catch (err) {
+      onFlash(err instanceof Error ? err.message : 'Failed to restore suspended listing.');
     }
   };
 
@@ -1154,6 +1354,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           tx.update(wdRef, {
             status: 'paid',
             referenceId: cleanRef,
+            reviewedBy: adminUid,
+            reviewedAtMs: Date.now(),
             updatedAt: serverTimestamp(),
           });
           tx.update(userRef, {
@@ -1173,6 +1375,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           tx.update(wdRef, {
             status: 'rejected',
             rejectionReason: cleanRef,
+            reviewedBy: adminUid,
+            reviewedAtMs: Date.now(),
             updatedAt: serverTimestamp(),
           });
           tx.update(userRef, {
@@ -2033,6 +2237,41 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
   };
 
+  const handleSaveBrandingAndNotice = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanSiteName = siteNameInput.trim().slice(0, 60) || 'BEXORA';
+    const cleanLogoUrl = logoUrlInput.trim().slice(0, 300);
+    if (
+      cleanLogoUrl !== '' &&
+      cleanLogoUrl !== './icon.svg' &&
+      !/^https:\/\/[A-Za-z0-9.\-/:_?=&%]+$/.test(cleanLogoUrl)
+    ) {
+      onFlash('Logo URL must be empty (default BEXORA emblem), "./icon.svg", or a valid HTTPS image URL.');
+      return;
+    }
+    const safeLangs: LanguageCode[] =
+      enabledLanguagesInput.length > 0 ? enabledLanguagesInput : ['en'];
+    try {
+      await savePublicSettingsSafe(
+        adminUid,
+        {
+          siteName: cleanSiteName,
+          brandTagline: brandTaglineInput.trim().slice(0, 140),
+          logoUrl: cleanLogoUrl,
+          noticeBannerEnabled: Boolean(noticeBannerEnabledInput),
+          noticeBannerText: noticeBannerTextInput.trim().slice(0, 280),
+          enabledLanguages: safeLangs,
+        },
+        `Updated Platform Branding (${cleanSiteName}), Notice Banner (enabled=${Boolean(
+          noticeBannerEnabledInput
+        )}), and ${safeLangs.length} active language(s).`
+      );
+      onFlash('Platform Branding, Top Notice Banner & Languages updated live!');
+    } catch (err) {
+      onFlash(err instanceof Error ? err.message : 'Failed to save branding & notice settings.');
+    }
+  };
+
   const handleSaveManualPayments = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
@@ -2048,6 +2287,72 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       onFlash('Manual payment numbers updated live for Wallet Deposits!');
     } catch (err) {
       onFlash(err instanceof Error ? err.message : 'Failed to save payment numbers.');
+    }
+  };
+
+  const handleSaveWordPressBridge = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const urlCheck = validateWordPressSiteUrl(wpSiteUrl);
+    if (!urlCheck.valid) {
+      onFlash(urlCheck.error || 'Enter a valid HTTPS WordPress URL.');
+      return;
+    }
+    const cleanEndpoint =
+      (wpBridgeEndpoint.trim().startsWith('/')
+        ? wpBridgeEndpoint.trim()
+        : `/${wpBridgeEndpoint.trim()}`
+      ).slice(0, 120) || '/wp-json/bexora/v1';
+
+    try {
+      await savePublicSettingsSafe(
+        adminUid,
+        {
+          wordpressPaymentEnabled: Boolean(wpEnabled && urlCheck.normalizedUrl),
+          wordpressSiteUrl: urlCheck.normalizedUrl,
+          wordpressBridgeEndpoint: cleanEndpoint,
+        },
+        `Updated WordPress Live Payment Bridge (${urlCheck.normalizedUrl || 'not configured'}, enabled=${Boolean(
+          wpEnabled && urlCheck.normalizedUrl
+        )}).`
+      );
+      onFlash('WordPress Live Payment Bridge configuration saved!');
+    } catch (err) {
+      onFlash(err instanceof Error ? err.message : 'Failed to save WordPress payment settings.');
+    }
+  };
+
+  const handleTestWordPressBridge = async () => {
+    const urlCheck = validateWordPressSiteUrl(wpSiteUrl);
+    if (!urlCheck.valid || !urlCheck.normalizedUrl) {
+      onFlash(urlCheck.error || 'Enter a valid HTTPS WordPress site URL first.');
+      return;
+    }
+    setTestingWpBridge(true);
+    setWpTestResult(null);
+    try {
+      const idToken = auth.currentUser ? await auth.currentUser.getIdToken() : '';
+      const qs = new URLSearchParams({
+        testDraft: '1',
+        siteUrl: urlCheck.normalizedUrl,
+        bridgeEndpoint: wpBridgeEndpoint.trim() || '/wp-json/bexora/v1',
+      });
+      const resp = await fetch(`/api/payments/wordpress/methods?${qs.toString()}`, {
+        headers: idToken ? { Authorization: `Bearer ${idToken}` } : undefined,
+      });
+      if (!resp.ok) {
+        throw new Error(`Bridge test failed (${resp.status}).`);
+      }
+      const data = (await resp.json()) as WordPressGatewayDiscoveryState;
+      setWpTestResult(data);
+      onFlash(data.userMessage || 'WordPress payment gateway diagnostic completed.');
+    } catch (err) {
+      onFlash(
+        err instanceof Error
+          ? err.message
+          : 'Could not reach server WordPress bridge diagnostic endpoint.'
+      );
+    } finally {
+      setTestingWpBridge(false);
     }
   };
 
@@ -2147,9 +2452,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     setAiPrompt('');
     setAiBusy(true);
     try {
+      const idToken = auth.currentUser ? await auth.currentUser.getIdToken() : '';
       const resp = await fetch('/api/ai/developer-chat', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
+        },
         body: JSON.stringify({
           message: msg,
           systemContext: `Listings: ${allListings.length}, Deals: ${deals.length}, BuyerFee: ${settings.buyerFeePct}%, SellerFee: ${settings.sellerFeePct}%`,
@@ -2162,6 +2471,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           role: 'ai',
           text: String(
             data.reply ||
+              data.error ||
               'Deterministic fallback: Stage any proposed code or configuration change in the Approval Queue for human review.'
           ),
         },
@@ -2386,7 +2696,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 },
                 { id: 'commissions', label: 'Fees & Commission', icon: Percent },
                 { id: 'categories', label: 'Categories & Games', icon: FolderCog },
-                { id: 'support', label: 'Support Contacts', icon: Headset },
+                { id: 'support', label: 'Support & Branding', icon: Headset },
                 { id: 'payments', label: 'Payment Numbers', icon: Layers },
                 { id: 'notifications', label: 'Announcements & Alerts', icon: Megaphone },
                 { id: 'roles', label: 'Superadmin & Logs', icon: Users },
@@ -2594,23 +2904,43 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     </div>
                   )}
 
-                  <div className="flex flex-col sm:flex-row gap-3 pt-2">
-                    <button
-                      type="button"
-                      onClick={() => handleApproveListing(selectedModerationListing)}
-                      className="bx-btn bx-btn-primary px-5 py-2.5 text-xs font-extrabold inline-flex items-center justify-center gap-1.5"
-                    >
-                      <Check className="w-4 h-4" />
-                      Approve & Publish Listing
-                    </button>
-                    <div className="flex-1 flex gap-2">
+                  <div className="flex flex-col sm:flex-row flex-wrap gap-3 pt-2">
+                    {selectedModerationListing.status === 'suspended' ? (
+                      <button
+                        type="button"
+                        onClick={() => handleRestoreSuspendedListing(selectedModerationListing)}
+                        className="bx-btn bx-btn-primary px-5 py-2.5 text-xs font-extrabold inline-flex items-center justify-center gap-1.5"
+                      >
+                        <Check className="w-4 h-4" />
+                        Restore Suspended Listing to Live
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => handleApproveListing(selectedModerationListing)}
+                        className="bx-btn bx-btn-primary px-5 py-2.5 text-xs font-extrabold inline-flex items-center justify-center gap-1.5"
+                      >
+                        <Check className="w-4 h-4" />
+                        Approve & Publish Listing
+                      </button>
+                    )}
+                    <div className="flex-1 flex flex-wrap gap-2">
                       <input
                         type="text"
                         value={rejectReason}
                         onChange={(e) => setRejectReason(e.target.value)}
-                        placeholder="Rejection reason for seller…"
-                        className="bx-input flex-1 px-3 py-2 text-xs"
+                        placeholder="Moderator reason for seller (reject or suspend)…"
+                        className="bx-input flex-1 min-w-[200px] px-3 py-2 text-xs"
                       />
+                      {selectedModerationListing.status === 'active' && (
+                        <button
+                          type="button"
+                          onClick={() => handleSuspendListing(selectedModerationListing)}
+                          className="bx-btn px-4 py-2 text-xs font-extrabold bg-amber-600 text-white border-2 border-[#191919]"
+                        >
+                          Suspend Listing
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={() => handleRejectListing(selectedModerationListing)}
@@ -2627,30 +2957,33 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </div>
               ) : (
                 <div className="space-y-3">
-                  {allListings.map((l) => (
-                    <div key={l.id} className="bx-card p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <span className="text-[11px] font-black uppercase px-2 py-0.5 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)]">
-                            {l.status}
-                          </span>
-                          <span className="text-xs font-bold opacity-75">{l.platform.toUpperCase()}</span>
+                  {allListings.map((l) => {
+                    const badge = getListingStatusBadgeMeta(l.status);
+                    return (
+                      <div key={l.id} className="bx-card p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-[11px] font-black uppercase px-2 py-0.5 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)]">
+                              {badge.label}
+                            </span>
+                            <span className="text-xs font-bold opacity-75">{l.platform.toUpperCase()}</span>
+                          </div>
+                          <h3 className="font-black text-sm mt-1">{l.title}</h3>
+                          <p className="text-xs opacity-75">
+                            Seller: @{l.sellerUsername} · {formatMoneyFromMinor(l.priceMinor, displayCurrency, l.currency, settings.usdToBdtRate)}
+                          </p>
                         </div>
-                        <h3 className="font-black text-sm mt-1">{l.title}</h3>
-                        <p className="text-xs opacity-75">
-                          Seller: @{l.sellerUsername} · {formatMoneyFromMinor(l.priceMinor, displayCurrency, l.currency, settings.usdToBdtRate)}
-                        </p>
+                        <button
+                          type="button"
+                          onClick={() => setSelectedListingId(l.id)}
+                          className="bx-btn bx-btn-primary px-4 py-2 text-xs font-extrabold inline-flex items-center gap-1.5"
+                        >
+                          <Eye className="w-3.5 h-3.5" />
+                          Inspect & Moderate
+                        </button>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => setSelectedListingId(l.id)}
-                        className="bx-btn bx-btn-primary px-4 py-2 text-xs font-extrabold inline-flex items-center gap-1.5"
-                      >
-                        <Eye className="w-3.5 h-3.5" />
-                        Inspect & Moderate
-                      </button>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -3702,116 +4035,345 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </form>
           )}
 
-          {/* 9. SUPPORT CONTACT SETTINGS */}
+          {/* 9. SUPPORT CONTACTS, BRANDING, NOTICE BANNER & LANGUAGES */}
           {section === 'support' && (
-            <form onSubmit={handleSaveSupportContacts} className="bx-card p-6 max-w-2xl space-y-5">
-              <h1 className="text-xl font-black">Support Contact Settings</h1>
-              <p className="text-xs opacity-75">
-                Updates immediately sync with the Floating Support Button across all pages. Leave blank to hide an unconfigured channel.
-              </p>
+            <div className="space-y-6 max-w-3xl">
+              <form onSubmit={handleSaveSupportContacts} className="bx-card p-6 space-y-5">
+                <h1 className="text-xl font-black">Support Contact Settings</h1>
+                <p className="text-xs opacity-75">
+                  Updates immediately sync with the Floating Support Button across all pages. Leave blank to hide an unconfigured channel.
+                </p>
 
-              <div>
-                <label htmlFor="bx-sup-wa" className="block text-xs font-extrabold mb-1">
-                  WhatsApp Support Number (with country code)
-                </label>
-                <input
-                  id="bx-sup-wa"
-                  type="text"
-                  value={supWa}
-                  onChange={(e) => setSupWa(e.target.value)}
-                  placeholder="+8801700000000"
-                  className="bx-input w-full px-3.5 py-2.5 text-sm"
-                />
-              </div>
+                <div>
+                  <label htmlFor="bx-sup-wa" className="block text-xs font-extrabold mb-1">
+                    WhatsApp Support Number (with country code)
+                  </label>
+                  <input
+                    id="bx-sup-wa"
+                    type="text"
+                    value={supWa}
+                    onChange={(e) => setSupWa(e.target.value)}
+                    placeholder="+8801700000000"
+                    className="bx-input w-full px-3.5 py-2.5 text-sm"
+                  />
+                </div>
 
-              <div>
-                <label htmlFor="bx-sup-tg" className="block text-xs font-extrabold mb-1">
-                  Telegram Support URL or @Handle
-                </label>
-                <input
-                  id="bx-sup-tg"
-                  type="text"
-                  value={supTg}
-                  onChange={(e) => setSupTg(e.target.value)}
-                  placeholder="https://t.me/bexorasupport"
-                  className="bx-input w-full px-3.5 py-2.5 text-sm"
-                />
-              </div>
+                <div>
+                  <label htmlFor="bx-sup-tg" className="block text-xs font-extrabold mb-1">
+                    Telegram Support URL or @Handle
+                  </label>
+                  <input
+                    id="bx-sup-tg"
+                    type="text"
+                    value={supTg}
+                    onChange={(e) => setSupTg(e.target.value)}
+                    placeholder="https://t.me/bexorasupport"
+                    className="bx-input w-full px-3.5 py-2.5 text-sm"
+                  />
+                </div>
 
-              <div>
-                <label htmlFor="bx-sup-email" className="block text-xs font-extrabold mb-1">
-                  Support Desk Email Address
-                </label>
-                <input
-                  id="bx-sup-email"
-                  type="email"
-                  value={supEmail}
-                  onChange={(e) => setSupEmail(e.target.value)}
-                  placeholder="support@bexora.com"
-                  className="bx-input w-full px-3.5 py-2.5 text-sm"
-                />
-              </div>
+                <div>
+                  <label htmlFor="bx-sup-email" className="block text-xs font-extrabold mb-1">
+                    Support Desk Email Address
+                  </label>
+                  <input
+                    id="bx-sup-email"
+                    type="email"
+                    value={supEmail}
+                    onChange={(e) => setSupEmail(e.target.value)}
+                    placeholder="support@bexora.com"
+                    className="bx-input w-full px-3.5 py-2.5 text-sm"
+                  />
+                </div>
 
-              <button type="submit" className="bx-btn bx-btn-primary px-6 py-2.5 text-sm font-extrabold">
-                Save Support Channels
-              </button>
-            </form>
+                <button type="submit" className="bx-btn bx-btn-primary px-6 py-2.5 text-sm font-extrabold">
+                  Save Support Channels
+                </button>
+              </form>
+
+              <form onSubmit={handleSaveBrandingAndNotice} className="bx-card p-6 space-y-5">
+                <div>
+                  <h2 className="text-lg font-black">
+                    Platform Branding, Top Notice Banner & Active Languages
+                  </h2>
+                  <p className="text-xs opacity-75 mt-1">
+                    Customize site display name, custom HTTPS brand logo URL (leave blank to use the default BEXORA geometric emblem), top announcement notice bar, and enabled customer languages.
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label htmlFor="bx-brand-name" className="block text-xs font-extrabold mb-1">
+                      Platform Display Name
+                    </label>
+                    <input
+                      id="bx-brand-name"
+                      type="text"
+                      value={siteNameInput}
+                      onChange={(e) => setSiteNameInput(e.target.value)}
+                      placeholder="BEXORA"
+                      maxLength={60}
+                      className="bx-input w-full px-3.5 py-2.5 text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="bx-brand-logo" className="block text-xs font-extrabold mb-1">
+                      Custom Logo Image URL (Optional HTTPS)
+                    </label>
+                    <input
+                      id="bx-brand-logo"
+                      type="text"
+                      value={logoUrlInput}
+                      onChange={(e) => setLogoUrlInput(e.target.value)}
+                      placeholder="Leave blank for default BEXORA emblem"
+                      maxLength={300}
+                      className="bx-input w-full px-3.5 py-2.5 text-sm"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label htmlFor="bx-brand-tagline" className="block text-xs font-extrabold mb-1">
+                    Footer / Brand Tagline
+                  </label>
+                  <input
+                    id="bx-brand-tagline"
+                    type="text"
+                    value={brandTaglineInput}
+                    onChange={(e) => setBrandTaglineInput(e.target.value)}
+                    placeholder="Verified Digital Asset Marketplace & Protected Escrow"
+                    maxLength={140}
+                    className="bx-input w-full px-3.5 py-2.5 text-sm"
+                  />
+                </div>
+
+                <div className="p-4 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)] space-y-3">
+                  <label className="flex items-center gap-2.5 text-xs font-extrabold cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={noticeBannerEnabledInput}
+                      onChange={(e) => setNoticeBannerEnabledInput(e.target.checked)}
+                      className="w-4 h-4 accent-[#FF6500]"
+                    />
+                    <span>Show Top Sitewide Notice Banner Above Header</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={noticeBannerTextInput}
+                    onChange={(e) => setNoticeBannerTextInput(e.target.value)}
+                    placeholder="e.g., Escrow payouts & manual bKash/Nagad deposits are processed 24/7."
+                    maxLength={280}
+                    className="bx-input w-full px-3 py-2 text-xs"
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <div className="text-xs font-extrabold">Enabled Header Languages</div>
+                  <div className="flex flex-wrap gap-2">
+                    {SUPPORTED_LANGUAGES.map((lMeta) => {
+                      const active = enabledLanguagesInput.includes(lMeta.code);
+                      return (
+                        <label
+                          key={lMeta.code}
+                          className="inline-flex items-center gap-2 px-3 py-1.5 border border-[var(--bx-border)] bg-[var(--bx-surface)] text-xs font-bold cursor-pointer"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={active}
+                            onChange={() =>
+                              setEnabledLanguagesInput((prev) => {
+                                if (active) {
+                                  const next = prev.filter((x) => x !== lMeta.code);
+                                  return next.length > 0 ? next : ['en'];
+                                }
+                                return [...prev, lMeta.code];
+                              })
+                            }
+                          />
+                          <span>
+                            {lMeta.label} ({lMeta.code.toUpperCase()})
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <button type="submit" className="bx-btn bx-btn-primary px-6 py-2.5 text-sm font-extrabold">
+                  Save Branding, Notice & Languages
+                </button>
+              </form>
+            </div>
           )}
 
-          {/* 10. MANUAL PAYMENT & GATEWAY SETTINGS */}
+          {/* 10. MANUAL PAYMENT & WORDPRESS LIVE GATEWAY SETTINGS */}
           {section === 'payments' && (
-            <form onSubmit={handleSaveManualPayments} className="bx-card p-6 max-w-2xl space-y-5">
-              <h1 className="text-xl font-black">Manual Wallet Payment Destinations</h1>
-              <p className="text-xs opacity-75">
-                Configure official Send Money / Cash Out numbers displayed in the Wallet Deposit modal. Automated live gateways (bKash Merchant API, SSLCommerz, Stripe) remain disabled until merchant credentials are provisioned.
-              </p>
+            <div className="space-y-6 max-w-3xl">
+              <form onSubmit={handleSaveManualPayments} className="bx-card p-6 space-y-5">
+                <h1 className="text-xl font-black">Manual Wallet Payment Destinations</h1>
+                <p className="text-xs opacity-75">
+                  Configure official Send Money / Cash Out numbers displayed on the BEXORA Wallet page. Buyers can add balance to their BEXORA Wallet and immediately complete Buy Now or Accepted Bid Escrow purchases.
+                </p>
 
-              <div>
-                <label htmlFor="bx-pay-bkash" className="block text-xs font-extrabold mb-1">
-                  bKash Destination Number
+                <div>
+                  <label htmlFor="bx-pay-bkash" className="block text-xs font-extrabold mb-1">
+                    bKash Destination Number
+                  </label>
+                  <input
+                    id="bx-pay-bkash"
+                    type="text"
+                    value={bkashNum}
+                    onChange={(e) => setBkashNum(e.target.value)}
+                    placeholder="017XXXXXXXX"
+                    className="bx-input w-full px-3.5 py-2.5 text-sm"
+                  />
+                </div>
+
+                <div>
+                  <label htmlFor="bx-pay-nagad" className="block text-xs font-extrabold mb-1">
+                    Nagad Destination Number
+                  </label>
+                  <input
+                    id="bx-pay-nagad"
+                    type="text"
+                    value={nagadNum}
+                    onChange={(e) => setNagadNum(e.target.value)}
+                    placeholder="018XXXXXXXX"
+                    className="bx-input w-full px-3.5 py-2.5 text-sm"
+                  />
+                </div>
+
+                <div>
+                  <label htmlFor="bx-pay-rocket" className="block text-xs font-extrabold mb-1">
+                    Rocket Destination Number
+                  </label>
+                  <input
+                    id="bx-pay-rocket"
+                    type="text"
+                    value={rocketNum}
+                    onChange={(e) => setRocketNum(e.target.value)}
+                    placeholder="019XXXXXXXXX"
+                    className="bx-input w-full px-3.5 py-2.5 text-sm"
+                  />
+                </div>
+
+                <button type="submit" className="bx-btn bx-btn-primary px-6 py-2.5 text-sm font-extrabold">
+                  Save Wallet Payment Numbers
+                </button>
+              </form>
+
+              <form onSubmit={handleSaveWordPressBridge} className="bx-card p-6 space-y-5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <Globe className="w-5 h-5 text-[#FF6500]" />
+                    <h2 className="text-lg font-black">
+                      WordPress Live Payment Bridge (Multi-Gateway Checkout)
+                    </h2>
+                  </div>
+                  <span
+                    className="text-[11px] font-black uppercase px-2.5 py-1 rounded-lg border"
+                    style={{
+                      background: settings.wordpressPaymentEnabled
+                        ? 'var(--green-soft)'
+                        : 'var(--surface-2)',
+                      color: settings.wordpressPaymentEnabled ? 'var(--green)' : 'var(--text-2)',
+                      borderColor: 'var(--border-soft)',
+                    }}
+                  >
+                    {settings.wordpressPaymentEnabled ? 'Enabled in Settings' : 'Wallet-Only Mode'}
+                  </span>
+                </div>
+
+                <p className="text-xs opacity-80 leading-relaxed">
+                  Connect your WordPress / WooCommerce payment hub to dynamically expose any number of live payment gateways (bKash Merchant, SSLCommerz, Stripe, PayPal, UddoktaPay, Cards) on the BEXORA Checkout page. Secret keys (<code>WORDPRESS_WEBHOOK_SECRET</code>, <code>WORDPRESS_CONSUMER_KEY</code>, <code>WORDPRESS_CONSUMER_SECRET</code>) stay strictly server-side in environment variables—never in public database settings.
+                </p>
+
+                <label className="flex items-center gap-2.5 text-xs font-extrabold cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={wpEnabled}
+                    onChange={(e) => setWpEnabled(e.target.checked)}
+                    className="w-4 h-4 accent-[#FF6500]"
+                  />
+                  <span>Enable WordPress Live Payment Gateways on Checkout Page</span>
                 </label>
-                <input
-                  id="bx-pay-bkash"
-                  type="text"
-                  value={bkashNum}
-                  onChange={(e) => setBkashNum(e.target.value)}
-                  placeholder="017XXXXXXXX"
-                  className="bx-input w-full px-3.5 py-2.5 text-sm"
-                />
-              </div>
 
-              <div>
-                <label htmlFor="bx-pay-nagad" className="block text-xs font-extrabold mb-1">
-                  Nagad Destination Number
-                </label>
-                <input
-                  id="bx-pay-nagad"
-                  type="text"
-                  value={nagadNum}
-                  onChange={(e) => setNagadNum(e.target.value)}
-                  placeholder="018XXXXXXXX"
-                  className="bx-input w-full px-3.5 py-2.5 text-sm"
-                />
-              </div>
+                <div>
+                  <label htmlFor="bx-wp-site-url" className="block text-xs font-extrabold mb-1">
+                    WordPress Site HTTPS Origin URL
+                  </label>
+                  <input
+                    id="bx-wp-site-url"
+                    type="url"
+                    value={wpSiteUrl}
+                    onChange={(e) => setWpSiteUrl(e.target.value)}
+                    placeholder="https://pay.yourdomain.com"
+                    className="bx-input w-full px-3.5 py-2.5 text-sm"
+                  />
+                </div>
 
-              <div>
-                <label htmlFor="bx-pay-rocket" className="block text-xs font-extrabold mb-1">
-                  Rocket Destination Number
-                </label>
-                <input
-                  id="bx-pay-rocket"
-                  type="text"
-                  value={rocketNum}
-                  onChange={(e) => setRocketNum(e.target.value)}
-                  placeholder="019XXXXXXXXX"
-                  className="bx-input w-full px-3.5 py-2.5 text-sm"
-                />
-              </div>
+                <div>
+                  <label htmlFor="bx-wp-bridge-endpoint" className="block text-xs font-extrabold mb-1">
+                    WordPress REST Bridge Base Path
+                  </label>
+                  <input
+                    id="bx-wp-bridge-endpoint"
+                    type="text"
+                    value={wpBridgeEndpoint}
+                    onChange={(e) => setWpBridgeEndpoint(e.target.value)}
+                    placeholder="/wp-json/bexora/v1"
+                    className="bx-input w-full px-3.5 py-2.5 text-sm"
+                  />
+                  <span className="bx-hint block mt-1">
+                    Supports custom <code>/wp-json/bexora/v1/gateways</code> plugin endpoints or standard WooCommerce REST <code>/wp-json/wc/v3/payment_gateways</code>.
+                  </span>
+                </div>
 
-              <button type="submit" className="bx-btn bx-btn-primary px-6 py-2.5 text-sm font-extrabold">
-                Save Payment Numbers
-              </button>
-            </form>
+                {wpTestResult && (
+                  <div className="p-3.5 rounded-xl bx-soft space-y-2 text-xs">
+                    <div className="font-extrabold">
+                      Status: <span className="uppercase">{wpTestResult.statusCode}</span> · Webhook Secret:{' '}
+                      {wpTestResult.webhookSecretConfigured ? 'Configured' : 'Not Configured'}
+                    </div>
+                    <p style={{ color: 'var(--text-2)' }}>{wpTestResult.userMessage}</p>
+                    {wpTestResult.methods.length > 0 && (
+                      <div className="pt-1 flex flex-wrap gap-1.5">
+                        {wpTestResult.methods.map((m) => (
+                          <span
+                            key={m.id}
+                            className="px-2 py-0.5 rounded-md border font-bold"
+                            style={{
+                              background: 'var(--surface)',
+                              borderColor: 'var(--border-soft)',
+                            }}
+                          >
+                            {m.title} ({m.id})
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <div className="flex flex-wrap items-center gap-3">
+                  <button
+                    type="submit"
+                    className="bx-btn bx-btn-primary px-6 py-2.5 text-sm font-extrabold"
+                  >
+                    Save WordPress Bridge Settings
+                  </button>
+                  <button
+                    type="button"
+                    disabled={testingWpBridge}
+                    onClick={handleTestWordPressBridge}
+                    className="bx-btn px-4 py-2.5 text-xs font-extrabold inline-flex items-center gap-1.5"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${testingWpBridge ? 'animate-spin' : ''}`} />
+                    <span>{testingWpBridge ? 'Testing Gateways…' : 'Test WordPress Connection'}</span>
+                  </button>
+                </div>
+              </form>
+            </div>
           )}
 
           {/* 11. SUPERADMIN ROLE MANAGEMENT & AUDIT LOGS */}
@@ -3996,16 +4558,81 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </div>
               )}
 
-              {/* AI SUBTAB 2: SYSTEM HEALTH */}
+              {/* AI SUBTAB 2: SYSTEM HEALTH (ADMIN-ONLY CLOUD & FIREBASE DIAGNOSTICS) */}
               {aiTab === 'health' && (
-                <div className="bx-card p-5 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <h2 className="text-base font-black">System Health & Runtime Diagnostics</h2>
-                    <button type="button" onClick={fetchSystemHealth} className="bx-btn bx-btn-ghost px-3 py-1 text-xs font-bold">
-                      Refresh Check
+                <div className="bx-card p-5 space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <h2 className="text-base font-black">
+                        System Health & Continuous 5-Minute Cloud Diagnostics
+                      </h2>
+                      <p className="text-xs opacity-75">
+                        Restricted strictly to authorized BEXORA Administrators. Firebase & Google Cloud configuration links are isolated here and never shown on public customer screens.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={fetchSystemHealth}
+                      className="bx-btn bx-btn-ghost px-3 py-1.5 text-xs font-extrabold inline-flex items-center gap-1.5"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      Refresh Live Check
                     </button>
                   </div>
-                  <pre className="p-3 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)] text-xs overflow-x-auto">
+
+                  <div className="p-4 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)] space-y-3 text-xs">
+                    <div className="font-black uppercase tracking-wider text-[11px] text-[#FF6500]">
+                      Admin-Only Cloud & Firebase Quick Actions
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        disabled={enablingCloudService !== null}
+                        onClick={() => handleEnableCloudServiceFromHealth('token_service')}
+                        className="bx-btn bx-btn-primary px-3 py-1.5 text-xs font-extrabold"
+                      >
+                        {enablingCloudService === 'token_service'
+                          ? 'Checking Token Service…'
+                          : 'Auto-Enable Token Service API'}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={enablingCloudService !== null}
+                        onClick={() => handleEnableCloudServiceFromHealth('fcm_apis')}
+                        className="bx-btn px-3 py-1.5 text-xs font-extrabold"
+                      >
+                        {enablingCloudService === 'fcm_apis'
+                          ? 'Checking FCM APIs…'
+                          : 'Auto-Enable FCM Cloud APIs'}
+                      </button>
+                      <a
+                        href={DEFAULT_FIREBASE_AUTH_PROVIDERS_URL}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="bx-btn bx-btn-ghost px-3 py-1.5 text-xs font-bold inline-flex items-center gap-1"
+                      >
+                        Firebase Sign-In Providers <ExternalLink className="w-3 h-3" />
+                      </a>
+                      <a
+                        href={DEFAULT_FIREBASE_AUTH_DOMAINS_URL}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="bx-btn bx-btn-ghost px-3 py-1.5 text-xs font-bold inline-flex items-center gap-1"
+                      >
+                        Authorized Domains <ExternalLink className="w-3 h-3" />
+                      </a>
+                      <a
+                        href={DEFAULT_TOKEN_SERVICE_ACTIVATION_URL}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="bx-btn bx-btn-ghost px-3 py-1.5 text-xs font-bold inline-flex items-center gap-1"
+                      >
+                        Google Cloud Token Service <ExternalLink className="w-3 h-3" />
+                      </a>
+                    </div>
+                  </div>
+
+                  <pre className="p-3 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)] text-xs overflow-x-auto max-h-96">
                     {JSON.stringify(healthSnapshot || { checking: true }, null, 2)}
                   </pre>
                 </div>
@@ -4270,13 +4897,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   <h2 className="text-base font-black">Authentication, FCM Web Push & Sound Configuration</h2>
                   <div>Header Real-Time Notification Center (`notifications` + `announcements`): <span className="text-emerald-600">ACTIVE</span></div>
                   <div>
-                    Web Push VAPID Public Key (`VITE_FIREBASE_VAPID_KEY` / Public Settings):{' '}
-                    <span className={fcmServerDiag?.envVapidValid || isValidVapidPublicKey(settings.fcmVapidPublicKey) ? 'text-emerald-600' : 'text-amber-600'}>
-                      {fcmServerDiag?.envVapidValid
-                        ? 'CONFIGURED VIA ENV'
-                        : isValidVapidPublicKey(settings.fcmVapidPublicKey)
-                        ? 'CONFIGURED VIA PUBLIC SETTINGS'
-                        : 'AWAITING FIREBASE WEB PUSH PUBLIC KEY'}
+                    Firebase Admin SDK (`firebase-admin` / Cloud Run Managed ADC):{' '}
+                    <span className={fcmServerDiag?.adminSdkInitialized ? 'text-emerald-600' : 'text-amber-600'}>
+                      {loadingFcmDiag ? 'CHECKING…' : fcmServerDiag?.adminSdkInitialized ? 'INITIALIZED (KEYLESS MANAGED ADC)' : 'CHECK IN NOTIFICATIONS TAB'}
+                    </span>
+                  </div>
+                  <div>
+                    Web Push VAPID Public Key:{' '}
+                    <span className="text-emerald-600">
+                      {isValidVapidPublicKey(settings.fcmVapidPublicKey)
+                        ? 'ACTIVE (CUSTOM PUBLIC CERTIFICATE)'
+                        : fcmServerDiag?.vapidMode === 'custom_env'
+                        ? 'ACTIVE (CUSTOM ENV PUBLIC KEY)'
+                        : 'ACTIVE (FCM OFFICIAL MANAGED DEFAULT)'}
                     </span>
                   </div>
                   <div>
@@ -4369,13 +5002,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
                   <div className="p-3 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)] space-y-1">
-                    <div className="opacity-70 font-semibold">Web Push VAPID Public Key</div>
-                    <div className="font-extrabold">
-                      {fcmServerDiag?.envVapidValid
-                        ? 'Active via VITE_FIREBASE_VAPID_KEY'
-                        : isValidVapidPublicKey(settings.fcmVapidPublicKey)
-                        ? 'Active via Public Config'
-                        : 'Not Configured Yet'}
+                    <div className="opacity-70 font-semibold">Web Push VAPID &amp; Admin SDK</div>
+                    <div className="font-extrabold text-emerald-600">
+                      {isValidVapidPublicKey(settings.fcmVapidPublicKey)
+                        ? 'Custom Public Key + Managed ADC'
+                        : fcmServerDiag?.vapidMode === 'custom_env'
+                        ? 'Custom Env Key + Managed ADC'
+                        : 'FCM Official Default + Managed ADC'}
                     </div>
                   </div>
                   <div className="p-3 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)] space-y-1">
@@ -4414,20 +5047,50 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </div>
 
                 {fcmServerDiag?.vapidConsoleErrorDiagnosis && (
-                  <div className="p-3.5 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)] text-xs space-y-1.5">
+                  <div className="p-3.5 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)] text-xs space-y-2">
                     <div className="font-black text-[#FF6500]">
-                      Firebase Console Web Push Certificate Diagnostics (`responsive-dragon-tmn89`)
+                      Cloud Messaging &amp; IAM Readiness (`responsive-dragon-tmn89`)
                     </div>
                     <p className="leading-relaxed opacity-90">
                       {fcmServerDiag.vapidConsoleErrorDiagnosis}
                     </p>
+                    {fcmServerDiag.fcmRegistrationsApiStatus === 'disabled' && (
+                      <div className="flex flex-wrap items-center gap-2 pt-1">
+                        <button
+                          type="button"
+                          disabled={loadingFcmDiag}
+                          onClick={() => {
+                            setLoadingFcmDiag(true);
+                            void enableFcmCloudApisViaServer()
+                              .then(async (res) => {
+                                onFlash(res.message);
+                                const diag = await fetchServerFcmStatus();
+                                setFcmServerDiag(diag);
+                              })
+                              .finally(() => setLoadingFcmDiag(false));
+                          }}
+                          className="bx-btn bx-btn-primary px-3 py-1.5 text-xs font-extrabold"
+                        >
+                          Auto-Enable FCM Registration API
+                        </button>
+                        <a
+                          href={fcmServerDiag.fcmRegistrationsActivationUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="bx-btn bx-btn-ghost px-3 py-1.5 text-xs font-bold inline-flex items-center gap-1"
+                        >
+                          <span>Open Cloud Console API Library</span>
+                          <ExternalLink className="w-3 h-3" />
+                        </a>
+                      </div>
+                    )}
                   </div>
                 )}
 
                 <form onSubmit={handleSavePublicVapidKey} className="space-y-2.5">
                   <label className="block space-y-1 text-xs font-bold">
                     <span>
-                      Public Web Push Certificate Key (Fallback when <code className="font-mono">VITE_FIREBASE_VAPID_KEY</code> env var is unset)
+                      Optional Custom Web Push Public Certificate Override (Leave blank to use FCM Official Managed Default)
                     </span>
                     <div className="flex flex-col sm:flex-row gap-2">
                       <input

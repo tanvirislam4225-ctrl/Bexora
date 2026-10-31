@@ -30,6 +30,7 @@ export type ListingStatus =
   | 'reserved'
   | 'sold'
   | 'rejected'
+  | 'suspended'
   | 'archived';
 
 export type DealStatus =
@@ -76,6 +77,7 @@ export interface PublicProfile {
   completedPurchases: number;
   ratingSum: number;
   ratingCount: number;
+  followerCount?: number;
   createdAt?: unknown;
   updatedAt?: unknown;
 }
@@ -140,6 +142,34 @@ export interface MarketplaceListing {
   status: ListingStatus;
   rejectionReason?: string;
   views: number;
+  firstPublishedAtMs?: number;
+  createdAtMs: number;
+}
+
+export interface FavoriteRecord {
+  id: string;
+  userId: string;
+  listingId: string;
+  sellerId: string;
+  sellerName: string;
+  sellerUsername: string;
+  title: string;
+  platform: PlatformId;
+  subcategory: string;
+  priceMinor: number;
+  currency: CurrencyCode;
+  thumbnailUrl?: string;
+  createdAtMs: number;
+}
+
+export interface SellerFollowRecord {
+  id: string;
+  followerId: string;
+  sellerId: string;
+  sellerName: string;
+  sellerUsername: string;
+  sellerAvatarUrl?: string;
+  sellerVerified: boolean;
   createdAtMs: number;
 }
 
@@ -309,6 +339,8 @@ export interface WithdrawalRequestRecord {
   status: 'pending' | 'paid' | 'rejected';
   referenceId?: string;
   rejectionReason?: string;
+  reviewedBy?: string;
+  reviewedAtMs?: number;
   createdAtMs: number;
 }
 
@@ -343,6 +375,15 @@ export interface PublicSettings {
   protectionHoursDefault: number;
   customProtectionWindowsEnabled?: boolean;
   fcmVapidPublicKey?: string;
+  wordpressPaymentEnabled?: boolean;
+  wordpressSiteUrl?: string;
+  wordpressBridgeEndpoint?: string;
+  siteName?: string;
+  brandTagline?: string;
+  logoUrl?: string;
+  noticeBannerEnabled?: boolean;
+  noticeBannerText?: string;
+  enabledLanguages?: LanguageCode[];
 }
 
 export interface AiProposalRecord {
@@ -410,6 +451,8 @@ export interface UserNotificationPreferences {
   normalSoundId: NotificationSoundId;
   dealAlertSoundId: NotificationSoundId;
   adminAlertSoundId: NotificationSoundId;
+  followedSellerListingsEnabled?: boolean;
+  bidUpdatesEnabled?: boolean;
 }
 
 export interface NotificationRecord {
