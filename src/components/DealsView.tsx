@@ -1072,6 +1072,7 @@ export const DealsView: React.FC<DealsViewProps> = ({
           tx.update(sellerPubRef, {
             ratingSum: curSum + reviewScore,
             ratingCount: curCount + 1,
+            lastReviewDealId: activeDeal.id,
             updatedAt: serverTimestamp(),
           });
         }

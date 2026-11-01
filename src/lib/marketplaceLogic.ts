@@ -6,6 +6,7 @@ import {
   ListingStatus,
   PlatformId,
   PublicSettings,
+  TokenServiceStatus,
 } from '../types';
 
 export interface PlatformDefinition {
@@ -859,6 +860,125 @@ export function computeSessionRenewalSchedule(
   };
 }
 
+export const RECOVERABLE_AUTH_SESSION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+
+export interface StagedRecoverableAuthSession {
+  uid: string;
+  email: string;
+  displayName: string;
+  providerId: string;
+  stagedAtMs: number;
+}
+
+/**
+ * Builds a staged recoverable session descriptor when an expired Firebase ID token must be removed
+ * prior to Firestore boot (`securetoken.googleapis.com` disabled), preserving identity metadata so
+ * silent background OIDC/IdP restoration can mint a fresh Firebase ID token automatically on revisit.
+ */
+export function buildStagedRecoverableSession(
+  inspection: StoredFirebaseAuthInspection,
+  nowMs: number,
+  lastIntentionalLogoutAtMs = 0
+): StagedRecoverableAuthSession | null {
+  if (!inspection.hasSession || !inspection.uid) {
+    return null;
+  }
+  if (
+    lastIntentionalLogoutAtMs > 0 &&
+    inspection.expirationTimeMs > 0 &&
+    lastIntentionalLogoutAtMs >= inspection.expirationTimeMs - 3_600_000
+  ) {
+    return null;
+  }
+  return {
+    uid: inspection.uid,
+    email: inspection.email || '',
+    displayName: inspection.displayName || '',
+    providerId: inspection.providerId || '',
+    stagedAtMs: nowMs,
+  };
+}
+
+/**
+ * Safely parses and validates a `bx_recoverable_session_v1` payload from `localStorage`,
+ * discarding malformed payloads or entries older than `maxAgeMs` (default 30 days).
+ */
+export function parseStagedRecoverableSession(
+  rawJson: string | null | undefined,
+  nowMs: number,
+  maxAgeMs = RECOVERABLE_AUTH_SESSION_MAX_AGE_MS
+): StagedRecoverableAuthSession | null {
+  if (!rawJson || typeof rawJson !== 'string') {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(rawJson) as Partial<StagedRecoverableAuthSession>;
+    const uid = typeof parsed?.uid === 'string' ? parsed.uid.trim() : '';
+    const stagedAtMs = Number(parsed?.stagedAtMs ?? 0);
+    if (!uid || !Number.isFinite(stagedAtMs) || stagedAtMs <= 0) {
+      return null;
+    }
+    if (nowMs - stagedAtMs > maxAgeMs) {
+      return null;
+    }
+    return {
+      uid,
+      email: typeof parsed?.email === 'string' ? parsed.email.trim() : '',
+      displayName: typeof parsed?.displayName === 'string' ? parsed.displayName.trim() : '',
+      providerId: typeof parsed?.providerId === 'string' ? parsed.providerId.trim() : '',
+      stagedAtMs,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Tri-state policy for updating `bx_token_service_verified` in `localStorage`:
+ * - `'set_verified'` ONLY when live probe confirms `'enabled_verified'`.
+ * - `'clear_verified'` ONLY when live probe confirms `'disabled'` or `'config_mismatch'`.
+ * - `'preserve_existing'` on transient `'unable_to_verify'`, `'enablement_pending'`, or `'permission_denied'`
+ *   so temporary network glitches never strip verified refresh capability on next reload.
+ */
+export function shouldUpdatePersistedTokenServiceFlag(
+  status: TokenServiceStatus
+): 'set_verified' | 'clear_verified' | 'preserve_existing' {
+  if (status === 'enabled_verified') {
+    return 'set_verified';
+  }
+  if (status === 'disabled' || status === 'config_mismatch') {
+    return 'clear_verified';
+  }
+  return 'preserve_existing';
+}
+
+/**
+ * Determines what background continuity action should run when a backgrounded tab or sleeping device wakes up:
+ * - `'none'`: Token Service API is active, or >= 15 minutes of token lifetime remain.
+ * - `'silent_refresh_now'`: <= 15 minutes (and > 50s) remain — proactively mint a fresh 60m token silently.
+ * - `'restore_expired_now'`: <= 50s remain or already expired while asleep — immediately restore session before Firestore hits 403.
+ */
+export function evaluateWakeSessionAction(
+  expirationTimeMs: number,
+  nowMs: number,
+  tokenServiceEnabled: boolean
+): 'none' | 'silent_refresh_now' | 'restore_expired_now' {
+  if (tokenServiceEnabled) {
+    return 'none';
+  }
+  if (!Number.isFinite(expirationTimeMs) || expirationTimeMs <= 0) {
+    return 'restore_expired_now';
+  }
+  const remainingMs = expirationTimeMs - nowMs;
+  if (remainingMs <= 50_000) {
+    return 'restore_expired_now';
+  }
+  if (remainingMs <= 15 * 60_000) {
+    return 'silent_refresh_now';
+  }
+  return 'none';
+}
+
 /**
  * Classifies Identity Toolkit `accounts:signInWithPassword` probe responses into three distinct states:
  * - `'disabled'`: Confirmed disabled in Firebase Console (`PASSWORD_LOGIN_DISABLED` or `OPERATION_NOT_ALLOWED`).
@@ -1665,6 +1785,63 @@ export function normalizeDraftListingFields(input: {
     ageMonths,
   };
 }
+
+/**
+ * Verifies raw file header magic bytes against allowed raster image signatures
+ * (JPEG FF D8 FF, PNG 89 50 4E 47 0D 0A 1A 0A, WebP RIFF....WEBP) so disguised
+ * SVG/HTML/JS/PDF/executable files are rejected before DOM/DataURL decoding.
+ */
+export function validateImageMagicBytes(bytes: Uint8Array): {
+  valid: boolean;
+  detectedMime?: 'image/jpeg' | 'image/png' | 'image/webp';
+  error?: string;
+} {
+  if (!(bytes instanceof Uint8Array) || bytes.length < 12) {
+    return {
+      valid: false,
+      error: 'Selected file is too small or corrupted to be a valid image.',
+    };
+  }
+
+  // JPEG: FF D8 FF
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    return { valid: true, detectedMime: 'image/jpeg' };
+  }
+
+  // PNG: 89 50 4E 47 0D 0A 1A 0A
+  if (
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x47 &&
+    bytes[4] === 0x0d &&
+    bytes[5] === 0x0a &&
+    bytes[6] === 0x1a &&
+    bytes[7] === 0x0a
+  ) {
+    return { valid: true, detectedMime: 'image/png' };
+  }
+
+  // WebP: "RIFF" (52 49 46 46) + 4-byte size + "WEBP" (57 45 42 50)
+  if (
+    bytes[0] === 0x52 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x46 &&
+    bytes[8] === 0x57 &&
+    bytes[9] === 0x45 &&
+    bytes[10] === 0x42 &&
+    bytes[11] === 0x50
+  ) {
+    return { valid: true, detectedMime: 'image/webp' };
+  }
+
+  return {
+    valid: false,
+    error: 'Invalid image file signature. Only genuine JPEG, PNG, or WebP raster images are permitted.',
+  };
+}
+
 
 
 

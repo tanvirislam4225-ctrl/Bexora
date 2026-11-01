@@ -190,9 +190,14 @@ export function classifyWebPushRegistrationError(err: unknown): {
 
 export async function fetchServerFcmStatus(): Promise<ServerFcmDiagnosticStatus | null> {
   try {
+    const headers: Record<string, string> = { Accept: 'application/json' };
+    if (auth.currentUser) {
+      const idToken = await auth.currentUser.getIdToken(false).catch(() => '');
+      if (idToken) headers.Authorization = `Bearer ${idToken}`;
+    }
     const res = await fetch('/api/fcm/status', {
       method: 'GET',
-      headers: { Accept: 'application/json' },
+      headers,
       cache: 'no-store',
     });
     if (!res.ok) return null;

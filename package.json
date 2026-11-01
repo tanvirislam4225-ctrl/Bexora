@@ -10,7 +10,10 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "test": "tsx --test src/lib/checkoutAndIntentLogic.test.ts src/lib/marketplaceLogic.test.ts src/lib/dealWorkflow.test.ts src/lib/notificationLogic.test.ts src/lib/fcmAndSound.test.ts firestore.rules.test.ts"
+    "test": "tsx --test src/lib/checkoutAndIntentLogic.test.ts src/lib/marketplaceLogic.test.ts src/lib/dealWorkflow.test.ts src/lib/notificationLogic.test.ts src/lib/fcmAndSound.test.ts src/lib/engagementLogic.test.ts src/lib/aiAuditLogic.test.ts src/lib/serverSecurity.test.ts firestore.rules.test.ts"
+  },
+  "overrides": {
+    "@grpc/grpc-js": "^1.14.7"
   },
   "dependencies": {
     "@google/genai": "^2.32.0",

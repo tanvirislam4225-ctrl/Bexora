@@ -99,6 +99,7 @@ import {
   PLATFORM_LIST,
 } from '../lib/marketplaceLogic';
 import {
+  convertOrderMinorToWalletBdtMinor,
   validateWordPressSiteUrl,
   WordPressGatewayDiscoveryState,
 } from '../lib/checkoutAndIntentLogic';
@@ -115,6 +116,7 @@ import {
   playNotificationSoundById,
 } from '../lib/soundAndPushConfig';
 import { SUPPORTED_LANGUAGES } from '../lib/i18n';
+import { AdminAiAssistantWorkspace } from './AdminAiAssistantWorkspace';
 import { ImageLightboxModal } from './ImageLightboxModal';
 
 interface AdminDashboardProps {
@@ -140,23 +142,6 @@ type AdminSection =
   | 'notifications'
   | 'roles'
   | 'aidev';
-
-type AiDevSubTab =
-  | 'chat'
-  | 'health'
-  | 'bugs'
-  | 'security'
-  | 'deals'
-  | 'verification'
-  | 'features'
-  | 'diff'
-  | 'preview'
-  | 'queue'
-  | 'deployments'
-  | 'backup'
-  | 'logs'
-  | 'notifications'
-  | 'emergency';
 
 async function writeAuditLog(
   actorId: string,
@@ -246,7 +231,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   onFlash,
 }) => {
   const [section, setSection] = useState<AdminSection>(initialDealId ? 'deals' : 'overview');
-  const [aiTab, setAiTab] = useState<AiDevSubTab>('chat');
 
   // Live Admin Collections
   const [allListings, setAllListings] = useState<MarketplaceListing[]>([]);
@@ -363,19 +347,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [targetRoleUid, setTargetRoleUid] = useState('');
   const [targetRoleLevel, setTargetRoleLevel] = useState<'admin' | 'superadmin'>('admin');
 
-  // AI Developer State
-  const [aiPrompt, setAiPrompt] = useState('');
-  const [aiMessages, setAiMessages] = useState<{ role: 'admin' | 'ai'; text: string }[]>([]);
-  const [aiBusy, setAiBusy] = useState(false);
+  // AI Assistant & Cloud Diagnostics State
   const [healthSnapshot, setHealthSnapshot] = useState<Record<string, unknown> | null>(null);
-  const [enablingCloudService, setEnablingCloudService] = useState<string | null>(null);
-  const [newPropTitle, setNewPropTitle] = useState('');
-  const [newPropCategory, setNewPropCategory] = useState<'bugfix' | 'security' | 'feature' | 'performance'>('feature');
-  const [newPropSeverity, setNewPropSeverity] = useState<'low' | 'medium' | 'high' | 'critical'>('medium');
-  const [newPropSummary, setNewPropSummary] = useState('');
-  const [newPropFiles, setNewPropFiles] = useState('src/components/Marketplace.tsx');
-  const [newPropDiff, setNewPropDiff] = useState('// Staged diff preview awaiting human approval');
-  const [selectedDiffProposal, setSelectedDiffProposal] = useState<AiProposalRecord | null>(null);
+  const [enablingCloudService, setEnablingCloudService] = useState<'token_service' | 'fcm_apis' | null>(null);
+  const [downloadingInfinityZip, setDownloadingInfinityZip] = useState(false);
 
   useEffect(() => {
     setBuyerFeeEnabled(settings.buyerFeeEnabled);
@@ -412,7 +387,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   }, [settings]);
 
   useEffect(() => {
-    if (section !== 'notifications' && !(section === 'aidev' && aiTab === 'notifications')) {
+    if (section !== 'notifications') {
       return;
     }
     let cancelled = false;
@@ -427,7 +402,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [section, aiTab]);
+  }, [section]);
 
   const handleSavePublicVapidKey = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -666,6 +641,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               proposedDiff: p.proposedDiff || '',
               status: p.status,
               decidedBy: p.decidedBy,
+              linkedIssueId: p.linkedIssueId ? String(p.linkedIssueId) : undefined,
               createdAtMs: p.createdAt?.toMillis ? p.createdAt.toMillis() : Date.now(),
             };
           });
@@ -948,10 +924,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   };
 
   useEffect(() => {
-    if (section === 'aidev' && aiTab === 'health') {
+    if (section === 'aidev') {
       fetchSystemHealth();
     }
-  }, [section, aiTab]);
+  }, [section]);
 
   // --- Moderation Handlers ---
   const handleRunAiEvidenceCheck = async (listing: MarketplaceListing) => {
@@ -1748,8 +1724,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           updatedAt: serverTimestamp(),
         });
 
+        const buyerRefundWalletBdtMinor = convertOrderMinorToWalletBdtMinor(
+          refundCalc.buyerRefundMinor,
+          deal.currency,
+          settings.usdToBdtRate
+        );
+
         tx.update(buyerPrivRef, {
-          walletBalanceMinor: curBuyerBal + refundCalc.buyerRefundMinor,
+          walletBalanceMinor: curBuyerBal + buyerRefundWalletBdtMinor,
           updatedAt: serverTimestamp(),
         });
 
@@ -1925,8 +1907,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           updatedAt: serverTimestamp(),
         });
 
+        const sellerPayoutWalletBdtMinor = convertOrderMinorToWalletBdtMinor(
+          deal.sellerPayoutMinor,
+          deal.currency,
+          settings.usdToBdtRate
+        );
+
         tx.update(sellerPrivRef, {
-          walletBalanceMinor: curSellerBal + deal.sellerPayoutMinor,
+          walletBalanceMinor: curSellerBal + sellerPayoutWalletBdtMinor,
           updatedAt: serverTimestamp(),
         });
 
@@ -2439,117 +2427,36 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
   };
 
-  // --- AI Developer Handlers ---
-  const handleSendAiDevChat = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (settings.aiEmergencyStop) {
-      onFlash('AI Emergency Stop is active! Disable Emergency Stop first.');
-      return;
-    }
-    const msg = aiPrompt.trim();
-    if (!msg) return;
-    setAiMessages((prev) => [...prev, { role: 'admin', text: msg }]);
-    setAiPrompt('');
-    setAiBusy(true);
+  // --- AI Assistant Export & Emergency Governance Handlers ---
+  const handleDownloadInfinityZip = async () => {
+    setDownloadingInfinityZip(true);
     try {
-      const idToken = auth.currentUser ? await auth.currentUser.getIdToken() : '';
-      const resp = await fetch('/api/ai/developer-chat', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
-        },
-        body: JSON.stringify({
-          message: msg,
-          systemContext: `Listings: ${allListings.length}, Deals: ${deals.length}, BuyerFee: ${settings.buyerFeePct}%, SellerFee: ${settings.sellerFeePct}%`,
-        }),
-      });
-      const data = await resp.json();
-      setAiMessages((prev) => [
-        ...prev,
-        {
-          role: 'ai',
-          text: String(
-            data.reply ||
-              data.error ||
-              'Deterministic fallback: Stage any proposed code or configuration change in the Approval Queue for human review.'
-          ),
-        },
-      ]);
-    } catch {
-      setAiMessages((prev) => [
-        ...prev,
-        {
-          role: 'ai',
-          text: 'Running in static hosting mode without Node AI proxy. Use the Proposal Queue & Interactive Preview tabs to stage and audit changes safely.',
-        },
-      ]);
+      const a = document.createElement('a');
+      a.href = '/BEXORA_INFINITYFREE_PRODUCTION.zip';
+      a.download = 'BEXORA_INFINITYFREE_PRODUCTION.zip';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      onFlash('Downloading BEXORA_INFINITYFREE_PRODUCTION.zip deployment archive.');
     } finally {
-      setAiBusy(false);
+      setDownloadingInfinityZip(false);
     }
   };
 
-  const handleStageAiProposal = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (settings.aiEmergencyStop) {
-      onFlash('Cannot stage AI proposals while Emergency Stop is active.');
-      return;
-    }
-    if (newPropTitle.trim().length < 3) {
-      onFlash('Proposal title must be at least 3 characters.');
-      return;
-    }
-    try {
-      await addDoc(collection(db, 'aiProposals'), {
-        title: newPropTitle.trim().slice(0, 140),
-        category: newPropCategory,
-        severity: newPropSeverity,
-        summary: (newPropSummary.trim() || 'Staged for human administrator review.').slice(0, 2000),
-        affectedFiles: newPropFiles
-          .split(',')
-          .map((s) => s.trim())
-          .filter(Boolean)
-          .slice(0, 20),
-        proposedDiff: newPropDiff.slice(0, 8000),
-        status: 'awaiting_review',
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
-      await writeAuditLog(adminUid, 'stage_ai_proposal', 'aiProposal', newPropTitle.trim(), 'Created staged proposal');
-      setNewPropTitle('');
-      setNewPropSummary('');
-      onFlash('Proposal staged in Approval Queue (Awaiting Human Review).');
-      setAiTab('queue');
-    } catch (err) {
-      onFlash(err instanceof Error ? err.message : 'Failed to create proposal.');
-    }
-  };
-
-  const handleProposalDecision = async (
-    prop: AiProposalRecord,
-    nextStatus: 'in_review' | 'approved' | 'rejected'
-  ) => {
-    if (settings.aiEmergencyStop && nextStatus === 'approved') {
-      onFlash('Emergency Stop blocks approving AI proposals.');
-      return;
-    }
-    try {
-      await updateDoc(doc(db, 'aiProposals', prop.id), {
-        status: nextStatus,
-        decidedBy: adminUid,
-        updatedAt: serverTimestamp(),
-      });
-      await writeAuditLog(
-        adminUid,
-        `proposal_${nextStatus}`,
-        'aiProposal',
-        prop.id,
-        `Marked "${prop.title}" as ${nextStatus}`
-      );
-      onFlash(`Proposal "${prop.title}" marked as ${nextStatus.replace('_', ' ')}.`);
-    } catch (err) {
-      onFlash(err instanceof Error ? err.message : 'Failed to update proposal status.');
-    }
+  const handleExportJsonBackup = () => {
+    const blob = new Blob(
+      [JSON.stringify({ exportedAt: new Date().toISOString(), settings, proposals }, null, 2)],
+      { type: 'application/json' }
+    );
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `bexora-config-checkpoint-${Date.now()}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    onFlash('Exported JSON recovery checkpoint.');
   };
 
   const handleToggleEmergencyStop = async () => {
@@ -2700,7 +2607,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 { id: 'payments', label: 'Payment Numbers', icon: Layers },
                 { id: 'notifications', label: 'Announcements & Alerts', icon: Megaphone },
                 { id: 'roles', label: 'Superadmin & Logs', icon: Users },
-                { id: 'aidev', label: 'AI Developer', icon: Bot },
+                { id: 'aidev', label: 'AI Assistant & Audit', icon: Bot },
               ] as { id: AdminSection; label: string; icon: React.ComponentType<{ className?: string }> }[]
             ).map((item) => {
               const Icon = item.icon;
@@ -4449,524 +4356,30 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </div>
           )}
 
-          {/* 12. PRODUCTION-SAFE AI DEVELOPER SUITE (ALL 15 SUBSECTIONS) */}
+          {/* 12. UNIFIED CONVERSATIONAL AI ASSISTANT, AUTONOMOUS WEBSITE AUDIT & SAFE CODE GOVERNANCE */}
           {section === 'aidev' && (
-            <div className="space-y-5">
-              <div className="bx-card p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                <div>
-                  <div className="inline-flex items-center gap-1.5 text-xs font-black uppercase px-2 py-0.5 bg-[#793A91] text-white mb-1">
-                    <Bot className="w-3.5 h-3.5" />
-                    Human-Gated AI Developer Suite
-                  </div>
-                  <h1 className="text-xl font-black">BEXORA AI Developer & Governance Center</h1>
-                  <p className="text-xs opacity-75">
-                    Zero silent production mutations — every proposal requires explicit Approve / Reject / Review.
-                  </p>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={handleToggleEmergencyStop}
-                  className={`px-4 py-2.5 text-xs font-black border-2 border-[#191919] inline-flex items-center gap-2 ${
-                    settings.aiEmergencyStop ? 'bg-emerald-600 text-white' : 'bg-red-600 text-white'
-                  }`}
-                >
-                  <AlertOctagon className="w-4 h-4" />
-                  {settings.aiEmergencyStop ? 'Clear Emergency Stop' : 'EMERGENCY STOP'}
-                </button>
-              </div>
-
-              {/* 15 Subsection Switcher */}
-              <div className="flex flex-wrap gap-1.5">
-                {(
-                  [
-                    { id: 'chat', label: '1. AI Chat' },
-                    { id: 'health', label: '2. System Health' },
-                    { id: 'bugs', label: '3. Bug Tracker' },
-                    { id: 'security', label: '4. Security Audit' },
-                    { id: 'deals', label: '5. Deal Monitor' },
-                    { id: 'verification', label: '6. Verification Rules' },
-                    { id: 'features', label: '7. Feature Proposals' },
-                    { id: 'diff', label: '8. Code & Diff' },
-                    { id: 'preview', label: '9. Interactive Preview' },
-                    { id: 'queue', label: `10. Approval Queue (${proposals.filter((p) => p.status === 'awaiting_review').length})` },
-                    { id: 'deployments', label: '11. Deployments & ZIP' },
-                    { id: 'backup', label: '12. Backup & Recovery' },
-                    { id: 'logs', label: '13. Audit Logs' },
-                    { id: 'notifications', label: '14. Notifications' },
-                    { id: 'emergency', label: '15. Emergency Stop' },
-                  ] as { id: AiDevSubTab; label: string }[]
-                ).map((tItem) => (
-                  <button
-                    key={tItem.id}
-                    type="button"
-                    onClick={() => setAiTab(tItem.id)}
-                    className={`px-2.5 py-1.5 text-[11px] font-extrabold border transition-colors ${
-                      aiTab === tItem.id
-                        ? 'bg-[#FF6500] text-white border-[#191919]'
-                        : 'bg-[var(--bx-surface)] border-[var(--bx-border)]'
-                    }`}
-                  >
-                    {tItem.label}
-                  </button>
-                ))}
-              </div>
-
-              {/* AI SUBTAB 1: CHAT */}
-              {aiTab === 'chat' && (
-                <div className="bx-card p-5 space-y-4">
-                  <h2 className="text-base font-black">AI Developer Engineering Assistant</h2>
-                  <div className="h-64 overflow-y-auto border-2 border-[var(--bx-border)] bg-[var(--bx-surface-alt)] p-3 space-y-3">
-                    {aiMessages.length === 0 ? (
-                      <p className="text-xs opacity-75">
-                        Ask the AI Developer to diagnose issues, review monetization rules, or draft staged improvements. Nothing deploys without your approval.
-                      </p>
-                    ) : (
-                      aiMessages.map((m, idx) => (
-                        <div
-                          key={idx}
-                          className={`p-3 text-xs border border-[var(--bx-border)] ${
-                            m.role === 'admin' ? 'bg-[#FFD400] text-[#191919] font-bold ml-8' : 'bg-[var(--bx-surface)] mr-8 whitespace-pre-wrap'
-                          }`}
-                        >
-                          <div className="text-[10px] font-black uppercase opacity-70 mb-1">
-                            {m.role === 'admin' ? 'Administrator' : 'BEXORA AI Developer'}
-                          </div>
-                          {m.text}
-                        </div>
-                      ))
-                    )}
-                  </div>
-                  <form onSubmit={handleSendAiDevChat} className="flex gap-2">
-                    <input
-                      type="text"
-                      value={aiPrompt}
-                      onChange={(e) => setAiPrompt(e.target.value)}
-                      disabled={aiBusy || settings.aiEmergencyStop}
-                      placeholder={settings.aiEmergencyStop ? 'Emergency Stop is active…' : 'Ask for diagnostics, architecture checks, or staged diffs…'}
-                      className="bx-input flex-1 px-3 py-2 text-xs"
-                    />
-                    <button
-                      type="submit"
-                      disabled={aiBusy || settings.aiEmergencyStop}
-                      className="bx-btn bx-btn-primary px-4 py-2 text-xs font-extrabold inline-flex items-center gap-1.5"
-                    >
-                      <Send className="w-3.5 h-3.5" />
-                      {aiBusy ? 'Thinking…' : 'Send'}
-                    </button>
-                  </form>
-                </div>
-              )}
-
-              {/* AI SUBTAB 2: SYSTEM HEALTH (ADMIN-ONLY CLOUD & FIREBASE DIAGNOSTICS) */}
-              {aiTab === 'health' && (
-                <div className="bx-card p-5 space-y-4">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div>
-                      <h2 className="text-base font-black">
-                        System Health & Continuous 5-Minute Cloud Diagnostics
-                      </h2>
-                      <p className="text-xs opacity-75">
-                        Restricted strictly to authorized BEXORA Administrators. Firebase & Google Cloud configuration links are isolated here and never shown on public customer screens.
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={fetchSystemHealth}
-                      className="bx-btn bx-btn-ghost px-3 py-1.5 text-xs font-extrabold inline-flex items-center gap-1.5"
-                    >
-                      <RefreshCw className="w-3.5 h-3.5" />
-                      Refresh Live Check
-                    </button>
-                  </div>
-
-                  <div className="p-4 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)] space-y-3 text-xs">
-                    <div className="font-black uppercase tracking-wider text-[11px] text-[#FF6500]">
-                      Admin-Only Cloud & Firebase Quick Actions
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                      <button
-                        type="button"
-                        disabled={enablingCloudService !== null}
-                        onClick={() => handleEnableCloudServiceFromHealth('token_service')}
-                        className="bx-btn bx-btn-primary px-3 py-1.5 text-xs font-extrabold"
-                      >
-                        {enablingCloudService === 'token_service'
-                          ? 'Checking Token Service…'
-                          : 'Auto-Enable Token Service API'}
-                      </button>
-                      <button
-                        type="button"
-                        disabled={enablingCloudService !== null}
-                        onClick={() => handleEnableCloudServiceFromHealth('fcm_apis')}
-                        className="bx-btn px-3 py-1.5 text-xs font-extrabold"
-                      >
-                        {enablingCloudService === 'fcm_apis'
-                          ? 'Checking FCM APIs…'
-                          : 'Auto-Enable FCM Cloud APIs'}
-                      </button>
-                      <a
-                        href={DEFAULT_FIREBASE_AUTH_PROVIDERS_URL}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="bx-btn bx-btn-ghost px-3 py-1.5 text-xs font-bold inline-flex items-center gap-1"
-                      >
-                        Firebase Sign-In Providers <ExternalLink className="w-3 h-3" />
-                      </a>
-                      <a
-                        href={DEFAULT_FIREBASE_AUTH_DOMAINS_URL}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="bx-btn bx-btn-ghost px-3 py-1.5 text-xs font-bold inline-flex items-center gap-1"
-                      >
-                        Authorized Domains <ExternalLink className="w-3 h-3" />
-                      </a>
-                      <a
-                        href={DEFAULT_TOKEN_SERVICE_ACTIVATION_URL}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="bx-btn bx-btn-ghost px-3 py-1.5 text-xs font-bold inline-flex items-center gap-1"
-                      >
-                        Google Cloud Token Service <ExternalLink className="w-3 h-3" />
-                      </a>
-                    </div>
-                  </div>
-
-                  <pre className="p-3 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)] text-xs overflow-x-auto max-h-96">
-                    {JSON.stringify(healthSnapshot || { checking: true }, null, 2)}
-                  </pre>
-                </div>
-              )}
-
-              {/* AI SUBTABS 3 & 7: STAGE BUG OR FEATURE PROPOSAL */}
-              {(aiTab === 'bugs' || aiTab === 'features') && (
-                <form onSubmit={handleStageAiProposal} className="bx-card p-5 space-y-4">
-                  <h2 className="text-base font-black">
-                    {aiTab === 'bugs' ? 'Bug & Issue Staging Workbench' : 'Stage New Feature Proposal'}
-                  </h2>
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                    <input
-                      type="text"
-                      required
-                      value={newPropTitle}
-                      onChange={(e) => setNewPropTitle(e.target.value)}
-                      placeholder="Proposal title…"
-                      className="bx-input sm:col-span-2 px-3 py-2 text-xs"
-                    />
-                    <select
-                      value={newPropSeverity}
-                      onChange={(e) => setNewPropSeverity(e.target.value as 'low' | 'medium' | 'high' | 'critical')}
-                      className="bx-input px-3 py-2 text-xs font-bold"
-                    >
-                      <option value="low">Low Risk</option>
-                      <option value="medium">Medium Risk</option>
-                      <option value="high">High Risk</option>
-                      <option value="critical">Critical</option>
-                    </select>
-                  </div>
-                  <input
-                    type="text"
-                    value={newPropFiles}
-                    onChange={(e) => setNewPropFiles(e.target.value)}
-                    placeholder="Affected files (comma-separated)"
-                    className="bx-input w-full px-3 py-2 text-xs"
-                  />
-                  <textarea
-                    rows={3}
-                    value={newPropSummary}
-                    onChange={(e) => setNewPropSummary(e.target.value)}
-                    placeholder="Root cause, impact, and verification plan…"
-                    className="bx-input w-full px-3 py-2 text-xs"
-                  />
-                  <textarea
-                    rows={4}
-                    value={newPropDiff}
-                    onChange={(e) => setNewPropDiff(e.target.value)}
-                    className="bx-input w-full px-3 py-2 text-xs font-mono"
-                  />
-                  <button
-                    type="submit"
-                    onClick={() => setNewPropCategory(aiTab === 'bugs' ? 'bugfix' : 'feature')}
-                    className="bx-btn bx-btn-primary px-5 py-2 text-xs font-extrabold"
-                  >
-                    Stage to Human Approval Queue
-                  </button>
-                </form>
-              )}
-
-              {/* AI SUBTAB 4: SECURITY AUDIT */}
-              {aiTab === 'security' && (
-                <div className="bx-card p-5 space-y-3 text-xs font-bold">
-                  <h2 className="text-base font-black">Automated Security & Invariant Audit</h2>
-                  <ul className="space-y-2">
-                    <li className="p-3 border border-[var(--bx-border)] flex items-center justify-between">
-                      <span>Twilio Secrets & Dependencies Removed</span>
-                      <span className="text-emerald-600">PASS (Firebase Auth Active)</span>
-                    </li>
-                    <li className="p-3 border border-[var(--bx-border)] flex items-center justify-between">
-                      <span>Public vs Private User PII & NID Document Isolation</span>
-                      <span className="text-emerald-600">PASS (/privateUsers & /identityVerifications locked)</span>
-                    </li>
-                    <li className="p-3 border border-[var(--bx-border)] flex items-center justify-between">
-                      <span>Immutable Escrow Protection Timer (originalDeadlineMs)</span>
-                      <span className="text-emerald-600">PASS (Enforced in Firestore Rules)</span>
-                    </li>
-                    <li className="p-3 border border-[var(--bx-border)] flex items-center justify-between">
-                      <span>Zero Fake Listings / Reviews / Demo Credentials</span>
-                      <span className="text-emerald-600">PASS</span>
-                    </li>
-                  </ul>
-                </div>
-              )}
-
-              {/* AI SUBTAB 5: DEAL MONITORING */}
-              {aiTab === 'deals' && (
-                <div className="bx-card p-5 space-y-3 text-xs">
-                  <h2 className="text-base font-black">Escrow Deal Anomaly & Timer Monitor</h2>
-                  <p className="opacity-80">
-                    Total Deals: <strong>{deals.length}</strong> · Active Protection: <strong>{deals.filter((d) => d.status === 'protection_active').length}</strong> · Paused Under Report Review: <strong>{reportedDealsCount}</strong>
-                  </p>
-                </div>
-              )}
-
-              {/* AI SUBTAB 6: LISTING VERIFICATION RULES */}
-              {aiTab === 'verification' && (
-                <div className="bx-card p-5 space-y-2 text-xs">
-                  <h2 className="text-base font-black">Monetization Evidence Honesty Policy</h2>
-                  <p>1. Seller claims are labeled strictly as <strong>Seller Claimed</strong> until evidence is verified.</p>
-                  <p>2. Domain-matched URLs are labeled <strong>Domain Matched</strong> — never falsely claiming ownership verification.</p>
-                  <p>3. If Gemini OCR is unconfigured or uncertain, listings route safely to manual Admin moderation.</p>
-                </div>
-              )}
-
-              {/* AI SUBTAB 8: CODE DIFF VIEWER */}
-              {aiTab === 'diff' && (
-                <div className="bx-card p-5 space-y-3">
-                  <h2 className="text-base font-black flex items-center gap-2">
-                    <Code2 className="w-4 h-4 text-[#FF6500]" />
-                    Staged Diff Inspector
-                  </h2>
-                  {selectedDiffProposal ? (
-                    <div className="space-y-2">
-                      <div className="text-xs font-black">{selectedDiffProposal.title}</div>
-                      <pre className="p-3 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)] text-xs font-mono overflow-x-auto">
-                        {selectedDiffProposal.proposedDiff}
-                      </pre>
-                    </div>
-                  ) : (
-                    <p className="text-xs opacity-75">Select "Review" on any item in the Approval Queue to inspect its code diff.</p>
-                  )}
-                </div>
-              )}
-
-              {/* AI SUBTAB 9: INTERACTIVE PREVIEW */}
-              {aiTab === 'preview' && (
-                <div className="bx-card p-5 space-y-3 text-xs">
-                  <h2 className="text-base font-black">Interactive Sandbox Preview</h2>
-                  <p className="opacity-80">
-                    Previewing active marketplace configuration before approving staged changes:
-                  </p>
-                  <div className="p-4 border-2 border-[var(--bx-border)] bg-[var(--bx-surface-alt)] space-y-1 font-bold">
-                    <div>Sample ৳1,000 Deal → Buyer Pays {formatMoneyFromMinor(liveSample.buyerTotalMinor, 'BDT', 'BDT')} · Seller Receives {formatMoneyFromMinor(liveSample.sellerPayoutMinor, 'BDT', 'BDT')}</div>
-                    <div>Configured Games ({settings.gamingTitles.length}): {settings.gamingTitles.join(', ')}</div>
-                  </div>
-                </div>
-              )}
-
-              {/* AI SUBTAB 10: HUMAN APPROVAL QUEUE */}
-              {aiTab === 'queue' && (
-                <div className="space-y-3">
-                  <h2 className="text-base font-black flex items-center gap-2">
-                    <Lock className="w-4 h-4 text-[#FF6500]" />
-                    Mandatory Human Approval Queue ({proposals.length})
-                  </h2>
-                  {proposals.length === 0 ? (
-                    <div className="bx-card p-6 text-xs font-bold opacity-75">
-                      No staged AI proposals awaiting review.
-                    </div>
-                  ) : (
-                    proposals.map((prop) => (
-                      <div key={prop.id} className="bx-card p-4 space-y-3">
-                        <div className="flex flex-wrap items-center justify-between gap-2">
-                          <div>
-                            <span className="text-[10px] font-black uppercase px-2 py-0.5 border border-[var(--bx-border)] mr-2">
-                              {prop.category} · {prop.severity}
-                            </span>
-                            <span className="font-black text-sm">{prop.title}</span>
-                          </div>
-                          <span className="text-xs font-black uppercase text-[#FF6500]">{prop.status}</span>
-                        </div>
-                        <p className="text-xs opacity-85">{prop.summary}</p>
-                        <div className="flex flex-wrap gap-2">
-                          <button
-                            type="button"
-                            disabled={settings.aiEmergencyStop}
-                            onClick={() => handleProposalDecision(prop, 'approved')}
-                            className="bx-btn bx-btn-primary px-3.5 py-1.5 text-xs font-extrabold"
-                          >
-                            Approve
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleProposalDecision(prop, 'rejected')}
-                            className="bx-btn px-3.5 py-1.5 text-xs font-extrabold bg-red-600 text-white border border-[#191919]"
-                          >
-                            Reject
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              handleProposalDecision(prop, 'in_review');
-                              setSelectedDiffProposal(prop);
-                              setAiTab('diff');
-                            }}
-                            className="bx-btn bx-btn-ghost px-3.5 py-1.5 text-xs font-extrabold"
-                          >
-                            Review
-                          </button>
-                        </div>
-                      </div>
-                    ))
-                  )}
-                </div>
-              )}
-
-              {/* AI SUBTAB 11: DEPLOYMENTS & INFINITYFREE ZIP */}
-              {aiTab === 'deployments' && (
-                <div className="bx-card p-5 space-y-4">
-                  <h2 className="text-base font-black flex items-center gap-2">
-                    <History className="w-4 h-4 text-[#FF6500]" />
-                    InfinityFree Static Build & Deployment Package
-                  </h2>
-                  <p className="text-xs opacity-80">
-                    Download the verified InfinityFree deployment archive containing compiled static assets, PWA manifest & icons, and Apache <code>.htaccess</code> rewrite rules.
-                  </p>
-                  <a
-                    href="/BEXORA_INFINITYFREE_PRODUCTION.zip"
-                    download="BEXORA_INFINITYFREE_PRODUCTION.zip"
-                    className="bx-btn bx-btn-primary px-4 py-2 text-xs font-extrabold inline-flex items-center gap-2"
-                  >
-                    <Download className="w-4 h-4" />
-                    Download BEXORA_INFINITYFREE_PRODUCTION.zip
-                  </a>
-                </div>
-              )}
-
-              {/* AI SUBTAB 12: BACKUP & RECOVERY */}
-              {aiTab === 'backup' && (
-                <div className="bx-card p-5 space-y-3">
-                  <h2 className="text-base font-black">Configuration Snapshot Export</h2>
-                  <p className="text-xs opacity-80">
-                    Export a JSON recovery checkpoint of current BEXORA commission, category, protection, and proposal state.
-                  </p>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const blob = new Blob([JSON.stringify({ exportedAt: new Date().toISOString(), settings, proposals }, null, 2)], {
-                        type: 'application/json',
-                      });
-                      const url = URL.createObjectURL(blob);
-                      const a = document.createElement('a');
-                      a.href = url;
-                      a.download = `bexora-config-checkpoint-${Date.now()}.json`;
-                      a.click();
-                      URL.revokeObjectURL(url);
-                    }}
-                    className="bx-btn bx-btn-ghost px-4 py-2 text-xs font-extrabold"
-                  >
-                    Export Recovery Checkpoint (.json)
-                  </button>
-                </div>
-              )}
-
-              {/* AI SUBTAB 13: AUDIT LOGS */}
-              {aiTab === 'logs' && (
-                <div className="bx-card p-5 space-y-2 max-h-80 overflow-y-auto">
-                  <h2 className="text-base font-black">AI & Admin Audit Trail</h2>
-                  {auditLogs.map((l) => (
-                    <div key={l.id} className="p-2 border border-[var(--bx-border)] text-xs">
-                      <strong>{l.action}</strong> — {l.details}
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {/* AI SUBTAB 14: NOTIFICATIONS */}
-              {aiTab === 'notifications' && (
-                <div className="bx-card p-5 space-y-3 text-xs font-bold">
-                  <h2 className="text-base font-black">Authentication, FCM Web Push & Sound Configuration</h2>
-                  <div>Header Real-Time Notification Center (`notifications` + `announcements`): <span className="text-emerald-600">ACTIVE</span></div>
-                  <div>
-                    Firebase Admin SDK (`firebase-admin` / Cloud Run Managed ADC):{' '}
-                    <span className={fcmServerDiag?.adminSdkInitialized ? 'text-emerald-600' : 'text-amber-600'}>
-                      {loadingFcmDiag ? 'CHECKING…' : fcmServerDiag?.adminSdkInitialized ? 'INITIALIZED (KEYLESS MANAGED ADC)' : 'CHECK IN NOTIFICATIONS TAB'}
-                    </span>
-                  </div>
-                  <div>
-                    Web Push VAPID Public Key:{' '}
-                    <span className="text-emerald-600">
-                      {isValidVapidPublicKey(settings.fcmVapidPublicKey)
-                        ? 'ACTIVE (CUSTOM PUBLIC CERTIFICATE)'
-                        : fcmServerDiag?.vapidMode === 'custom_env'
-                        ? 'ACTIVE (CUSTOM ENV PUBLIC KEY)'
-                        : 'ACTIVE (FCM OFFICIAL MANAGED DEFAULT)'}
-                    </span>
-                  </div>
-                  <div>
-                    FCM HTTP v1 API (`fcm.googleapis.com`):{' '}
-                    <span className={fcmServerDiag?.fcmV1ApiStatus === 'enabled_verified' ? 'text-emerald-600' : 'text-amber-600'}>
-                      {loadingFcmDiag ? 'CHECKING…' : (fcmServerDiag?.fcmV1ApiStatus || 'CHECK IN NOTIFICATIONS TAB').toUpperCase()}
-                    </span>
-                  </div>
-                  <div>
-                    FCM Registrations API (`fcmregistrations.googleapis.com`):{' '}
-                    <span className={fcmServerDiag?.fcmRegistrationsApiStatus === 'enabled_verified' ? 'text-emerald-600' : 'text-amber-600'}>
-                      {loadingFcmDiag ? 'CHECKING…' : (fcmServerDiag?.fcmRegistrationsApiStatus || 'CHECK IN NOTIFICATIONS TAB').toUpperCase()}
-                    </span>
-                  </div>
-                  <div>
-                    Firebase Installations API (`firebaseinstallations.googleapis.com`):{' '}
-                    <span className={fcmServerDiag?.firebaseInstallationsApiStatus === 'enabled_verified' ? 'text-emerald-600' : 'text-amber-600'}>
-                      {loadingFcmDiag ? 'CHECKING…' : (fcmServerDiag?.firebaseInstallationsApiStatus || 'CHECK IN NOTIFICATIONS TAB').toUpperCase()}
-                    </span>
-                  </div>
-                  <div>
-                    Server FCM HTTP v1 Send IAM (`firebase-admin` / `roles/firebasecloudmessaging.admin`):{' '}
-                    <span className={fcmServerDiag?.fcmSendApiStatus === 'enabled_verified' ? 'text-emerald-600' : 'text-amber-600'}>
-                      {loadingFcmDiag ? 'CHECKING…' : (fcmServerDiag?.fcmSendApiStatus || 'CHECK IN NOTIFICATIONS TAB').toUpperCase()}
-                    </span>
-                  </div>
-                  <div>Local Notification Sound Library (`01_soft_normal.wav` – `04_urgent_deal.wav`): <span className="text-emerald-600">4 WAV ASSETS PRESERVED (DEFAULT: SAMPLE 2 + SAMPLE 4 + STRONG VIBRATION)</span></div>
-                  <div className="pt-2">
-                    <button
-                      type="button"
-                      onClick={() => setSection('notifications')}
-                      className="bx-btn bx-btn-primary px-4 py-2 text-xs font-extrabold inline-flex items-center gap-1.5"
-                    >
-                      <Bell className="w-3.5 h-3.5" />
-                      Open FCM, Sound & Announcements Workbench
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {/* AI SUBTAB 15: EMERGENCY STOP */}
-              {aiTab === 'emergency' && (
-                <div className="bx-card p-6 space-y-4 border-2 border-red-600">
-                  <h2 className="text-lg font-black text-red-600">Emergency Kill-Switch</h2>
-                  <p className="text-xs">
-                    Current Status: <strong>{settings.aiEmergencyStop ? 'HALTED (Emergency Stop Active)' : 'OPERATIONAL (Human-Gated Mode)'}</strong>
-                  </p>
-                  <button
-                    type="button"
-                    onClick={handleToggleEmergencyStop}
-                    className="bx-btn bx-btn-primary px-5 py-2.5 text-xs font-extrabold"
-                  >
-                    {settings.aiEmergencyStop ? 'Resume Normal Human-Gated AI Operations' : 'Activate Immediate Emergency Stop'}
-                  </button>
-                </div>
-              )}
-            </div>
+            <AdminAiAssistantWorkspace
+              adminUid={adminUid}
+              settings={settings}
+              proposals={proposals}
+              auditLogs={auditLogs}
+              allListings={allListings}
+              deals={deals}
+              reportedDealsCount={reportedDealsCount}
+              healthSnapshot={healthSnapshot}
+              enablingCloudService={enablingCloudService}
+              downloadingInfinityZip={downloadingInfinityZip}
+              onToggleEmergencyStop={handleToggleEmergencyStop}
+              onRefreshSystemHealth={fetchSystemHealth}
+              onEnableCloudService={handleEnableCloudServiceFromHealth}
+              onDownloadInfinityZip={handleDownloadInfinityZip}
+              onExportJsonBackup={handleExportJsonBackup}
+              onWriteAuditLog={writeAuditLog}
+              onFlash={onFlash}
+              firebaseAuthProvidersUrl={DEFAULT_FIREBASE_AUTH_PROVIDERS_URL}
+              firebaseAuthDomainsUrl={DEFAULT_FIREBASE_AUTH_DOMAINS_URL}
+              tokenServiceActivationUrl={DEFAULT_TOKEN_SERVICE_ACTIVATION_URL}
+            />
           )}
 
           {/* ANNOUNCEMENTS & USER ALERTS COMPOSER */}

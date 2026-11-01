@@ -77,6 +77,7 @@ export interface PublicProfile {
   completedPurchases: number;
   ratingSum: number;
   ratingCount: number;
+  lastReviewDealId?: string;
   followerCount?: number;
   createdAt?: unknown;
   updatedAt?: unknown;
@@ -396,6 +397,7 @@ export interface AiProposalRecord {
   proposedDiff: string;
   status: 'awaiting_review' | 'in_review' | 'approved' | 'rejected' | 'deployed';
   decidedBy?: string;
+  linkedIssueId?: string;
   createdAtMs: number;
 }
 

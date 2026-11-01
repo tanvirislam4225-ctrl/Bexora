@@ -173,7 +173,11 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
         );
         const data = await resp.json().catch(() => null);
         if (cancelled) return;
-        if (resp.ok && data?.verified === true && data?.status === 'paid') {
+        if (
+          resp.ok &&
+          ((data?.paid === true && data?.status === 'verified_paid') ||
+            (data?.verified === true && data?.status === 'paid'))
+        ) {
           setSessionVerificationNotice({
             tone: 'success',
             text:

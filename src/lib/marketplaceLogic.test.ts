@@ -31,6 +31,11 @@ import {
   sanitizeCustomerAuthMessage,
   getListingStatusBadgeMeta,
   normalizeDraftListingFields,
+  buildStagedRecoverableSession,
+  parseStagedRecoverableSession,
+  shouldUpdatePersistedTokenServiceFlag,
+  evaluateWakeSessionAction,
+  RECOVERABLE_AUTH_SESSION_MAX_AGE_MS,
 } from './marketplaceLogic';
 import {
   computeWordPressWebhookSignatures,
@@ -524,3 +529,70 @@ test('WordPress Raw-Body HMAC Webhook Security verifies exact payload, blocks ta
   assert.equal(staleVerify.ok, false);
   assert.equal(staleVerify.code, 'stale_timestamp');
 });
+
+test('Recoverable Auth Session Staging preserves revisit continuity and blocks staging after intentional logout', () => {
+  const now = 1_793_520_000_000;
+  const expiredPayload = JSON.stringify({
+    uid: 'FFiOzaXKxBMuCzoQXM68sy3aPax2',
+    email: 'tanvirislam7574@gmail.com',
+    displayName: 'Tanvir Islam',
+    providerData: [{ providerId: 'google.com' }],
+    stsTokenManager: {
+      accessToken: 'jwt_expired',
+      refreshToken: 'rt_1',
+      expirationTime: now - 3 * 3_600_000, // expired 3 hours ago while away
+    },
+  });
+
+  const inspection = inspectStoredFirebaseAuthToken(expiredPayload, now, false);
+  const staged = buildStagedRecoverableSession(inspection, now, 0);
+  assert.ok(staged);
+  assert.equal(staged.uid, 'FFiOzaXKxBMuCzoQXM68sy3aPax2');
+  assert.equal(staged.email, 'tanvirislam7574@gmail.com');
+  assert.equal(staged.providerId, 'google.com');
+  assert.equal(staged.stagedAtMs, now);
+
+  // Valid within 30-day persistent session lifecycle
+  const parsedNextDay = parseStagedRecoverableSession(
+    JSON.stringify(staged),
+    now + 24 * 3_600_000
+  );
+  assert.deepEqual(parsedNextDay, staged);
+
+  // Discarded cleanly once past 30-day max horizon
+  const parsedAfter31Days = parseStagedRecoverableSession(
+    JSON.stringify(staged),
+    now + RECOVERABLE_AUTH_SESSION_MAX_AGE_MS + 1_000
+  );
+  assert.equal(parsedAfter31Days, null);
+
+  // Intentional logout after session creation suppresses recoverable staging
+  const suppressedAfterLogout = buildStagedRecoverableSession(
+    inspection,
+    now,
+    now - 1_800_000
+  );
+  assert.equal(suppressedAfterLogout, null);
+});
+
+test('Tri-state Token Service flag policy and Tab-Wake continuity evaluator prevent false logouts', () => {
+  assert.equal(shouldUpdatePersistedTokenServiceFlag('enabled_verified'), 'set_verified');
+  assert.equal(shouldUpdatePersistedTokenServiceFlag('disabled'), 'clear_verified');
+  assert.equal(shouldUpdatePersistedTokenServiceFlag('config_mismatch'), 'clear_verified');
+  // Transient network/probe states MUST preserve existing verified state
+  assert.equal(shouldUpdatePersistedTokenServiceFlag('unable_to_verify'), 'preserve_existing');
+  assert.equal(shouldUpdatePersistedTokenServiceFlag('enablement_pending'), 'preserve_existing');
+  assert.equal(shouldUpdatePersistedTokenServiceFlag('permission_denied'), 'preserve_existing');
+
+  const now = 1_793_520_000_000;
+  // When Token Service API is active, native Firebase refresh handles wake
+  assert.equal(evaluateWakeSessionAction(now - 5_000, now, true), 'none');
+  // Healthy 40m remaining -> no action needed
+  assert.equal(evaluateWakeSessionAction(now + 40 * 60_000, now, false), 'none');
+  // 10m remaining on wake -> proactively renew silently
+  assert.equal(evaluateWakeSessionAction(now + 10 * 60_000, now, false), 'silent_refresh_now');
+  // Device slept past expiry (or <= 50s left) -> immediately restore session before Firestore hits 403
+  assert.equal(evaluateWakeSessionAction(now + 30_000, now, false), 'restore_expired_now');
+  assert.equal(evaluateWakeSessionAction(now - 600_000, now, false), 'restore_expired_now');
+});
+

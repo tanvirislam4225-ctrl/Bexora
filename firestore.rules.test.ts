@@ -58,7 +58,7 @@ test('Storage Rules: enforces default-deny catch-all and scopes nid_documents, l
   assert.doesNotMatch(storageRules, /allow\s+read:\s*if\s+isSignedIn\(\)\s*;/);
   assert.match(
     storageRules,
-    /match\s+\/deal_media\/\{dealId\}\/\{userId\}\/\{fileName\}[\s\S]*?allow\s+read:\s*if\s+isSignedIn\(\)\s*&&\s*\(request\.auth\.uid\s*==\s*userId\s*\|\|\s*isBootstrappedSuperAdmin\(\)\)/
+    /match\s+\/deal_media\/\{dealId\}\/\{userId\}\/\{fileName\}[\s\S]*?allow\s+read:\s*if\s+isSignedIn\(\)[\s\S]*?\(request\.auth\.uid\s*==\s*userId\s*\|\|\s*isBootstrappedSuperAdmin\(\)\)/
   );
 });
 
@@ -126,3 +126,45 @@ test('Firestore Rules: enforces owner-private favorites, non-self atomic sellerF
   assert.match(rules, /followedSellerListingsEnabled/);
   assert.match(rules, /bidUpdatesEnabled/);
 });
+
+test('Firestore Rules: locks aiAuditReports, aiConversations, messages subcollection, and aiSystemConfig strictly to isAdmin() with immutability and Master Gate', () => {
+  // Immutable admin-only audit reports
+  assert.match(rules, /match\s+\/aiAuditReports\/\{reportId\}[\s\S]*?allow\s+get:\s*if\s+isAdmin\(\)/);
+  assert.match(rules, /match\s+\/aiAuditReports\/\{reportId\}[\s\S]*?allow\s+update,\s*delete:\s*if\s+false;/);
+  assert.match(rules, /data\.trigger\s+in\s+\['manual',\s*'scheduled_daily'\]/);
+
+  // Admin-only conversations + subcollection parent Master Gate
+  assert.match(rules, /match\s+\/aiConversations\/\{conversationId\}[\s\S]*?allow\s+create:\s*if\s+isAdmin\(\)/);
+  assert.match(rules, /exists\(\/databases\/\$\(database\)\/documents\/aiConversations\/\$\(conversationId\)\)/);
+  assert.match(rules, /match\s+\/messages\/\{messageId\}[\s\S]*?allow\s+update,\s*delete:\s*if\s+false;/);
+
+  // Admin-only daily schedule bounded hour/minute
+  assert.match(rules, /match\s+\/aiSystemConfig\/\{configId\}[\s\S]*?configId\s*==\s*'dailySchedule'/);
+  assert.match(rules, /data\.hour\s*>=\s*0\s*&&\s*data\.hour\s*<=\s*23/);
+  assert.match(rules, /data\.minute\s*>=\s*0\s*&&\s*data\.minute\s*<=\s*59/);
+});
+
+test('Firestore & Storage Rules Security Hardening: enforces atomic wallet debit on deal payment, configured fee math, withdrawal reservation, single-review rating sync, and forbids storage deletes', () => {
+  // 1. Atomic wallet deduction & configured platform fee math on Buy Now & Accepted-Bid funding
+  assert.match(rules, /function\s+hasVerifiedBuyerWalletDebit\(buyerUid,\s*orderTotalMinor,\s*orderCurrency\)/);
+  assert.match(rules, /let\s+debitMinor\s*=\s*beforePriv\.walletBalanceMinor\s*-\s*afterPriv\.walletBalanceMinor/);
+  assert.match(rules, /afterPriv\.walletBalanceMinor\s*>=\s*0/);
+  assert.match(rules, /function\s+matchesConfiguredFees\(data\)/);
+
+  // 2. Atomic withdrawal balance debit + reservedBalanceMinor increment + paired walletLedger guard
+  assert.match(rules, /led_wd_/);
+  assert.match(rules, /reservedBalanceMinor/);
+  assert.match(rules, /existsAfter\(\/databases\/\$\(database\)\/documents\/withdrawals\/\$\(incoming\(\)\.referenceId\)\)/);
+
+  // 3. Anti-manipulation seller rating sync tied to deterministic review rev_{lastReviewDealId}
+  assert.match(rules, /request\.auth\.uid\s*!=\s*userId/);
+  assert.match(rules, /lastReviewDealId/);
+  assert.match(rules, /reviewId\s*==\s*\('rev_'\s*\+\s*incoming\(\)\.dealId\)/);
+
+  // 4. Hardened Storage rules forbid evidence/NID/deal_media deletion and enforce safe path segments
+  const storageRules = fs.readFileSync('storage.rules', 'utf8');
+  assert.match(storageRules, /function\s+isSafePathSegment\(segment\)/);
+  assert.match(storageRules, /allow\s+delete:\s*if\s+false;/);
+});
+
+

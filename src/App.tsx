@@ -51,17 +51,23 @@ import {
   attemptSilentGoogleSessionRefresh,
   auth,
   BOOTSTRAPPED_SUPERADMIN_EMAIL,
+  clearRecoverableSessionOnLogout,
   consumeStaleTokenSessionClearedNotice,
   db,
   detectFirebaseAuthCapabilities,
+  dismissRecoverableSessionPrompt,
+  ensureFirestoreBootReady,
   ensureUserProfileInitialized,
   extendCurrentUserSessionInteractive,
   extractUserFacingFirestoreError,
   FirebaseAuthCapabilities,
   formatFirebaseAuthError,
+  hasPendingRecoverableSession,
   isTokenServiceDisabledError,
+  markAuthenticatedSessionActive,
   prepareFirestoreAuthSession,
   recoverFirestoreFromTokenServiceError,
+  restoreExpiredSessionSilently,
   safeRefreshCurrentUserToken,
   safeSendEmailVerification,
   syncProactiveRefreshWithCapabilities,
@@ -70,6 +76,7 @@ import {
 import {
   computeSessionRenewalSchedule,
   DEFAULT_PUBLIC_SETTINGS,
+  evaluateWakeSessionAction,
   getProtectionDurationHours,
   PLATFORM_CATALOG,
   PLATFORM_LIST,
@@ -581,12 +588,16 @@ export default function App() {
     });
 
     (async () => {
-      await prepareFirestoreAuthSession();
+      await ensureFirestoreBootReady();
       if (cancelled) return;
-      const clearedMsg = consumeStaleTokenSessionClearedNotice();
-      if (clearedMsg) {
-        setStaleSessionNotice(clearedMsg);
-      }
+
+      void prepareFirestoreAuthSession().then(() => {
+        if (cancelled) return;
+        const clearedMsg = consumeStaleTokenSessionClearedNotice();
+        if (clearedMsg && !auth.currentUser) {
+          setStaleSessionNotice(clearedMsg);
+        }
+      });
 
       void testFirestoreConnection();
 
@@ -701,8 +712,21 @@ export default function App() {
 
   // Auth Session Listener & Deduplicated User Profile Initialization
   useEffect(() => {
+    let active = true;
     const unsubAuth = onAuthStateChanged(auth, async (u) => {
       if (!u) {
+        if (hasPendingRecoverableSession()) {
+          await prepareFirestoreAuthSession();
+          if (!active) return;
+          if (auth.currentUser) {
+            // Silent background OAuth restoration succeeded; onAuthStateChanged will immediately fire with the live user
+            return;
+          }
+          const fallbackMsg = consumeStaleTokenSessionClearedNotice();
+          if (fallbackMsg) {
+            setStaleSessionNotice(fallbackMsg);
+          }
+        }
         arrivalTrackerRef.current.reset();
         setProfileBootstrapped(false);
         setFbUser(null);
@@ -724,6 +748,8 @@ export default function App() {
         return;
       }
 
+      markAuthenticatedSessionActive(u);
+
       // Gate internal ProactiveRefresh immediately so disabled securetoken.googleapis.com is never hit at minute 55
       void detectFirebaseAuthCapabilities().then((caps) => {
         syncProactiveRefreshWithCapabilities(u, caps.tokenServiceEnabled);
@@ -734,40 +760,105 @@ export default function App() {
         await u.getIdToken(false);
       } catch (tokenErr) {
         if (isTokenServiceDisabledError(tokenErr)) {
-          setStaleSessionNotice(
-            'Your previous session expired. Reconnect with one click to continue.'
-          );
-          setTokenBannerDismissed(false);
           await recoverFirestoreFromTokenServiceError();
-          return;
+          if (!active) return;
+          if (!auth.currentUser) {
+            const fallbackMsg = consumeStaleTokenSessionClearedNotice();
+            if (fallbackMsg) {
+              setStaleSessionNotice(fallbackMsg);
+              setTokenBannerDismissed(false);
+            }
+            return;
+          }
         }
       }
 
+      if (!active) return;
+      const activeUser = auth.currentUser || u;
       setStaleSessionNotice(null);
       setSessionExtendPromptVisible(false);
-      setFbUser(u);
+      setFbUser(activeUser);
       setAuthReady(true);
 
       try {
-        await ensureUserProfileInitialized(u);
+        await ensureUserProfileInitialized(activeUser);
       } catch (err) {
         console.warn('Profile bootstrap notice:', err);
       } finally {
-        setProfileBootstrapped(true);
+        if (active) {
+          setProfileBootstrapped(true);
+        }
       }
     });
 
-    return () => unsubAuth();
+    return () => {
+      active = false;
+      unsubAuth();
+    };
   }, []);
 
-  // 3-Stage Session Continuity Engine:
-  // 1) Minute 52 (8m before expiry): Silent Google Identity Services + Identity Toolkit auto-refresh (0 popups, 0 securetoken calls).
-  // 2) Minute 57.5 (2.5m before expiry): Non-intrusive 1-click "Reconnect Session" bar if silent GIS wasn't available.
-  // 3) Minute 59:15 (45s before expiry, ahead of Firebase's 30s StsTokenManager.isExpired buffer): Safe pre-expiry recovery so Firestore never drops offline.
+  // 3-Stage Session Continuity Engine + Tab-Wake / Device-Sleep Recovery:
+  // 1) Minute 52 (8m before expiry) & on tab wake (<=15m left): Silent OAuth handler / FedCM auto-refresh (0 popups, 0 securetoken calls).
+  // 2) Minute 57.5 (2.5m before expiry): Non-intrusive 1-click "Extend Session" bar only if silent background renewal wasn't available.
+  // 3) Minute 59:15 (45s before expiry, ahead of Firebase's 30s StsTokenManager.isExpired buffer): Final silent renewal attempt + safe recovery so Firestore never drops offline.
   useEffect(() => {
     if (!fbUser || !authCaps || authCaps.tokenServiceEnabled) return;
     let cancelled = false;
+    let wakeRenewalBusy = false;
     const timers: number[] = [];
+
+    const checkAndRenewOnWake = async () => {
+      if (cancelled || wakeRenewalBusy || !auth.currentUser) return;
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      wakeRenewalBusy = true;
+      try {
+        const latestCaps = await detectFirebaseAuthCapabilities();
+        if (cancelled) return;
+        if (latestCaps.tokenServiceEnabled) {
+          syncProactiveRefreshWithCapabilities(auth.currentUser, true);
+          return;
+        }
+        const tokenRes = await auth.currentUser.getIdTokenResult(false).catch(() => null);
+        const expMs = tokenRes ? Date.parse(tokenRes.expirationTime) : 0;
+        const action = evaluateWakeSessionAction(expMs, Date.now(), false);
+        if (action === 'silent_refresh_now' && auth.currentUser) {
+          const ok = await attemptSilentGoogleSessionRefresh(auth.currentUser);
+          if (!cancelled && ok) {
+            setSessionExtendPromptVisible(false);
+            setStaleSessionNotice(null);
+            setAuthTokenEpoch((n) => n + 1);
+          }
+        } else if (action === 'restore_expired_now') {
+          await recoverFirestoreFromTokenServiceError();
+          if (cancelled) return;
+          if (auth.currentUser) {
+            setSessionExtendPromptVisible(false);
+            setStaleSessionNotice(null);
+            setAuthTokenEpoch((n) => n + 1);
+          } else {
+            const msg = consumeStaleTokenSessionClearedNotice();
+            if (msg) {
+              setStaleSessionNotice(msg);
+              setTokenBannerDismissed(false);
+            }
+          }
+        }
+      } finally {
+        wakeRenewalBusy = false;
+      }
+    };
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        void checkAndRenewOnWake();
+      }
+    };
+    const onWindowFocus = () => {
+      void checkAndRenewOnWake();
+    };
+
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    window.addEventListener('focus', onWindowFocus);
 
     (async () => {
       try {
@@ -793,6 +884,7 @@ export default function App() {
             if (!cancelled && ok) {
               silentlyRenewed = true;
               setSessionExtendPromptVisible(false);
+              setStaleSessionNotice(null);
               setAuthTokenEpoch((n) => n + 1);
             }
           }, schedule.silentIdpRefreshDelayMs)
@@ -805,8 +897,19 @@ export default function App() {
             if (cancelled) return;
             setAuthCaps(latestCaps);
             if (latestCaps.tokenServiceEnabled) return;
-            setTokenBannerDismissed(false);
-            setSessionExtendPromptVisible(true);
+            // Retry silent refresh once more before showing any prompt
+            const okRetry = await attemptSilentGoogleSessionRefresh(fbUser);
+            if (!cancelled && okRetry) {
+              silentlyRenewed = true;
+              setSessionExtendPromptVisible(false);
+              setStaleSessionNotice(null);
+              setAuthTokenEpoch((n) => n + 1);
+              return;
+            }
+            if (!cancelled) {
+              setTokenBannerDismissed(false);
+              setSessionExtendPromptVisible(true);
+            }
           }, schedule.promptExtendDelayMs)
         );
 
@@ -817,7 +920,6 @@ export default function App() {
             if (cancelled) return;
             setAuthCaps(latestCaps);
             if (latestCaps.tokenServiceEnabled) return;
-            // Re-verify expiration in case user already renewed interactively
             if (auth.currentUser) {
               const freshRes = await auth.currentUser.getIdTokenResult(false).catch(() => null);
               const freshExp = freshRes ? Date.parse(freshRes.expirationTime) : 0;
@@ -827,12 +929,19 @@ export default function App() {
                 return;
               }
             }
-            const msg =
-              'Your 60-minute security session finished. Click Reconnect Session to continue right where you left off.';
             setSessionExtendPromptVisible(false);
-            setStaleSessionNotice(msg);
-            setTokenBannerDismissed(false);
-            await recoverFirestoreFromTokenServiceError(msg);
+            await recoverFirestoreFromTokenServiceError();
+            if (cancelled) return;
+            if (auth.currentUser) {
+              setStaleSessionNotice(null);
+              setAuthTokenEpoch((n) => n + 1);
+            } else {
+              const msg = consumeStaleTokenSessionClearedNotice();
+              if (msg) {
+                setStaleSessionNotice(msg);
+                setTokenBannerDismissed(false);
+              }
+            }
           }, schedule.safePreExpiryGuardDelayMs)
         );
       } catch (err) {
@@ -844,9 +953,28 @@ export default function App() {
 
     return () => {
       cancelled = true;
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      window.removeEventListener('focus', onWindowFocus);
       timers.forEach((id) => window.clearTimeout(id));
     };
   }, [fbUser, authCaps, authTokenEpoch]);
+
+  // Also attempt silent restoration when user focuses the tab while a recoverable session is pending
+  useEffect(() => {
+    if (fbUser || signingOut) return;
+    const onFocusRestore = () => {
+      if (!auth.currentUser && hasPendingRecoverableSession()) {
+        void restoreExpiredSessionSilently().then((restored) => {
+          if (restored) {
+            setStaleSessionNotice(null);
+            setSessionExtendPromptVisible(false);
+          }
+        });
+      }
+    };
+    window.addEventListener('focus', onFocusRestore);
+    return () => window.removeEventListener('focus', onFocusRestore);
+  }, [fbUser, signingOut]);
 
   const handleRefreshAuthToken = useCallback(async () => {
     if (!auth.currentUser) return;
@@ -1704,10 +1832,13 @@ export default function App() {
     };
   }, [fbUser, personalNotifications, handleNavigateNotificationDestination]);
 
-  // Reliable Logout Flow (unlinks device push token & detaches authenticated listeners BEFORE revoking Firebase Auth token)
+  // Reliable Logout Flow (clears staged recoverable session, unlinks device push token & detaches authenticated listeners BEFORE revoking Firebase Auth token)
   const handleLogout = useCallback(async () => {
     const outgoingUid = fbUser?.uid ?? auth.currentUser?.uid ?? null;
     setSigningOut(true);
+    clearRecoverableSessionOnLogout();
+    setStaleSessionNotice(null);
+    setSessionExtendPromptVisible(false);
     arrivalTrackerRef.current.reset();
     setProfileBootstrapped(false);
     setAdminRole('none');
@@ -1721,6 +1852,7 @@ export default function App() {
       await unlinkCurrentDevicePushTokenOnLogout(outgoingUid);
       await new Promise((resolve) => window.setTimeout(resolve, 20));
       await signOut(auth);
+      clearRecoverableSessionOnLogout();
       setProfile(null);
       setPrivateUser(null);
       showFlash('You have been signed out safely.');
@@ -2283,7 +2415,7 @@ export default function App() {
         </div>
       )}
 
-      {/* Contextual Session Continuity Bar (shown ONLY when an active or previous user session needs 1-click renewal) */}
+      {/* Contextual Session Continuity Bar (shown ONLY if browser privacy rules blocked silent background renewal) */}
       {!tokenBannerDismissed && (sessionExtendPromptVisible || Boolean(staleSessionNotice)) && (
         <div
           role="region"
@@ -2295,7 +2427,7 @@ export default function App() {
               <AlertCircle className="w-4 h-4 shrink-0 text-[var(--orange)]" />
               <span className="font-bold leading-relaxed">
                 {sessionExtendPromptVisible
-                  ? 'Your active session will refresh shortly. Click Reconnect Session to extend for another 60 minutes without interruption.'
+                  ? 'Keep your active session open — click Extend Session to continue without interruption.'
                   : staleSessionNotice}
               </span>
             </div>
@@ -2308,12 +2440,20 @@ export default function App() {
                 className="bx-btn bx-btn-primary bx-btn-sm inline-flex items-center gap-1.5"
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${reconnectingSession ? 'animate-spin' : ''}`} />
-                <span>{reconnectingSession ? 'Reconnecting…' : 'Reconnect Session'}</span>
+                <span>
+                  {reconnectingSession
+                    ? 'Continuing…'
+                    : sessionExtendPromptVisible
+                      ? 'Extend Session'
+                      : 'Continue Session'}
+                </span>
               </button>
 
               <button
                 type="button"
                 onClick={() => {
+                  dismissRecoverableSessionPrompt();
+                  setStaleSessionNotice(null);
                   setTokenBannerDismissed(true);
                   setSessionExtendPromptVisible(false);
                 }}

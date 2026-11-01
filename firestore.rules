@@ -49,7 +49,7 @@ service cloud.firestore {
         && data.keys().hasOnly([
           'uid', 'displayName', 'username', 'bio', 'avatarUrl', 'coverUrl', 'location',
           'nidVerified', 'completedTrader', 'completedSales', 'completedPurchases',
-          'ratingSum', 'ratingCount', 'followerCount', 'createdAt', 'updatedAt'
+          'ratingSum', 'ratingCount', 'lastReviewDealId', 'followerCount', 'createdAt', 'updatedAt'
         ])
         && data.uid == uid
         && data.displayName is string && data.displayName.size() >= 2 && data.displayName.size() <= 80
@@ -64,6 +64,7 @@ service cloud.firestore {
         && data.completedPurchases is int && data.completedPurchases >= 0
         && data.ratingSum is int && data.ratingSum >= 0
         && data.ratingCount is int && data.ratingCount >= 0
+        && (!('lastReviewDealId' in data) || isValidId(data.lastReviewDealId))
         && (!('followerCount' in data) || (data.followerCount is int && data.followerCount >= 0))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
@@ -319,6 +320,10 @@ service cloud.firestore {
         && data.sellerFeePct is number && data.sellerFeePct >= 0 && data.sellerFeePct <= 50
         && data.buyerFeeMinor is int && data.buyerFeeMinor >= 0
         && data.sellerFeeMinor is int && data.sellerFeeMinor >= 0
+        && (data.buyerFeeMinor * 100) >= (data.baseAmountMinor * data.buyerFeePct) - 50
+        && (data.buyerFeeMinor * 100) <= (data.baseAmountMinor * data.buyerFeePct) + 50
+        && (data.sellerFeeMinor * 100) >= (data.baseAmountMinor * data.sellerFeePct) - 50
+        && (data.sellerFeeMinor * 100) <= (data.baseAmountMinor * data.sellerFeePct) + 50
         && data.buyerTotalMinor == data.baseAmountMinor + data.buyerFeeMinor
         && data.sellerPayoutMinor == data.baseAmountMinor - data.sellerFeeMinor
         && data.platformCommissionMinor == data.buyerFeeMinor + data.sellerFeeMinor
@@ -348,6 +353,34 @@ service cloud.firestore {
         ]
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
+    }
+
+    function matchesConfiguredFees(data) {
+      let hasCfg = exists(/databases/$(database)/documents/publicConfig/settings);
+      let cfg = hasCfg ? get(/databases/$(database)/documents/publicConfig/settings).data : null;
+      let expectedBuyerPct = hasCfg ? (cfg.buyerFeeEnabled ? cfg.buyerFeePct : 0) : 5;
+      let expectedSellerPct = hasCfg ? (cfg.sellerFeeEnabled ? cfg.sellerFeePct : 0) : 0;
+      return data.buyerFeePct == expectedBuyerPct && data.sellerFeePct == expectedSellerPct;
+    }
+
+    function hasVerifiedBuyerWalletDebit(buyerUid, orderTotalMinor, orderCurrency) {
+      let beforePriv = get(/databases/$(database)/documents/privateUsers/$(buyerUid)).data;
+      let afterPriv = getAfter(/databases/$(database)/documents/privateUsers/$(buyerUid)).data;
+      let usdRate = exists(/databases/$(database)/documents/publicConfig/settings)
+        ? get(/databases/$(database)/documents/publicConfig/settings).data.usdToBdtRate
+        : 120;
+      let debitMinor = beforePriv.walletBalanceMinor - afterPriv.walletBalanceMinor;
+      return afterPriv.walletBalanceMinor >= 0
+        && afterPriv.reservedBalanceMinor == beforePriv.reservedBalanceMinor
+        && debitMinor > 0
+        && (
+          (orderCurrency == 'BDT' && debitMinor == orderTotalMinor)
+          || (
+            orderCurrency == 'USD'
+            && debitMinor >= (orderTotalMinor * usdRate) - 1
+            && debitMinor <= (orderTotalMinor * usdRate) + 1
+          )
+        );
     }
 
     function isValidDealTransferSubmission(data, dealId) {
@@ -565,7 +598,7 @@ service cloud.firestore {
         ])
         && data.keys().hasOnly([
           'title', 'category', 'severity', 'summary',
-          'affectedFiles', 'proposedDiff', 'status', 'decidedBy', 'createdAt', 'updatedAt'
+          'affectedFiles', 'proposedDiff', 'status', 'decidedBy', 'linkedIssueId', 'createdAt', 'updatedAt'
         ])
         && data.title is string && data.title.size() >= 3 && data.title.size() <= 140
         && data.category in ['bugfix', 'security', 'feature', 'performance']
@@ -575,6 +608,7 @@ service cloud.firestore {
         && data.proposedDiff is string && data.proposedDiff.size() <= 8000
         && data.status in ['awaiting_review', 'in_review', 'approved', 'rejected', 'deployed']
         && (!('decidedBy' in data) || (data.decidedBy is string && data.decidedBy.size() <= 128))
+        && (!('linkedIssueId' in data) || (data.linkedIssueId is string && data.linkedIssueId.size() <= 80))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -713,6 +747,99 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function isValidAiAuditReport(data, reportId) {
+      return data.keys().hasAll([
+          'reportId', 'trigger', 'generatedAtMs', 'durationMs', 'timezone',
+          'dateKey', 'overallStatus', 'executiveSummary', 'completedChecksCount',
+          'incompleteChecksCount', 'openIssuesCount', 'newlyDiscoveredCount',
+          'fixedVerifiedCount', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'reportId', 'trigger', 'generatedAtMs', 'durationMs', 'timezone',
+          'dateKey', 'overallStatus', 'executiveSummary', 'completedChecksCount',
+          'incompleteChecksCount', 'openIssuesCount', 'newlyDiscoveredCount',
+          'fixedVerifiedCount', 'createdAt', 'updatedAt'
+        ])
+        && data.reportId == reportId
+        && isValidId(data.reportId)
+        && data.trigger in ['manual', 'scheduled_daily']
+        && data.generatedAtMs is int && data.generatedAtMs >= 0
+        && data.durationMs is int && data.durationMs >= 0
+        && data.timezone is string && data.timezone.size() >= 1 && data.timezone.size() <= 64
+        && data.dateKey is string && data.dateKey.size() == 10
+        && data.overallStatus in ['healthy', 'attention_needed', 'critical_issues', 'incomplete']
+        && data.executiveSummary is string && data.executiveSummary.size() >= 1 && data.executiveSummary.size() <= 2000
+        && data.completedChecksCount is int && data.completedChecksCount >= 0
+        && data.incompleteChecksCount is int && data.incompleteChecksCount >= 0
+        && data.openIssuesCount is int && data.openIssuesCount >= 0
+        && data.newlyDiscoveredCount is int && data.newlyDiscoveredCount >= 0
+        && data.fixedVerifiedCount is int && data.fixedVerifiedCount >= 0
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidAiConversation(data) {
+      return data.keys().hasAll([
+          'title', 'createdBy', 'messageCount', 'lastMessagePreview',
+          'createdAtMs', 'updatedAtMs', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'title', 'summary', 'createdBy', 'messageCount', 'lastMessagePreview',
+          'pinnedReportId', 'createdAtMs', 'updatedAtMs', 'createdAt', 'updatedAt'
+        ])
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 140
+        && (!('summary' in data) || (data.summary is string && data.summary.size() <= 400))
+        && isValidId(data.createdBy)
+        && data.messageCount is int && data.messageCount >= 0
+        && data.lastMessagePreview is string && data.lastMessagePreview.size() <= 240
+        && (!('pinnedReportId' in data) || (data.pinnedReportId is string && data.pinnedReportId.size() <= 128))
+        && data.createdAtMs is int && data.createdAtMs >= 0
+        && data.updatedAtMs is int && data.updatedAtMs >= 0
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidAiConversationMessage(data, conversationId) {
+      return data.keys().hasAll([
+          'conversationId', 'role', 'content', 'evidenceMode', 'createdAtMs', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'conversationId', 'role', 'content', 'evidenceMode',
+          'modelUsed', 'actorUid', 'createdAtMs', 'createdAt'
+        ])
+        && data.conversationId == conversationId
+        && isValidId(data.conversationId)
+        && data.role in ['admin', 'assistant']
+        && data.content is string && data.content.size() >= 1 && data.content.size() <= 12000
+        && data.evidenceMode in ['verified_project_evidence', 'live_tool_inspection', 'general_reasoning']
+        && (!('modelUsed' in data) || (data.modelUsed is string && data.modelUsed.size() <= 80))
+        && (!('actorUid' in data) || (data.actorUid is string && data.actorUid.size() <= 128))
+        && data.createdAtMs is int && data.createdAtMs >= 0
+        && data.createdAt is timestamp;
+    }
+
+    function isValidAiDailySchedule(data) {
+      return data.keys().hasAll([
+          'enabled', 'hour', 'minute', 'timezone',
+          'notifyInApp', 'notifyTelegram', 'notifyEmail',
+          'updatedBy', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'enabled', 'hour', 'minute', 'timezone',
+          'notifyInApp', 'notifyTelegram', 'notifyEmail',
+          'updatedBy', 'updatedAt'
+        ])
+        && data.enabled is bool
+        && data.hour is int && data.hour >= 0 && data.hour <= 23
+        && data.minute is int && data.minute >= 0 && data.minute <= 59
+        && data.timezone is string && data.timezone.size() >= 1 && data.timezone.size() <= 64
+        && data.notifyInApp is bool
+        && data.notifyTelegram is bool
+        && data.notifyEmail is bool
+        && isValidId(data.updatedBy)
+        && data.updatedAt is timestamp;
+    }
+
     // 0. Health Connection Test Path (Read-only doc lookup)
     match /test/{docId} {
       allow get: if docId == 'connection';
@@ -733,6 +860,7 @@ service cloud.firestore {
         && incoming().completedPurchases == 0
         && incoming().ratingSum == 0
         && incoming().ratingCount == 0
+        && !('lastReviewDealId' in incoming())
         && (!('followerCount' in incoming()) || incoming().followerCount == 0)
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time;
@@ -750,11 +878,17 @@ service cloud.firestore {
             ])
           )
           || (
-            // Verified buyer submitting a valid 1-5 review increments seller ratingSum & ratingCount by 1
-            incoming().diff(existing()).affectedKeys().hasOnly(['ratingSum', 'ratingCount', 'updatedAt'])
+            // Verified buyer atomically creating settled-deal review rev_{dealId} increments seller ratingSum & ratingCount
+            request.auth.uid != userId
+            && incoming().diff(existing()).affectedKeys().hasOnly(['ratingSum', 'ratingCount', 'lastReviewDealId', 'updatedAt'])
+            && 'lastReviewDealId' in incoming()
+            && isValidId(incoming().lastReviewDealId)
+            && !exists(/databases/$(database)/documents/reviews/$('rev_' + incoming().lastReviewDealId))
+            && existsAfter(/databases/$(database)/documents/reviews/$('rev_' + incoming().lastReviewDealId))
+            && getAfter(/databases/$(database)/documents/reviews/$('rev_' + incoming().lastReviewDealId)).data.sellerId == userId
+            && getAfter(/databases/$(database)/documents/reviews/$('rev_' + incoming().lastReviewDealId)).data.reviewerId == request.auth.uid
             && incoming().ratingCount == existing().ratingCount + 1
-            && incoming().ratingSum >= existing().ratingSum + 1
-            && incoming().ratingSum <= existing().ratingSum + 5
+            && incoming().ratingSum == existing().ratingSum + getAfter(/databases/$(database)/documents/reviews/$('rev_' + incoming().lastReviewDealId)).data.score
           )
           || (
             // Non-self follower atomically creating sellerFollows increments seller followerCount by 1
@@ -813,11 +947,19 @@ service cloud.firestore {
             && (incoming().phoneVerified == existing().phoneVerified || (incoming().phoneVerified == true && ('phone_number' in request.auth.token && request.auth.token.phone_number is string)))
           )
           || (
-            // Atomic wallet debit when purchasing an active listing or reserving withdrawal
+            // Atomic wallet debit when purchasing an active listing or reserving a withdrawal
             request.auth.uid == userId
             && incoming().diff(existing()).affectedKeys().hasOnly(['walletBalanceMinor', 'reservedBalanceMinor', 'updatedAt'])
-            && incoming().walletBalanceMinor <= existing().walletBalanceMinor
-            && (incoming().walletBalanceMinor + incoming().reservedBalanceMinor) <= (existing().walletBalanceMinor + existing().reservedBalanceMinor)
+            && incoming().walletBalanceMinor < existing().walletBalanceMinor
+            && (
+              (
+                incoming().reservedBalanceMinor == existing().reservedBalanceMinor
+              )
+              || (
+                incoming().reservedBalanceMinor > existing().reservedBalanceMinor
+                && (incoming().walletBalanceMinor + incoming().reservedBalanceMinor) == (existing().walletBalanceMinor + existing().reservedBalanceMinor)
+              )
+            )
           )
         );
       allow delete: if false;
@@ -1220,16 +1362,39 @@ service cloud.firestore {
         && (
           isAdmin()
           || (
-            // Seller creating unpaid deal upon bid acceptance
+            // Seller creating unpaid deal upon bid acceptance (atomically reserves listing & matches bid)
             incoming().sellerId == request.auth.uid
             && incoming().status in ['accepted_pending_payment', 'awaiting_payment']
+            && 'acceptedBidId' in incoming()
+            && isValidId(incoming().acceptedBidId)
+            && exists(/databases/$(database)/documents/bids/$(incoming().acceptedBidId))
+            && get(/databases/$(database)/documents/bids/$(incoming().acceptedBidId)).data.sellerId == request.auth.uid
+            && get(/databases/$(database)/documents/bids/$(incoming().acceptedBidId)).data.buyerId == incoming().buyerId
+            && get(/databases/$(database)/documents/bids/$(incoming().acceptedBidId)).data.listingId == incoming().listingId
+            && incoming().baseAmountMinor == get(/databases/$(database)/documents/bids/$(incoming().acceptedBidId)).data.amountMinor
+            && incoming().currency == get(/databases/$(database)/documents/bids/$(incoming().acceptedBidId)).data.currency
+            && matchesConfiguredFees(incoming())
+            && getAfter(/databases/$(database)/documents/listings/$(incoming().listingId)).data.status == 'reserved'
+            && getAfter(/databases/$(database)/documents/listings/$(incoming().listingId)).data.activeDealId == dealId
           )
           || (
-            // Buyer creating funded deal upon atomic Buy Now payment
+            // Buyer creating funded deal upon atomic Buy Now payment (verifies listing price, fee, ledger & exact wallet debit)
             incoming().buyerId == request.auth.uid
             && incoming().status in ['paid_deal_room_active', 'awaiting_buyer_confirmation']
+            && exists(/databases/$(database)/documents/listings/$(incoming().listingId))
+            && get(/databases/$(database)/documents/listings/$(incoming().listingId)).data.status == 'active'
+            && get(/databases/$(database)/documents/listings/$(incoming().listingId)).data.sellerId == incoming().sellerId
+            && incoming().baseAmountMinor == get(/databases/$(database)/documents/listings/$(incoming().listingId)).data.priceMinor
+            && incoming().currency == get(/databases/$(database)/documents/listings/$(incoming().listingId)).data.currency
+            && matchesConfiguredFees(incoming())
+            && getAfter(/databases/$(database)/documents/listings/$(incoming().listingId)).data.status == 'sold'
+            && getAfter(/databases/$(database)/documents/listings/$(incoming().listingId)).data.activeDealId == dealId
             && !exists(/databases/$(database)/documents/walletLedger/$('led_pay_' + dealId))
             && existsAfter(/databases/$(database)/documents/walletLedger/$('led_pay_' + dealId))
+            && getAfter(/databases/$(database)/documents/walletLedger/$('led_pay_' + dealId)).data.userId == request.auth.uid
+            && getAfter(/databases/$(database)/documents/walletLedger/$('led_pay_' + dealId)).data.kind == 'escrow_debit'
+            && getAfter(/databases/$(database)/documents/walletLedger/$('led_pay_' + dealId)).data.amountMinor == incoming().buyerTotalMinor
+            && hasVerifiedBuyerWalletDebit(request.auth.uid, incoming().buyerTotalMinor, incoming().currency)
           )
         );
       allow update: if isSignedIn()
@@ -1277,12 +1442,18 @@ service cloud.firestore {
             )
           )
           || (
-            // Buyer paying for accepted-bid deal atomically with deterministic payment ledger
+            // Buyer paying for accepted-bid deal atomically with deterministic payment ledger & verified wallet debit
             request.auth.uid == existing().buyerId
             && existing().status in ['accepted_pending_payment', 'awaiting_payment']
             && incoming().status in ['paid_deal_room_active', 'awaiting_buyer_confirmation']
+            && getAfter(/databases/$(database)/documents/listings/$(existing().listingId)).data.status == 'sold'
+            && getAfter(/databases/$(database)/documents/listings/$(existing().listingId)).data.activeDealId == dealId
             && !exists(/databases/$(database)/documents/walletLedger/$('led_pay_' + dealId))
             && existsAfter(/databases/$(database)/documents/walletLedger/$('led_pay_' + dealId))
+            && getAfter(/databases/$(database)/documents/walletLedger/$('led_pay_' + dealId)).data.userId == request.auth.uid
+            && getAfter(/databases/$(database)/documents/walletLedger/$('led_pay_' + dealId)).data.kind == 'escrow_debit'
+            && getAfter(/databases/$(database)/documents/walletLedger/$('led_pay_' + dealId)).data.amountMinor == existing().buyerTotalMinor
+            && hasVerifiedBuyerWalletDebit(request.auth.uid, existing().buyerTotalMinor, existing().currency)
             && incoming().confirmedAtMs == 0
             && incoming().originalDeadlineMs == 0
             && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'paymentLedgerId', 'paidAtMs', 'updatedAt'])
@@ -1499,8 +1670,18 @@ service cloud.firestore {
         && isValidWithdrawalRequest(incoming())
         && incoming().userId == request.auth.uid
         && incoming().status == 'pending'
+        && incoming().currency == 'BDT'
         && incoming().createdAt == request.time
-        && incoming().updatedAt == request.time;
+        && incoming().updatedAt == request.time
+        && !exists(/databases/$(database)/documents/walletLedger/$('led_wd_' + withdrawalId))
+        && existsAfter(/databases/$(database)/documents/walletLedger/$('led_wd_' + withdrawalId))
+        && getAfter(/databases/$(database)/documents/walletLedger/$('led_wd_' + withdrawalId)).data.userId == request.auth.uid
+        && getAfter(/databases/$(database)/documents/walletLedger/$('led_wd_' + withdrawalId)).data.kind == 'withdrawal_reserved'
+        && getAfter(/databases/$(database)/documents/walletLedger/$('led_wd_' + withdrawalId)).data.amountMinor == incoming().amountMinor
+        && getAfter(/databases/$(database)/documents/privateUsers/$(request.auth.uid)).data.walletBalanceMinor
+           == get(/databases/$(database)/documents/privateUsers/$(request.auth.uid)).data.walletBalanceMinor - incoming().amountMinor
+        && getAfter(/databases/$(database)/documents/privateUsers/$(request.auth.uid)).data.reservedBalanceMinor
+           == get(/databases/$(database)/documents/privateUsers/$(request.auth.uid)).data.reservedBalanceMinor + incoming().amountMinor;
       allow update: if isAdmin()
         && isValidId(withdrawalId)
         && isValidWithdrawalRequest(incoming())
@@ -1529,7 +1710,17 @@ service cloud.firestore {
           isAdmin()
           || (
             incoming().userId == request.auth.uid
-            && incoming().kind in ['escrow_debit', 'withdrawal_reserved']
+            && incoming().kind == 'escrow_debit'
+            && entryId == ('led_pay_' + incoming().referenceId)
+            && existsAfter(/databases/$(database)/documents/deals/$(incoming().referenceId))
+            && getAfter(/databases/$(database)/documents/deals/$(incoming().referenceId)).data.buyerId == request.auth.uid
+          )
+          || (
+            incoming().userId == request.auth.uid
+            && incoming().kind == 'withdrawal_reserved'
+            && entryId == ('led_wd_' + incoming().referenceId)
+            && existsAfter(/databases/$(database)/documents/withdrawals/$(incoming().referenceId))
+            && getAfter(/databases/$(database)/documents/withdrawals/$(incoming().referenceId)).data.userId == request.auth.uid
           )
         );
       allow update, delete: if false;
@@ -1541,6 +1732,7 @@ service cloud.firestore {
       allow list: if resource.data.sellerId is string;
       allow create: if isSignedIn()
         && isValidId(reviewId)
+        && reviewId == ('rev_' + incoming().dealId)
         && isValidReview(incoming())
         && incoming().reviewerId == request.auth.uid
         && incoming().createdAt == request.time
@@ -1802,5 +1994,77 @@ service cloud.firestore {
              ? get(/databases/$(database)/documents/publicProfiles/$(existing().sellerId)).data.followerCount - 1
              : 0);
     }
+
+    // 22. Admin-Only Immutable AI Website Audit Reports
+    match /aiAuditReports/{reportId} {
+      allow get: if isAdmin() && isValidId(reportId);
+      allow list: if isAdmin() && resource.data.reportId is string;
+      allow create: if isAdmin()
+        && isValidId(reportId)
+        && isValidAiAuditReport(incoming(), reportId);
+      allow update, delete: if false;
+    }
+
+    // 23. Admin-Only AI Assistant Conversations & Subcollection Messages
+    match /aiConversations/{conversationId} {
+      allow get: if isAdmin() && isValidId(conversationId);
+      allow list: if isAdmin() && resource.data.createdBy is string;
+      allow create: if isAdmin()
+        && isValidId(conversationId)
+        && isValidAiConversation(incoming())
+        && incoming().createdBy == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isAdmin()
+        && isValidId(conversationId)
+        && isValidAiConversation(incoming())
+        && incoming().createdBy == existing().createdBy
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'title', 'summary', 'messageCount', 'lastMessagePreview',
+          'pinnedReportId', 'updatedAtMs', 'updatedAt'
+        ]);
+      allow delete: if isAdmin() && isValidId(conversationId);
+
+      match /messages/{messageId} {
+        allow get: if isAdmin()
+          && isValidId(conversationId)
+          && isValidId(messageId)
+          && exists(/databases/$(database)/documents/aiConversations/$(conversationId));
+        allow list: if isAdmin()
+          && resource.data.conversationId == conversationId;
+        allow create: if isAdmin()
+          && isValidId(conversationId)
+          && isValidId(messageId)
+          && isValidAiConversationMessage(incoming(), conversationId)
+          && incoming().createdAt == request.time
+          && exists(/databases/$(database)/documents/aiConversations/$(conversationId));
+        allow update, delete: if false;
+      }
+    }
+
+    // 24. Admin-Only AI Daily Schedule Configuration
+    match /aiSystemConfig/{configId} {
+      allow get: if isAdmin() && configId == 'dailySchedule';
+      allow list: if false;
+      allow create: if isAdmin()
+        && configId == 'dailySchedule'
+        && isValidAiDailySchedule(incoming())
+        && incoming().updatedBy == request.auth.uid
+        && incoming().updatedAt == request.time;
+      allow update: if isAdmin()
+        && configId == 'dailySchedule'
+        && isValidAiDailySchedule(incoming())
+        && incoming().updatedBy == request.auth.uid
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'enabled', 'hour', 'minute', 'timezone',
+          'notifyInApp', 'notifyTelegram', 'notifyEmail',
+          'updatedBy', 'updatedAt'
+        ]);
+      allow delete: if false;
+    }
   }
 }
+

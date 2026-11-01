@@ -18,6 +18,7 @@
         "completedPurchases": { "type": "integer" },
         "ratingSum": { "type": "integer" },
         "ratingCount": { "type": "integer" },
+        "lastReviewDealId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "followerCount": { "type": "integer" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
@@ -515,6 +516,7 @@
         "proposedDiff": { "type": "string", "maxLength": 8000 },
         "status": { "type": "string", "enum": ["awaiting_review", "in_review", "approved", "rejected", "deployed"] },
         "decidedBy": { "type": "string", "maxLength": 128 },
+        "linkedIssueId": { "type": "string", "maxLength": 80 },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -677,6 +679,96 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "AiAuditReport": {
+      "title": "AiAuditReport",
+      "description": "Immutable admin-only website audit report summary synchronized from the shared Check Now and Daily Audit engine.",
+      "type": "object",
+      "properties": {
+        "reportId": { "type": "string", "minLength": 4, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "trigger": { "type": "string", "enum": ["manual", "scheduled_daily"] },
+        "generatedAtMs": { "type": "integer" },
+        "durationMs": { "type": "integer" },
+        "timezone": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "dateKey": { "type": "string", "minLength": 10, "maxLength": 10 },
+        "overallStatus": { "type": "string", "enum": ["healthy", "attention_needed", "critical_issues", "incomplete"] },
+        "executiveSummary": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "completedChecksCount": { "type": "integer" },
+        "incompleteChecksCount": { "type": "integer" },
+        "openIssuesCount": { "type": "integer" },
+        "newlyDiscoveredCount": { "type": "integer" },
+        "fixedVerifiedCount": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "reportId",
+        "trigger",
+        "generatedAtMs",
+        "durationMs",
+        "timezone",
+        "dateKey",
+        "overallStatus",
+        "executiveSummary",
+        "completedChecksCount",
+        "incompleteChecksCount",
+        "openIssuesCount",
+        "newlyDiscoveredCount",
+        "fixedVerifiedCount",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "AiConversation": {
+      "title": "AiConversation",
+      "description": "Admin-only conversational thread metadata for the BEXORA AI Assistant.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "minLength": 1, "maxLength": 140 },
+        "summary": { "type": "string", "maxLength": 400 },
+        "createdBy": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "messageCount": { "type": "integer" },
+        "lastMessagePreview": { "type": "string", "maxLength": 240 },
+        "pinnedReportId": { "type": "string", "maxLength": 128 },
+        "createdAtMs": { "type": "integer" },
+        "updatedAtMs": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "createdBy", "messageCount", "lastMessagePreview", "createdAtMs", "updatedAtMs", "createdAt", "updatedAt"]
+    },
+    "AiConversationMessage": {
+      "title": "AiConversationMessage",
+      "description": "Immutable message inside an admin-only AI conversation thread.",
+      "type": "object",
+      "properties": {
+        "conversationId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "role": { "type": "string", "enum": ["admin", "assistant"] },
+        "content": { "type": "string", "minLength": 1, "maxLength": 12000 },
+        "evidenceMode": { "type": "string", "enum": ["verified_project_evidence", "live_tool_inspection", "general_reasoning"] },
+        "modelUsed": { "type": "string", "maxLength": 80 },
+        "actorUid": { "type": "string", "maxLength": 128 },
+        "createdAtMs": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["conversationId", "role", "content", "evidenceMode", "createdAtMs", "createdAt"]
+    },
+    "AiDailySchedule": {
+      "title": "AiDailySchedule",
+      "description": "Admin-managed daily website audit schedule configuration defaulting to Asia/Dhaka.",
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "hour": { "type": "integer" },
+        "minute": { "type": "integer" },
+        "timezone": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "notifyInApp": { "type": "boolean" },
+        "notifyTelegram": { "type": "boolean" },
+        "notifyEmail": { "type": "boolean" },
+        "updatedBy": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["enabled", "hour", "minute", "timezone", "notifyInApp", "notifyTelegram", "notifyEmail", "updatedBy", "updatedAt"]
     }
   },
   "firestore": {
@@ -787,6 +879,22 @@
     "/sellerFollows/{followId}": {
       "schema": "SellerFollow",
       "description": "Follower-to-seller subscriptions paired atomically with seller followerCount."
+    },
+    "/aiAuditReports/{reportId}": {
+      "schema": "AiAuditReport",
+      "description": "Admin-only immutable website audit reports."
+    },
+    "/aiConversations/{conversationId}": {
+      "schema": "AiConversation",
+      "description": "Admin-only AI Assistant conversation threads."
+    },
+    "/aiConversations/{conversationId}/messages/{messageId}": {
+      "schema": "AiConversationMessage",
+      "description": "Immutable messages inside an admin-only AI conversation thread."
+    },
+    "/aiSystemConfig/{configId}": {
+      "schema": "AiDailySchedule",
+      "description": "Admin-only daily website audit schedule configuration."
     }
   }
 }

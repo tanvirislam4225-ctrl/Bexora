@@ -11,53 +11,115 @@ service firebase.storage {
       return request.auth != null;
     }
 
+    function isSafePathSegment(segment) {
+      return segment is string
+        && segment.size() >= 1
+        && segment.size() <= 128
+        && segment.matches('^[a-zA-Z0-9._\\-]+$')
+        && segment != '.'
+        && segment != '..';
+    }
+
+    function isSafeImageFileName(fileName) {
+      return isSafePathSegment(fileName)
+        && fileName.matches('^[a-zA-Z0-9._\\-]+\\.(jpg|jpeg|png|webp)$');
+    }
+
+    function isSafeMediaFileName(fileName) {
+      return isSafePathSegment(fileName)
+        && fileName.matches('^[a-zA-Z0-9._\\-]+\\.(jpg|jpeg|png|webp|webm|ogg|mp4|mp3|wav)$');
+    }
+
     function isBootstrappedSuperAdmin() {
       return isSignedIn()
         && request.auth.token.email_verified == true
         && request.auth.token.email == 'tanvirislam7574@gmail.com';
     }
 
-    function isValidImageUpload() {
+    function isValidImageUpload(fileName) {
       return request.resource != null
+        && isSafeImageFileName(fileName)
+        && request.resource.size > 0
         && request.resource.size <= 5 * 1024 * 1024
         && request.resource.contentType.matches('image/(jpeg|png|webp)');
     }
 
-    function isValidVoiceUpload() {
+    function isValidVoiceUpload(fileName) {
       return request.resource != null
+        && isSafeMediaFileName(fileName)
+        && request.resource.size > 0
         && request.resource.size <= 5 * 1024 * 1024
         && request.resource.contentType.matches('audio/(webm|ogg|mp4|mpeg|wav)');
     }
 
-    // Strictly Private NID Documents — NEVER publicly readable
+    // Strictly Private NID Documents — NEVER publicly readable; zero client deletes
     match /nid_documents/{userId}/{fileName} {
-      allow read: if isSignedIn() && (request.auth.uid == userId || isBootstrappedSuperAdmin());
-      allow write: if isSignedIn() && request.auth.uid == userId && isValidImageUpload();
+      allow read: if isSignedIn()
+        && isSafePathSegment(userId)
+        && isSafePathSegment(fileName)
+        && (request.auth.uid == userId || isBootstrappedSuperAdmin());
+      allow create, update: if isSignedIn()
+        && isSafePathSegment(userId)
+        && request.auth.uid == userId
+        && isValidImageUpload(fileName);
+      allow delete: if false;
     }
 
     // Strictly Private Monetization Verification Evidence
     match /listing_evidence/{userId}/{listingId}/{fileName} {
-      allow read: if isSignedIn() && (request.auth.uid == userId || isBootstrappedSuperAdmin());
-      allow write: if isSignedIn() && request.auth.uid == userId && isValidImageUpload();
+      allow read: if isSignedIn()
+        && isSafePathSegment(userId)
+        && isSafePathSegment(listingId)
+        && isSafePathSegment(fileName)
+        && (request.auth.uid == userId || isBootstrappedSuperAdmin());
+      allow create, update: if isSignedIn()
+        && isSafePathSegment(userId)
+        && isSafePathSegment(listingId)
+        && request.auth.uid == userId
+        && isValidImageUpload(fileName);
+      allow delete: if false;
     }
 
-    // Public Listing Showcase Images (Owner write, public read)
+    // Public Listing Showcase Images (Owner write, public read, no arbitrary delete)
     match /listing_images/{userId}/{listingId}/{fileName} {
-      allow read: if true;
-      allow write: if isSignedIn() && request.auth.uid == userId && isValidImageUpload();
+      allow read: if isSafePathSegment(userId)
+        && isSafePathSegment(listingId)
+        && isSafePathSegment(fileName);
+      allow create, update: if isSignedIn()
+        && isSafePathSegment(userId)
+        && isSafePathSegment(listingId)
+        && request.auth.uid == userId
+        && isValidImageUpload(fileName);
+      allow delete: if isSignedIn()
+        && isSafePathSegment(userId)
+        && (request.auth.uid == userId || isBootstrappedSuperAdmin());
     }
 
     // Public User Avatars & Covers
     match /profile_media/{userId}/{fileName} {
-      allow read: if true;
-      allow write: if isSignedIn() && request.auth.uid == userId && isValidImageUpload();
+      allow read: if isSafePathSegment(userId) && isSafePathSegment(fileName);
+      allow create, update: if isSignedIn()
+        && isSafePathSegment(userId)
+        && request.auth.uid == userId
+        && isValidImageUpload(fileName);
+      allow delete: if isSignedIn()
+        && isSafePathSegment(userId)
+        && (request.auth.uid == userId || isBootstrappedSuperAdmin());
     }
 
-    // Private Deal Media (15-day retention eligible — restricted to uploader or superadmin)
+    // Private Deal Media (restricted to uploader or superadmin; zero client deletes to preserve dispute evidence)
     match /deal_media/{dealId}/{userId}/{fileName} {
-      allow read: if isSignedIn() && (request.auth.uid == userId || isBootstrappedSuperAdmin());
-      allow write: if isSignedIn() && request.auth.uid == userId && (isValidImageUpload() || isValidVoiceUpload());
+      allow read: if isSignedIn()
+        && isSafePathSegment(dealId)
+        && isSafePathSegment(userId)
+        && isSafePathSegment(fileName)
+        && (request.auth.uid == userId || isBootstrappedSuperAdmin());
+      allow create, update: if isSignedIn()
+        && isSafePathSegment(dealId)
+        && isSafePathSegment(userId)
+        && request.auth.uid == userId
+        && (isValidImageUpload(fileName) || isValidVoiceUpload(fileName));
+      allow delete: if false;
     }
   }
 }
-
