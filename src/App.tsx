@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { onAuthStateChanged, signOut, User } from 'firebase/auth';
 import {
   collection,
+  deleteDoc,
   doc,
   getDoc,
   limit,
@@ -17,6 +18,7 @@ import {
   ArrowRight,
   CheckCircle2,
   Filter,
+  History,
   Lock,
   MailCheck,
   Plus,
@@ -35,13 +37,16 @@ import {
   DealRecord,
   DepositRequestRecord,
   FavoriteRecord,
+  InfoTopicId,
   LanguageCode,
   MarketplaceListing,
   NotificationRecord,
   PlatformId,
   PrivateUser,
+  PublicActivityItem,
   PublicProfile,
   PublicSettings,
+  RecentSearchRecord,
   SellerFollowRecord,
   ThemeMode,
   UserNotificationPreferences,
@@ -161,6 +166,19 @@ import {
   toggleFollowSellerInFirestore,
   unfollowSellerByIdInFirestore,
 } from './lib/engagementService';
+import {
+  createRecentSearchRecord,
+  loadGuestRecentSearches,
+  MAX_RECENT_SEARCHES,
+  RecentSearchInput,
+  saveGuestRecentSearches,
+  upsertRecentSearchList,
+} from './lib/recentSearchLogic';
+import { LiveActivityTickers } from './components/LiveActivityTickers';
+import { RecentSearchesView } from './components/RecentSearchesView';
+import { ReviewsView } from './components/ReviewsView';
+import { InfoCenterView } from './components/InfoCenterView';
+import { MarketplaceFooter } from './components/MarketplaceFooter';
 
 const PENDING_AUTH_INTENT_STORAGE_KEY = 'bx_pending_auth_intent';
 
@@ -464,6 +482,10 @@ export default function App() {
   const [deals, setDeals] = useState<DealRecord[]>([]);
   const [deposits, setDeposits] = useState<DepositRequestRecord[]>([]);
   const [withdrawals, setWithdrawals] = useState<WithdrawalRequestRecord[]>([]);
+  const [publicActivities, setPublicActivities] = useState<PublicActivityItem[]>([]);
+  const [recentSearches, setRecentSearches] = useState<RecentSearchRecord[]>(() =>
+    loadGuestRecentSearches()
+  );
   const [personalNotifications, setPersonalNotifications] = useState<NotificationRecord[]>([]);
   const [activeAnnouncements, setActiveAnnouncements] = useState<AnnouncementRecord[]>([]);
   const [notificationsLoading, setNotificationsLoading] = useState(false);
@@ -1099,6 +1121,7 @@ export default function App() {
                 typeof d.followerCount === 'number' && Number.isFinite(d.followerCount)
                   ? Math.max(0, Math.floor(d.followerCount))
                   : 0,
+              hidePublicActivityName: Boolean(d.hidePublicActivityName),
             });
           }
         },
@@ -1146,6 +1169,35 @@ export default function App() {
           );
           list.sort((a, b) => b.createdAtMs - a.createdAtMs);
           setMyListings(list);
+        },
+        () => {}
+      )
+    );
+
+    unsubs.push(
+      onSnapshot(
+        query(collection(db, 'privateUsers', uid, 'recentSearches'), limit(25)),
+        (snap) => {
+          const loaded: RecentSearchRecord[] = [];
+          for (const d of snap.docs) {
+            const sd = d.data();
+            const rec = createRecentSearchRecord(
+              {
+                query: typeof sd.query === 'string' ? sd.query : '',
+                platform: typeof sd.platform === 'string' ? (sd.platform as PlatformId) : '',
+                subcategory: typeof sd.subcategory === 'string' ? sd.subcategory : '',
+                monetization: typeof sd.monetization === 'string' ? sd.monetization : 'all',
+                verifiedOnly: Boolean(sd.verifiedOnly),
+                sortBy: typeof sd.sortBy === 'string' ? sd.sortBy : 'newest',
+              },
+              Number(sd.searchedAtMs) > 0 ? Number(sd.searchedAtMs) : Date.now()
+            );
+            if (rec) {
+              loaded.push({ ...rec, id: d.id });
+            }
+          }
+          loaded.sort((a, b) => b.searchedAtMs - a.searchedAtMs);
+          setRecentSearches(loaded.slice(0, MAX_RECENT_SEARCHES));
         },
         () => {}
       )
@@ -1847,6 +1899,13 @@ export default function App() {
     setPersonalNotifications([]);
     setFavorites([]);
     setFollowedSellers([]);
+    setMyListings([]);
+    setMyBids([]);
+    setConversations([]);
+    setDeals([]);
+    setDeposits([]);
+    setWithdrawals([]);
+    setFetchedDeal(null);
     navigateRoute({ page: 'home' }, { replace: true });
     try {
       await unlinkCurrentDevicePushTokenOnLogout(outgoingUid);
@@ -2302,6 +2361,130 @@ export default function App() {
     [navigateRoute]
   );
 
+  // Sync guest recent searches when signed out
+  useEffect(() => {
+    if (!fbUser) {
+      setRecentSearches(loadGuestRecentSearches());
+    }
+  }, [fbUser]);
+
+  const recordRecentSearch = useCallback(
+    async (input: RecentSearchInput) => {
+      const rec = createRecentSearchRecord(input, Date.now());
+      if (!rec) return;
+
+      if (fbUser) {
+        setRecentSearches((prev) => upsertRecentSearchList(prev, rec, MAX_RECENT_SEARCHES));
+        try {
+          await setDoc(doc(db, 'privateUsers', fbUser.uid, 'recentSearches', rec.id), {
+            query: rec.query,
+            platform: rec.platform,
+            subcategory: rec.subcategory,
+            monetization: rec.monetization,
+            verifiedOnly: rec.verifiedOnly,
+            sortBy: rec.sortBy,
+            summaryLabel: rec.summaryLabel,
+            searchedAtMs: rec.searchedAtMs,
+            updatedAt: serverTimestamp(),
+          });
+          // Prune excess beyond MAX_RECENT_SEARCHES
+          const overflow = recentSearches
+            .filter((item) => item.id !== rec.id)
+            .slice(MAX_RECENT_SEARCHES - 1);
+          for (const old of overflow) {
+            void deleteDoc(doc(db, 'privateUsers', fbUser.uid, 'recentSearches', old.id)).catch(
+              () => {}
+            );
+          }
+        } catch {
+          // Non-fatal persistence fallback
+        }
+      } else {
+        setRecentSearches((prev) => {
+          const next = upsertRecentSearchList(prev, rec, MAX_RECENT_SEARCHES);
+          saveGuestRecentSearches(next);
+          return next;
+        });
+      }
+    },
+    [fbUser, recentSearches]
+  );
+
+  const handleDeleteRecentSearch = useCallback(
+    async (searchId: string) => {
+      if (fbUser) {
+        setRecentSearches((prev) => prev.filter((item) => item.id !== searchId));
+        try {
+          await deleteDoc(doc(db, 'privateUsers', fbUser.uid, 'recentSearches', searchId));
+        } catch {
+          // Non-fatal
+        }
+      } else {
+        setRecentSearches((prev) => {
+          const next = prev.filter((item) => item.id !== searchId);
+          saveGuestRecentSearches(next);
+          return next;
+        });
+      }
+    },
+    [fbUser]
+  );
+
+  const handleClearAllRecentSearches = useCallback(async () => {
+    if (fbUser) {
+      const toDelete = [...recentSearches];
+      setRecentSearches([]);
+      await Promise.all(
+        toDelete.map((item) =>
+          deleteDoc(doc(db, 'privateUsers', fbUser.uid, 'recentSearches', item.id)).catch(() => {})
+        )
+      );
+      showFlash('Cleared your recent search history.');
+    } else {
+      setRecentSearches([]);
+      saveGuestRecentSearches([]);
+      showFlash('Cleared recent searches in this browser.');
+    }
+  }, [fbUser, recentSearches, showFlash]);
+
+  const handleExecuteRecentSearch = useCallback(
+    (rec: RecentSearchRecord) => {
+      const nextFilters: MarketplaceFilterState = {
+        ...EMPTY_FILTERS,
+        platform: rec.platform ? rec.platform : 'all',
+        subcategory: rec.subcategory ? rec.subcategory : 'all',
+        monetization:
+          rec.monetization === 'monetized' || rec.monetization === 'non-monetized'
+            ? rec.monetization
+            : 'all',
+        verifiedSeller: Boolean(rec.verifiedOnly),
+        sort:
+          rec.sortBy === 'oldest' ||
+          rec.sortBy === 'price-asc' ||
+          rec.sortBy === 'price-desc' ||
+          rec.sortBy === 'popular'
+            ? rec.sortBy
+            : 'newest',
+      };
+      setSearchQuery(rec.query);
+      setDraftFilters(nextFilters);
+      setAppliedFilters(nextFilters);
+      void recordRecentSearch({
+        query: rec.query,
+        platform: rec.platform,
+        subcategory: rec.subcategory,
+        monetization: rec.monetization,
+        verifiedOnly: rec.verifiedOnly,
+        sortBy: rec.sortBy,
+      });
+      navigateRoute({
+        page: 'market',
+        platformFilter: rec.platform ? rec.platform : undefined,
+      });
+    },
+    [navigateRoute, recordRecentSearch]
+  );
+
   const handleQuickCategorySelect = (p: PlatformId) => {
     const next: MarketplaceFilterState = {
       ...EMPTY_FILTERS,
@@ -2309,6 +2492,10 @@ export default function App() {
     };
     setDraftFilters(next);
     setAppliedFilters(next);
+    void recordRecentSearch({
+      query: searchQuery,
+      platform: p,
+    });
     navigateRoute({ page: 'market', platformFilter: p });
   };
 
@@ -2541,53 +2728,216 @@ export default function App() {
           <>
             {/* HOME PAGE */}
             {page === 'home' && (
-              <div className="space-y-12 pb-12">
-                {/* Hero Section */}
-                <section className="border-b-2 border-[var(--bx-border)] bg-[var(--bx-surface)]">
-                  <div className="max-w-7xl mx-auto px-4 py-12 lg:py-16 grid grid-cols-1 lg:grid-cols-12 gap-8 items-center">
-                    <div className="lg:col-span-7 space-y-6">
-                      <div className="inline-flex items-center gap-2 px-3 py-1 text-xs font-black uppercase tracking-wider bg-[#FFD400] text-[#191919] border-2 border-[#191919]">
-                        <ShieldCheck className="w-4 h-4" />
-                        {t(language, 'hero_eyebrow')}
+              <div className="pb-12">
+                {/* Real-Time RECENT SOLD & RECENT PAYOUT Activity Tickers */}
+                <LiveActivityTickers onActivitiesChange={setPublicActivities} />
+
+                <div className="space-y-12">
+                  {/* Hero Section */}
+                  <section className="border-b-2 border-[var(--bx-border)] bg-[var(--bx-surface)]">
+                    <div className="bx-wrap-wide py-12 lg:py-16 grid grid-cols-1 lg:grid-cols-12 gap-8 items-center">
+                      <div className="lg:col-span-7 space-y-6">
+                        <div className="inline-flex items-center gap-2 px-3 py-1 text-xs font-black uppercase tracking-wider bg-[#FFD400] text-[#191919] border-2 border-[#191919]">
+                          <ShieldCheck className="w-4 h-4" />
+                          {t(language, 'hero_eyebrow')}
+                        </div>
+
+                        <h1 className="text-3xl sm:text-5xl font-black tracking-tight leading-[1.08]">
+                          {t(language, 'hero_title')}
+                        </h1>
+
+                        <p className="text-base sm:text-lg opacity-85 max-w-2xl leading-relaxed">
+                          {t(language, 'hero_sub')}
+                        </p>
+
+                        {/* Search Bar */}
+                        <form
+                          onSubmit={(e) => {
+                            e.preventDefault();
+                            void recordRecentSearch({
+                              query: searchQuery,
+                              platform: appliedFilters.platform !== 'all' ? appliedFilters.platform : '',
+                              subcategory:
+                                appliedFilters.subcategory !== 'all' ? appliedFilters.subcategory : '',
+                              monetization: appliedFilters.monetization,
+                              verifiedOnly: appliedFilters.verifiedSeller,
+                              sortBy: appliedFilters.sort,
+                            });
+                            navigateRoute({ page: 'market' });
+                          }}
+                          className="flex flex-col sm:flex-row gap-3 max-w-2xl"
+                        >
+                          <div className="relative flex-1">
+                            <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 opacity-60" />
+                            <input
+                              type="search"
+                              aria-label={t(language, 'search_placeholder')}
+                              value={searchQuery}
+                              onChange={(e) => setSearchQuery(e.target.value)}
+                              placeholder={t(language, 'search_placeholder')}
+                              className="bx-input w-full pl-10 pr-4 py-3 text-sm font-semibold"
+                            />
+                          </div>
+                          <button
+                            type="submit"
+                            className="bx-btn bx-btn-primary px-6 py-3 text-sm font-extrabold inline-flex items-center justify-center gap-2"
+                          >
+                            <span>Explore Assets</span>
+                            <ArrowRight className="w-4 h-4" />
+                          </button>
+                        </form>
+
+                        <div className="flex flex-wrap items-center gap-3 pt-1">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (!fbUser) {
+                                requireAuthWithIntent({
+                                  kind: 'open_page',
+                                  targetPage: 'sell',
+                                  returnPage: 'home',
+                                  createdAtMs: Date.now(),
+                                });
+                              } else {
+                                navigateRoute({ page: 'sell' });
+                              }
+                            }}
+                            className="bx-btn bx-btn-ghost px-4 py-2 text-xs font-extrabold inline-flex items-center gap-1.5"
+                          >
+                            <Plus className="w-4 h-4 text-[#FF6500]" />
+                            {t(language, 'btn_sell')}
+                          </button>
+                          <span className="text-xs font-bold opacity-75">
+                            Escrow Hold · Immutable Protection Windows · Evidence-Reviewed Monetization
+                          </span>
+                        </div>
                       </div>
 
-                      <h1 className="text-3xl sm:text-5xl font-black tracking-tight leading-[1.08]">
-                        {t(language, 'hero_title')}
-                      </h1>
+                      {/* Right-side Escrow & Verification Architecture Card */}
+                      <div className="lg:col-span-5">
+                        <div className="bx-card p-6 space-y-4">
+                          <div className="flex items-center justify-between border-b-2 border-[var(--bx-border)] pb-3">
+                            <div className="flex items-center gap-2">
+                              <Lock className="w-5 h-5 text-[#FF6500]" />
+                              <h2 className="text-base font-black">How BEXORA Escrow Works</h2>
+                            </div>
+                            <span className="text-[11px] font-black uppercase px-2 py-0.5 bg-[#793A91] text-white">
+                              Protected
+                            </span>
+                          </div>
 
-                      <p className="text-base sm:text-lg opacity-85 max-w-2xl leading-relaxed">
-                        {t(language, 'hero_sub')}
-                      </p>
+                          <ol className="space-y-3 text-xs font-bold">
+                            <li className="p-3 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)] flex gap-3">
+                              <span className="w-6 h-6 shrink-0 bg-[#FF6500] text-white font-black flex items-center justify-center">
+                                1
+                              </span>
+                              <div>
+                                <div className="font-black text-sm">Verify Before Bidding</div>
+                                <p className="opacity-80 font-medium mt-0.5">
+                                  Inspect public domain-matched asset links, account age, and Admin-verified monetization status.
+                                </p>
+                              </div>
+                            </li>
+                            <li className="p-3 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)] flex gap-3">
+                              <span className="w-6 h-6 shrink-0 bg-[#FF6500] text-white font-black flex items-center justify-center">
+                                2
+                              </span>
+                              <div>
+                                <div className="font-black text-sm">Escrow Lock &amp; Guided Transfer</div>
+                                <p className="opacity-80 font-medium mt-0.5">
+                                  Funds stay locked in BEXORA Escrow while ownership credentials are transferred inside the Deal Room.
+                                </p>
+                              </div>
+                            </li>
+                            <li className="p-3 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)] flex gap-3">
+                              <span className="w-6 h-6 shrink-0 bg-[#FF6500] text-white font-black flex items-center justify-center">
+                                3
+                              </span>
+                              <div>
+                                <div className="font-black text-sm">Category Protection Countdown</div>
+                                <p className="opacity-80 font-medium mt-0.5">
+                                  7-day protection for YouTube channels ({getProtectionDurationHours('youtube', settings)}h) and {getProtectionDurationHours('facebook', settings)}h for Facebook &amp; standard-transfer assets.
+                                </p>
+                              </div>
+                            </li>
+                          </ol>
+                        </div>
+                      </div>
+                    </div>
+                  </section>
 
-                      {/* Search Bar */}
-                      <form
-                        onSubmit={(e) => {
-                          e.preventDefault();
+                  {/* Responsive 8-Category Grid */}
+                  <section className="bx-wrap-wide space-y-5">
+                    <div className="flex items-end justify-between">
+                      <div>
+                        <h2 className="text-xl sm:text-2xl font-black tracking-tight">Browse by Asset Category</h2>
+                        <p className="text-xs sm:text-sm opacity-75">
+                          Select any platform to launch category-specific filters and monetization rules.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDraftFilters(EMPTY_FILTERS);
+                          setAppliedFilters(EMPTY_FILTERS);
                           navigateRoute({ page: 'market' });
                         }}
-                        className="flex flex-col sm:flex-row gap-3 max-w-2xl"
+                        className="text-xs font-black text-[#FF6500] hover:underline"
                       >
-                        <div className="relative flex-1">
-                          <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 opacity-60" />
-                          <input
-                            type="search"
-                            aria-label={t(language, 'search_placeholder')}
-                            value={searchQuery}
-                            onChange={(e) => setSearchQuery(e.target.value)}
-                            placeholder={t(language, 'search_placeholder')}
-                            className="bx-input w-full pl-10 pr-4 py-3 text-sm font-semibold"
-                          />
-                        </div>
-                        <button
-                          type="submit"
-                          className="bx-btn bx-btn-primary px-6 py-3 text-sm font-extrabold inline-flex items-center justify-center gap-2"
-                        >
-                          <span>Explore Assets</span>
-                          <ArrowRight className="w-4 h-4" />
-                        </button>
-                      </form>
+                        View All Categories →
+                      </button>
+                    </div>
 
-                      <div className="flex flex-wrap items-center gap-3 pt-1">
+                    <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">
+                      {PLATFORM_LIST.map((pId) => {
+                        const def = PLATFORM_CATALOG[pId];
+                        const count = activeListings.filter((l) => l.platform === pId).length;
+                        return (
+                          <button
+                            key={pId}
+                            type="button"
+                            onClick={() => handleQuickCategorySelect(pId)}
+                            className="bx-cat-card bx-card p-3.5 flex flex-col items-start justify-between gap-3 text-left hover:-translate-y-0.5 transition-transform"
+                          >
+                            <PlatformIcon id={pId} size={32} />
+                            <div className="w-full min-w-0">
+                              <div className="font-black text-xs sm:text-sm truncate">{def.name}</div>
+                              <div className="text-[11px] font-bold opacity-70 tabular-nums">
+                                {count} {count === 1 ? 'listing' : 'listings'}
+                              </div>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </section>
+
+                  {/* Live Marketplace Feed on Home (4-Column Wide Desktop Grid) */}
+                  <section className="bx-wrap-wide space-y-5">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <h2 className="text-xl sm:text-2xl font-black tracking-tight">Latest Verified Listings</h2>
+                        <p className="text-xs sm:text-sm opacity-75">
+                          Real seller submissions approved by BEXORA Moderation.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => navigateRoute({ page: 'market' })}
+                        className="bx-btn bx-btn-ghost px-4 py-2 text-xs font-extrabold inline-flex items-center gap-1.5"
+                      >
+                        <SlidersHorizontal className="w-3.5 h-3.5" />
+                        Advanced Filters
+                      </button>
+                    </div>
+
+                    {activeListings.length === 0 ? (
+                      <div className="bx-card p-10 text-center space-y-4">
+                        <Sparkles className="w-8 h-8 text-[#FF6500] mx-auto" />
+                        <h3 className="text-lg font-black">{t(language, 'no_listings')}</h3>
+                        <p className="text-sm opacity-75 max-w-md mx-auto">
+                          BEXORA never populates fake or placeholder listings. Be the first verified seller to publish a YouTube channel, Facebook page, website, domain, or gaming asset.
+                        </p>
                         <button
                           type="button"
                           onClick={() => {
@@ -2602,204 +2952,80 @@ export default function App() {
                               navigateRoute({ page: 'sell' });
                             }
                           }}
-                          className="bx-btn bx-btn-ghost px-4 py-2 text-xs font-extrabold inline-flex items-center gap-1.5"
+                          className="bx-btn bx-btn-primary px-6 py-2.5 text-xs font-extrabold"
                         >
-                          <Plus className="w-4 h-4 text-[#FF6500]" />
                           {t(language, 'btn_sell')}
                         </button>
-                        <span className="text-xs font-bold opacity-75">
-                          Escrow Hold · Immutable Protection Windows · Evidence-Reviewed Monetization
-                        </span>
                       </div>
-                    </div>
-
-                    {/* Right-side Escrow & Verification Architecture Card */}
-                    <div className="lg:col-span-5">
-                      <div className="bx-card p-6 space-y-4">
-                        <div className="flex items-center justify-between border-b-2 border-[var(--bx-border)] pb-3">
-                          <div className="flex items-center gap-2">
-                            <Lock className="w-5 h-5 text-[#FF6500]" />
-                            <h2 className="text-base font-black">How BEXORA Escrow Works</h2>
-                          </div>
-                          <span className="text-[11px] font-black uppercase px-2 py-0.5 bg-[#793A91] text-white">
-                            Protected
-                          </span>
-                        </div>
-
-                        <ol className="space-y-3 text-xs font-bold">
-                          <li className="p-3 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)] flex gap-3">
-                            <span className="w-6 h-6 shrink-0 bg-[#FF6500] text-white font-black flex items-center justify-center">
-                              1
-                            </span>
-                            <div>
-                              <div className="font-black text-sm">Verify Before Bidding</div>
-                              <p className="opacity-80 font-medium mt-0.5">
-                                Inspect public domain-matched asset links, account age, and Admin-verified monetization status.
-                              </p>
-                            </div>
-                          </li>
-                          <li className="p-3 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)] flex gap-3">
-                            <span className="w-6 h-6 shrink-0 bg-[#FF6500] text-white font-black flex items-center justify-center">
-                              2
-                            </span>
-                            <div>
-                              <div className="font-black text-sm">Escrow Lock &amp; Guided Transfer</div>
-                              <p className="opacity-80 font-medium mt-0.5">
-                                Funds stay locked in BEXORA Escrow while ownership credentials are transferred inside the Deal Room.
-                              </p>
-                            </div>
-                          </li>
-                          <li className="p-3 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)] flex gap-3">
-                            <span className="w-6 h-6 shrink-0 bg-[#FF6500] text-white font-black flex items-center justify-center">
-                              3
-                            </span>
-                            <div>
-                              <div className="font-black text-sm">Category Protection Countdown</div>
-                              <p className="opacity-80 font-medium mt-0.5">
-                                7-day protection for YouTube channels ({getProtectionDurationHours('youtube', settings)}h) and {getProtectionDurationHours('facebook', settings)}h for Facebook &amp; standard-transfer assets.
-                              </p>
-                            </div>
-                          </li>
-                        </ol>
-                      </div>
-                    </div>
-                  </div>
-                </section>
-
-                {/* Responsive 8-Category Grid */}
-                <section className="max-w-7xl mx-auto px-4 space-y-5">
-                  <div className="flex items-end justify-between">
-                    <div>
-                      <h2 className="text-xl sm:text-2xl font-black tracking-tight">Browse by Asset Category</h2>
-                      <p className="text-xs sm:text-sm opacity-75">
-                        Select any platform to launch category-specific filters and monetization rules.
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setDraftFilters(EMPTY_FILTERS);
-                        setAppliedFilters(EMPTY_FILTERS);
-                        navigateRoute({ page: 'market' });
-                      }}
-                      className="text-xs font-black text-[#FF6500] hover:underline"
-                    >
-                      View All Categories →
-                    </button>
-                  </div>
-
-                  <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">
-                    {PLATFORM_LIST.map((pId) => {
-                      const def = PLATFORM_CATALOG[pId];
-                      const count = activeListings.filter((l) => l.platform === pId).length;
-                      return (
-                        <button
-                          key={pId}
-                          type="button"
-                          onClick={() => handleQuickCategorySelect(pId)}
-                          className="bx-cat-card bx-card p-3.5 flex flex-col items-start justify-between gap-3 text-left hover:-translate-y-0.5 transition-transform"
-                        >
-                          <PlatformIcon id={pId} size={32} />
-                          <div className="w-full min-w-0">
-                            <div className="font-black text-xs sm:text-sm truncate">{def.name}</div>
-                            <div className="text-[11px] font-bold opacity-70">
-                              {count} {count === 1 ? 'listing' : 'listings'}
-                            </div>
-                          </div>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </section>
-
-                {/* Live Marketplace Feed on Home */}
-                <section className="max-w-7xl mx-auto px-4 space-y-5">
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <div>
-                      <h2 className="text-xl sm:text-2xl font-black tracking-tight">Latest Verified Listings</h2>
-                      <p className="text-xs sm:text-sm opacity-75">
-                        Real seller submissions approved by BEXORA Moderation.
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => navigateRoute({ page: 'market' })}
-                      className="bx-btn bx-btn-ghost px-4 py-2 text-xs font-extrabold inline-flex items-center gap-1.5"
-                    >
-                      <SlidersHorizontal className="w-3.5 h-3.5" />
-                      Advanced Filters
-                    </button>
-                  </div>
-
-                  {activeListings.length === 0 ? (
-                    <div className="bx-card p-10 text-center space-y-4">
-                      <Sparkles className="w-8 h-8 text-[#FF6500] mx-auto" />
-                      <h3 className="text-lg font-black">{t(language, 'no_listings')}</h3>
-                      <p className="text-sm opacity-75 max-w-md mx-auto">
-                        BEXORA never populates fake or placeholder listings. Be the first verified seller to publish a YouTube channel, Facebook page, website, domain, or gaming asset.
-                      </p>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          if (!fbUser) {
-                            requireAuthWithIntent({
-                              kind: 'open_page',
-                              targetPage: 'sell',
-                              returnPage: 'home',
-                              createdAtMs: Date.now(),
-                            });
-                          } else {
-                            navigateRoute({ page: 'sell' });
-                          }
-                        }}
-                        className="bx-btn bx-btn-primary px-6 py-2.5 text-xs font-extrabold"
+                    ) : (
+                      <div
+                        data-testid="home-latest-listings-grid"
+                        className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 min-[1400px]:grid-cols-4 gap-5"
                       >
-                        {t(language, 'btn_sell')}
-                      </button>
-                    </div>
-                  ) : (
-                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                      {activeListings.slice(0, 6).map((item) => (
-                        <ListingCard
-                          key={item.id}
-                          listing={item}
-                          displayCurrency={currency}
-                          usdToBdtRate={settings.usdToBdtRate}
-                          onOpen={handleOpenListingDetail}
-                          onOpenSellerProfile={handleOpenPublicProfile}
-                          isFavorited={favoriteListingIds.has(item.id)}
-                          onToggleFavorite={(l) => void handleToggleFavorite(l)}
-                        />
-                      ))}
-                    </div>
-                  )}
-                </section>
+                        {activeListings.slice(0, 8).map((item) => (
+                          <ListingCard
+                            key={item.id}
+                            listing={item}
+                            displayCurrency={currency}
+                            usdToBdtRate={settings.usdToBdtRate}
+                            onOpen={handleOpenListingDetail}
+                            onOpenSellerProfile={handleOpenPublicProfile}
+                            isFavorited={favoriteListingIds.has(item.id)}
+                            onToggleFavorite={(l) => void handleToggleFavorite(l)}
+                          />
+                        ))}
+                      </div>
+                    )}
+                  </section>
+                </div>
               </div>
             )}
 
             {/* MARKETPLACE PAGE */}
             {page === 'market' && (
-              <div className="max-w-7xl mx-auto px-4 py-8 space-y-6">
+              <div className="bx-wrap-wide py-8 space-y-5">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b-2 border-[var(--bx-border)] pb-5">
                   <div>
                     <h1 className="text-2xl sm:text-3xl font-black tracking-tight">{t(language, 'nav_market')}</h1>
-                    <p className="text-xs sm:text-sm opacity-75">
+                    <p className="text-xs sm:text-sm opacity-75 tabular-nums">
                       Showing {filteredMarketplaceListings.length} active digital asset{filteredMarketplaceListings.length === 1 ? '' : 's'}
                     </p>
                   </div>
 
                   <div className="flex items-center gap-2">
-                    <div className="relative flex-1 sm:w-72">
-                      <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 opacity-60" />
-                      <input
-                        type="search"
-                        aria-label="Search marketplace listings"
-                        value={searchQuery}
-                        onChange={(e) => setSearchQuery(e.target.value)}
-                        placeholder={t(language, 'search_placeholder')}
-                        className="bx-input w-full pl-9 pr-3 py-2 text-xs font-semibold"
-                      />
-                    </div>
+                    <form
+                      onSubmit={(e) => {
+                        e.preventDefault();
+                        void recordRecentSearch({
+                          query: searchQuery,
+                          platform: appliedFilters.platform !== 'all' ? appliedFilters.platform : '',
+                          subcategory:
+                            appliedFilters.subcategory !== 'all' ? appliedFilters.subcategory : '',
+                          monetization: appliedFilters.monetization,
+                          verifiedOnly: appliedFilters.verifiedSeller,
+                          sortBy: appliedFilters.sort,
+                        });
+                      }}
+                      className="flex items-center gap-2 flex-1 sm:flex-initial"
+                    >
+                      <div className="relative flex-1 sm:w-72">
+                        <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 opacity-60" />
+                        <input
+                          type="search"
+                          aria-label="Search marketplace listings"
+                          value={searchQuery}
+                          onChange={(e) => setSearchQuery(e.target.value)}
+                          placeholder={t(language, 'search_placeholder')}
+                          className="bx-input w-full pl-9 pr-3 py-2 text-xs font-semibold"
+                        />
+                      </div>
+                      <button
+                        type="submit"
+                        className="bx-btn bx-btn-primary bx-btn-sm whitespace-nowrap shrink-0"
+                      >
+                        Search
+                      </button>
+                    </form>
                     <button
                       type="button"
                       onClick={() => setMobileFilterOpen((v) => !v)}
@@ -2811,15 +3037,66 @@ export default function App() {
                   </div>
                 </div>
 
-                <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+                {/* Inline Recent Searches Quick Bar */}
+                {recentSearches.length > 0 && (
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                    <div className="flex flex-wrap items-center gap-2 min-w-0">
+                      <span
+                        className="inline-flex items-center gap-1 font-extrabold shrink-0"
+                        style={{ color: 'var(--text-2)' }}
+                      >
+                        <History className="w-3.5 h-3.5" />
+                        <span>Recent:</span>
+                      </span>
+                      {recentSearches.slice(0, 5).map((rs) => (
+                        <button
+                          key={rs.id}
+                          type="button"
+                          onClick={() => handleExecuteRecentSearch(rs)}
+                          className="px-2.5 py-1 rounded-md border font-semibold hover:underline truncate max-w-[200px]"
+                          style={{
+                            background: 'var(--surface)',
+                            borderColor: 'var(--border-soft)',
+                            color: 'var(--text)',
+                          }}
+                        >
+                          {rs.summaryLabel}
+                        </button>
+                      ))}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => navigateRoute({ page: 'recent-searches' })}
+                      className="font-extrabold hover:underline shrink-0"
+                      style={{ color: 'var(--purple)' }}
+                    >
+                      Manage Recent Searches →
+                    </button>
+                  </div>
+                )}
+
+                <div className="flex flex-col lg:flex-row gap-6 items-start">
                   {/* Desktop Sidebar or Mobile Collapsible Filter Panel */}
-                  <div className={`lg:col-span-4 xl:col-span-3 ${mobileFilterOpen ? 'block' : 'hidden lg:block'}`}>
+                  <div
+                    className={`w-full lg:w-[272px] xl:w-[280px] shrink-0 ${
+                      mobileFilterOpen ? 'block' : 'hidden lg:block'
+                    }`}
+                  >
                     <FilterPanel
                       draft={draftFilters}
                       setDraft={setDraftFilters}
                       onApply={() => {
                         setAppliedFilters(draftFilters);
                         setMobileFilterOpen(false);
+                        void recordRecentSearch({
+                          query: searchQuery,
+                          platform: draftFilters.platform !== 'all' ? draftFilters.platform : '',
+                          subcategory:
+                            draftFilters.subcategory !== 'all' ? draftFilters.subcategory : '',
+                          monetization: draftFilters.monetization,
+                          verifiedOnly: draftFilters.verifiedSeller,
+                          sortBy: draftFilters.sort,
+                        });
                       }}
                       onReset={() => {
                         setDraftFilters(EMPTY_FILTERS);
@@ -2833,8 +3110,8 @@ export default function App() {
                     />
                   </div>
 
-                  {/* Listings Grid */}
-                  <div className="lg:col-span-8 xl:col-span-9">
+                  {/* Listings Grid (4 Balanced Columns on Wide Desktop) */}
+                  <div className="flex-1 min-w-0 w-full">
                     {filteredMarketplaceListings.length === 0 ? (
                       <div className="bx-card p-10 text-center space-y-4">
                         <h2 className="text-lg font-black">{t(language, 'no_listings')}</h2>
@@ -2874,7 +3151,10 @@ export default function App() {
                         </div>
                       </div>
                     ) : (
-                      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
+                      <div
+                        data-testid="marketplace-listings-grid"
+                        className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 min-[1440px]:grid-cols-4 gap-4"
+                      >
                         {filteredMarketplaceListings.map((item) => (
                           <ListingCard
                             key={item.id}
@@ -3447,6 +3727,7 @@ export default function App() {
                     onOpenPublicSelf={() => handleOpenPublicProfile(fbUser.uid)}
                     onAuthTokenRefreshed={handleRefreshAuthToken}
                     onFlash={showFlash}
+                    initialTab={route.profileTab}
                   />
                 )}
               </>
@@ -3523,50 +3804,116 @@ export default function App() {
                 )}
               </>
             )}
+            {/* RECENT SEARCHES PAGE */}
+            {page === 'recent-searches' && (
+              <RecentSearchesView
+                isAuthenticated={Boolean(fbUser)}
+                recentSearches={recentSearches}
+                onExecuteRecentSearch={handleExecuteRecentSearch}
+                onDeleteRecentSearch={handleDeleteRecentSearch}
+                onClearAllRecentSearches={handleClearAllRecentSearches}
+                onBrowseCategory={handleQuickCategorySelect}
+                onBrowseMarketplace={() => navigateRoute({ page: 'market' })}
+              />
+            )}
+
+            {/* REVIEWS & RATINGS PAGE */}
+            {page === 'reviews' && (
+              <ReviewsView
+                userUid={fbUser?.uid ?? null}
+                userEmailVerified={Boolean(fbUser?.emailVerified || privateUser?.emailVerified)}
+                userDisplayName={profile?.displayName || fbUser?.displayName || 'Member'}
+                isAdmin={isAdmin}
+                onOpenPublicProfile={handleOpenPublicProfile}
+                onOpenDealsPage={() => navigateRoute({ page: 'deals' })}
+                onBrowseMarketplace={() => navigateRoute({ page: 'market' })}
+                onRequireAuth={() =>
+                  requireAuthWithIntent({
+                    kind: 'open_page',
+                    targetPage: 'reviews',
+                    returnPage: 'reviews',
+                    createdAtMs: Date.now(),
+                  })
+                }
+                onFlash={showFlash}
+              />
+            )}
+
+            {/* TRUST, SAFETY & LEGAL POLICY CENTER */}
+            {page === 'info' && (
+              <InfoCenterView
+                activeTopic={route.infoTopic || 'escrow-protection'}
+                settings={settings}
+                onSelectTopic={(topic: InfoTopicId) =>
+                  navigateRoute({ page: 'info', infoTopic: topic })
+                }
+                onBrowseMarketplace={() => navigateRoute({ page: 'market' })}
+                onOpenSellAsset={() => {
+                  if (!fbUser) {
+                    requireAuthWithIntent({
+                      kind: 'open_page',
+                      targetPage: 'sell',
+                      returnPage: 'info',
+                      createdAtMs: Date.now(),
+                    });
+                  } else {
+                    navigateRoute({ page: 'sell' });
+                  }
+                }}
+                onOpenDealsPage={() => navigateRoute({ page: 'deals' })}
+              />
+            )}
           </>
         )}
       </main>
 
-      {/* Footer */}
-      <footer className="border-t-2 border-[var(--bx-border)] bg-[var(--bx-surface)] pt-8 pb-24 md:py-8 mt-12">
-        <div className="max-w-7xl mx-auto px-4 md:pr-36 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs">
-          <div className="flex items-center gap-2.5">
-            <BexoraLogo compact siteName={settings.siteName} logoUrl={settings.logoUrl} />
-            <span className="opacity-70">
-              · {settings.brandTagline?.trim() || 'Buy & Sell Verifiable Digital Assets'}
-            </span>
-          </div>
-          <div className="flex flex-wrap items-center gap-4 font-bold opacity-80">
-            <button type="button" onClick={() => navigatePage('market')} className="hover:underline">
-              Marketplace
-            </button>
-            <button type="button" onClick={() => navigatePage('sellers')} className="hover:underline">
-              Top Sellers
-            </button>
-            <button type="button" onClick={() => navigatePage('favorites')} className="hover:underline">
-              Favorites
-            </button>
-            <button type="button" onClick={() => navigatePage('my-bids')} className="hover:underline">
-              My Bids
-            </button>
-            <button type="button" onClick={() => navigatePage('following')} className="hover:underline">
-              Following
-            </button>
-            <button type="button" onClick={() => navigatePage('deals')} className="hover:underline">
-              Escrow Protection
-            </button>
-            {!pwa.isInstalled && (
-              <button
-                type="button"
-                onClick={() => pwa.triggerInstall()}
-                className="text-[#FF6500] font-extrabold hover:underline"
-              >
-                Install App
-              </button>
-            )}
-          </div>
-        </div>
-      </footer>
+      {/* Complete Data-Driven Marketplace Footer */}
+      <MarketplaceFooter
+        settings={settings}
+        activeListings={activeListings}
+        publicActivities={publicActivities}
+        isAuthenticated={Boolean(fbUser)}
+        isPwaInstalled={pwa.isInstalled}
+        onTriggerPwaInstall={() => pwa.triggerInstall()}
+        onNavigateHome={() => navigateRoute({ page: 'home' })}
+        onBrowseMarketplace={() => {
+          setDraftFilters(EMPTY_FILTERS);
+          setAppliedFilters(EMPTY_FILTERS);
+          navigateRoute({ page: 'market' });
+        }}
+        onBrowseCategory={handleQuickCategorySelect}
+        onOpenTopSellers={() => navigateRoute({ page: 'sellers' })}
+        onOpenFavorites={() => navigateRoute({ page: 'favorites' })}
+        onOpenMyListings={() => {
+          if (!fbUser) {
+            requireAuthWithIntent({
+              kind: 'open_page',
+              targetPage: 'profile',
+              returnPage: 'home',
+              createdAtMs: Date.now(),
+            });
+          } else {
+            navigateRoute({ page: 'profile', profileTab: 'listings' });
+          }
+        }}
+        onOpenMyBids={() => navigateRoute({ page: 'my-bids' })}
+        onOpenFollowing={() => navigateRoute({ page: 'following' })}
+        onOpenSellAsset={() => {
+          if (!fbUser) {
+            requireAuthWithIntent({
+              kind: 'open_page',
+              targetPage: 'sell',
+              returnPage: 'home',
+              createdAtMs: Date.now(),
+            });
+          } else {
+            navigateRoute({ page: 'sell' });
+          }
+        }}
+        onOpenRecentSearches={() => navigateRoute({ page: 'recent-searches' })}
+        onOpenReviews={() => navigateRoute({ page: 'reviews' })}
+        onOpenInfoTopic={(topic) => navigateRoute({ page: 'info', infoTopic: topic })}
+      />
 
       {/* Mobile Bottom Nav */}
       <BottomNav

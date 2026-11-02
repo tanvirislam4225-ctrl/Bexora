@@ -42,7 +42,13 @@ InfinityFree shared hosting serves static HTML/JS/CSS/PHP and **cannot run a per
 function addDirToZip(zipFolder, dirPath, relPrefix = '') {
   const entries = fs.readdirSync(dirPath, { withFileTypes: true });
   for (const entry of entries) {
-    if (entry.name.endsWith('.zip')) continue;
+    if (
+      entry.name.endsWith('.zip') ||
+      entry.name.endsWith('.map') ||
+      (entry.name.startsWith('.env') && entry.name !== '.env.example')
+    ) {
+      continue;
+    }
     const relPath = relPrefix ? `${relPrefix}/${entry.name}` : entry.name;
     if (relPath === 'assets/aistudio') continue;
     const fullPath = path.join(dirPath, entry.name);
@@ -69,12 +75,16 @@ const buf = await zip.generateAsync({
 });
 
 const rootZipPath = path.resolve('BEXORA_INFINITYFREE_PRODUCTION.zip');
-const publicZipPath = path.resolve('public', 'BEXORA_INFINITYFREE_PRODUCTION.zip');
-const distZipPath = path.resolve('dist', 'BEXORA_INFINITYFREE_PRODUCTION.zip');
+const legacyPublicZipPath = path.resolve('public', 'BEXORA_INFINITYFREE_PRODUCTION.zip');
+const legacyDistZipPath = path.resolve('dist', 'BEXORA_INFINITYFREE_PRODUCTION.zip');
 
 fs.writeFileSync(rootZipPath, buf);
-fs.writeFileSync(publicZipPath, buf);
-fs.writeFileSync(distZipPath, buf);
+if (fs.existsSync(legacyPublicZipPath)) {
+  fs.unlinkSync(legacyPublicZipPath);
+}
+if (fs.existsSync(legacyDistZipPath)) {
+  fs.unlinkSync(legacyDistZipPath);
+}
 
 // Verify archive integrity by reloading with JSZip
 const verifyZip = await JSZip.loadAsync(fs.readFileSync(rootZipPath));

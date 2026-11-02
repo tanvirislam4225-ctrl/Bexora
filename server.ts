@@ -20,16 +20,26 @@ import {
   assertSafeExternalHttpsDestination,
   buildSecurityHeaders,
   evaluateApiCorsAndCsrf,
+  extractClientIpKey,
   getRecentSecurityEvents,
+  isBlockedSensitiveHttpPath,
   isLookupAccountActiveAndUnrevoked,
   recordSecurityEvent,
+  redactSecretsFromLogText,
   sanitizeJsonPayload,
   SlidingWindowRateLimiter,
   validateSafeExternalHttpsUrl,
   type SecurityAuditEvent,
 } from './src/lib/serverSecurity';
+import { validateImageMagicBytes } from './src/lib/marketplaceLogic';
 import { verifyWordPressWebhookRequest } from './src/lib/serverWebhookSecurity';
 import { createAiAdminEngine } from './src/server/aiAdminEngine';
+import {
+  mergeAndSortTickerItems,
+  parseRawPublicActivityItem,
+} from './src/lib/activityTickerLogic';
+import { computeVerifiedMarketplaceStats } from './src/lib/reviewsAndStatsLogic';
+import type { PublicActivityItem, ReviewRecord } from './src/types';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -83,14 +93,21 @@ function parseOptionalServiceAccountJson(): ServiceAccount | null {
 async function startServer() {
   const app = express();
   app.disable('x-powered-by');
+  app.set('trust proxy', 1);
   const webhookReplayCache = new Map<string, number>();
   const isProdRuntime =
     process.env.NODE_ENV === 'production' &&
     fs.existsSync(path.join(__dirname, 'dist', 'index.html'));
 
   function getCallerClientKey(req: express.Request): string {
-    const xff = String(req.headers['x-forwarded-for'] || '').split(',')[0]!.trim();
-    return xff || String(req.ip || req.socket?.remoteAddress || 'anon');
+    return extractClientIpKey({
+      xForwardedFor:
+        typeof req.headers['x-forwarded-for'] === 'string'
+          ? req.headers['x-forwarded-for']
+          : undefined,
+      reqIp: req.ip,
+      remoteAddress: req.socket?.remoteAddress,
+    });
   }
 
   function makeRateLimitMiddleware(
@@ -120,6 +137,32 @@ async function startServer() {
     };
   }
 
+  function consumeAuthenticatedUidLimit(
+    req: express.Request,
+    res: express.Response,
+    bucketName: string,
+    uid: string,
+    limiter: SlidingWindowRateLimiter
+  ): boolean {
+    const decision = limiter.consume(`${bucketName}:uid:${uid}`);
+    if (!decision.allowed) {
+      res.setHeader('Retry-After', String(decision.retryAfterSeconds));
+      recordSecurityEvent({
+        type: 'rate_limited',
+        endpoint: req.originalUrl.split('?')[0] || req.path,
+        actor: uid,
+        summary: `Authenticated UID rate limit exceeded on ${bucketName} (retryAfter=${decision.retryAfterSeconds}s).`,
+      });
+      res.status(429).json({
+        ok: false,
+        error: 'Too many requests for this account. Please wait briefly before retrying.',
+        retryAfterSeconds: decision.retryAfterSeconds,
+      });
+      return false;
+    }
+    return true;
+  }
+
   const diagnosticProbeLimiter = new SlidingWindowRateLimiter(30, 60_000);
   const cloudAdminMutationLimiter = new SlidingWindowRateLimiter(12, 60_000);
   const fcmDispatchLimiter = new SlidingWindowRateLimiter(45, 60_000);
@@ -127,6 +170,7 @@ async function startServer() {
   const adminApiLimiter = new SlidingWindowRateLimiter(60, 60_000);
   const paymentSessionLimiter = new SlidingWindowRateLimiter(20, 60_000);
   const webhookLimiter = new SlidingWindowRateLimiter(120, 60_000);
+  const telemetryLimiter = new SlidingWindowRateLimiter(20, 60_000, 4000);
 
   // Global HTTP Security Headers (CSP, HSTS on HTTPS, X-Content-Type-Options, Referrer-Policy, Permissions-Policy)
   app.use((req, res, next) => {
@@ -138,6 +182,14 @@ async function startServer() {
     const secHeaders = buildSecurityHeaders({ isHttps, isDev: !isProdRuntime });
     for (const [hdrKey, hdrVal] of Object.entries(secHeaders)) {
       res.setHeader(hdrKey, hdrVal);
+    }
+    next();
+  });
+
+  // Block direct HTTP access to server code, security rules, dotfiles, source maps, runtime state, and archives
+  app.use((req, res, next) => {
+    if (!req.path.startsWith('/api/') && isBlockedSensitiveHttpPath(req.originalUrl || req.url)) {
+      return res.status(404).type('text/plain').send('Not Found');
     }
     next();
   });
@@ -154,6 +206,7 @@ async function startServer() {
       method: req.method,
       path: fullPath,
       originHeader: typeof req.headers.origin === 'string' ? req.headers.origin : undefined,
+      refererHeader: typeof req.headers.referer === 'string' ? req.headers.referer : undefined,
       hostHeader: req.get('host'),
       forwardedHostHeader:
         typeof req.headers['x-forwarded-host'] === 'string'
@@ -927,6 +980,7 @@ async function startServer() {
         !isLookupAccountActiveAndUnrevoked({
           idToken,
           expectedProjectId: cfg.projectId,
+          expectedUid: uid,
           disabled: u?.disabled,
           validSinceSecondsRaw: u?.validSince,
         })
@@ -1056,6 +1110,255 @@ async function startServer() {
     const fields = (docJson as { fields?: Record<string, { booleanValue?: boolean }> }).fields;
     return Boolean(fields?.[key]?.booleanValue);
   }
+
+  function readFirestoreNumberField(docJson: Record<string, unknown> | null, key: string): number {
+    if (!docJson || typeof docJson !== 'object') return 0;
+    const fields = (docJson as {
+      fields?: Record<string, { integerValue?: string | number; doubleValue?: number }>;
+    }).fields;
+    const f = fields?.[key];
+    if (!f) return 0;
+    if (f.integerValue !== undefined) return Number(f.integerValue) || 0;
+    if (f.doubleValue !== undefined) return Number(f.doubleValue) || 0;
+    return 0;
+  }
+
+  function readFirestoreTimestampMs(docJson: Record<string, unknown> | null, key: string): number {
+    if (!docJson || typeof docJson !== 'object') return 0;
+    const fields = (docJson as {
+      fields?: Record<string, { timestampValue?: string; integerValue?: string | number }>;
+    }).fields;
+    const f = fields?.[key];
+    if (!f) return 0;
+    if (typeof f.timestampValue === 'string') {
+      const parsed = Date.parse(f.timestampValue);
+      return Number.isFinite(parsed) ? parsed : 0;
+    }
+    if (f.integerValue !== undefined) return Number(f.integerValue) || 0;
+    return 0;
+  }
+
+  async function runPublicFirestoreQuery(
+    cfg: ReturnType<typeof loadVerifiedFirebaseConfig>,
+    structuredQuery: Record<string, unknown>
+  ): Promise<Array<{ id: string; doc: Record<string, unknown> }>> {
+    if (!cfg.configValid || !cfg.apiKey) return [];
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 4500);
+    try {
+      const queryUrl = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+        cfg.projectId
+      )}/databases/${encodeURIComponent(
+        cfg.firestoreDatabaseId
+      )}/documents:runQuery?key=${encodeURIComponent(cfg.apiKey)}`;
+      const res = await fetch(queryUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ structuredQuery }),
+        signal: controller.signal,
+      });
+      if (!res.ok) return [];
+      const rows = (await res.json()) as Array<{ document?: { name?: string; fields?: unknown } }>;
+      if (!Array.isArray(rows)) return [];
+      const out: Array<{ id: string; doc: Record<string, unknown> }> = [];
+      for (const row of rows) {
+        if (!row?.document?.name) continue;
+        const parts = row.document.name.split('/');
+        const id = parts[parts.length - 1] || '';
+        if (id) {
+          out.push({ id, doc: row.document as unknown as Record<string, unknown> });
+        }
+      }
+      return out;
+    } catch {
+      return [];
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  let cachedPublicActivityTickers: {
+    expiresAtMs: number;
+    payload: {
+      ok: true;
+      sold: PublicActivityItem[];
+      payout: PublicActivityItem[];
+      updatedAtMs: number;
+    };
+  } | null = null;
+
+  app.get(
+    '/api/public/activity-tickers',
+    makeRateLimitMiddleware('public_activity_tickers', diagnosticProbeLimiter),
+    async (_req, res) => {
+      res.setHeader('Cache-Control', 'public, max-age=10');
+      try {
+        if (cachedPublicActivityTickers && Date.now() < cachedPublicActivityTickers.expiresAtMs) {
+          return res.json(cachedPublicActivityTickers.payload);
+        }
+        const cfg = loadVerifiedFirebaseConfig();
+        const docs = await runPublicFirestoreQuery(cfg, {
+          from: [{ collectionId: 'publicActivity' }],
+          orderBy: [{ field: { fieldPath: 'completedAtMs' }, direction: 'DESCENDING' }],
+          limit: 35,
+        });
+
+        const parsed: PublicActivityItem[] = [];
+        for (const entry of docs) {
+          const item = parseRawPublicActivityItem(entry.id, {
+            kind: readFirestoreStringField(entry.doc, 'kind'),
+            actorDisplayName: readFirestoreStringField(entry.doc, 'actorDisplayName'),
+            actorVerified: readFirestoreBooleanField(entry.doc, 'actorVerified'),
+            assetTitle: readFirestoreStringField(entry.doc, 'assetTitle'),
+            platform: readFirestoreStringField(entry.doc, 'platform'),
+            amountMinor: readFirestoreNumberField(entry.doc, 'amountMinor'),
+            currency: readFirestoreStringField(entry.doc, 'currency'),
+            completedAtMs: readFirestoreNumberField(entry.doc, 'completedAtMs'),
+          });
+          if (item) parsed.push(item);
+        }
+
+        const sold = mergeAndSortTickerItems(
+          parsed.filter((item) => item.kind === 'sold'),
+          18
+        );
+        const payout = mergeAndSortTickerItems(
+          parsed.filter((item) => item.kind === 'payout'),
+          18
+        );
+        const payload = {
+          ok: true as const,
+          sold,
+          payout,
+          updatedAtMs: Date.now(),
+        };
+        cachedPublicActivityTickers = {
+          expiresAtMs: Date.now() + 15_000,
+          payload,
+        };
+        return res.json(payload);
+      } catch {
+        return res.json({
+          ok: true,
+          sold: [],
+          payout: [],
+          updatedAtMs: Date.now(),
+        });
+      }
+    }
+  );
+
+  let cachedPublicMarketplaceStats: {
+    expiresAtMs: number;
+    payload: Record<string, unknown>;
+  } | null = null;
+
+  app.get(
+    '/api/public/marketplace-stats',
+    makeRateLimitMiddleware('public_marketplace_stats', diagnosticProbeLimiter),
+    async (_req, res) => {
+      res.setHeader('Cache-Control', 'public, max-age=15');
+      try {
+        if (cachedPublicMarketplaceStats && Date.now() < cachedPublicMarketplaceStats.expiresAtMs) {
+          return res.json(cachedPublicMarketplaceStats.payload);
+        }
+        const cfg = loadVerifiedFirebaseConfig();
+        const [listingDocs, profileDocs, activityDocs, reviewDocs] = await Promise.all([
+          runPublicFirestoreQuery(cfg, {
+            from: [{ collectionId: 'listings' }],
+            where: {
+              fieldFilter: {
+                field: { fieldPath: 'status' },
+                op: 'IN',
+                value: {
+                  arrayValue: {
+                    values: [{ stringValue: 'active' }, { stringValue: 'reserved' }],
+                  },
+                },
+              },
+            },
+            limit: 100,
+          }),
+          runPublicFirestoreQuery(cfg, {
+            from: [{ collectionId: 'publicProfiles' }],
+            limit: 100,
+          }),
+          runPublicFirestoreQuery(cfg, {
+            from: [{ collectionId: 'publicActivity' }],
+            orderBy: [{ field: { fieldPath: 'completedAtMs' }, direction: 'DESCENDING' }],
+            limit: 40,
+          }),
+          runPublicFirestoreQuery(cfg, {
+            from: [{ collectionId: 'reviews' }],
+            limit: 100,
+          }),
+        ]);
+
+        const listings = listingDocs.map((e) => ({
+          status: (readFirestoreStringField(e.doc, 'status') || 'active') as 'active' | 'reserved',
+        }));
+        const publicProfiles = profileDocs.map((e) => ({
+          nidVerified: readFirestoreBooleanField(e.doc, 'nidVerified'),
+          completedSales: readFirestoreNumberField(e.doc, 'completedSales'),
+        }));
+        const publicActivities: PublicActivityItem[] = [];
+        for (const e of activityDocs) {
+          const item = parseRawPublicActivityItem(e.id, {
+            kind: readFirestoreStringField(e.doc, 'kind'),
+            actorDisplayName: readFirestoreStringField(e.doc, 'actorDisplayName'),
+            actorVerified: readFirestoreBooleanField(e.doc, 'actorVerified'),
+            assetTitle: readFirestoreStringField(e.doc, 'assetTitle'),
+            platform: readFirestoreStringField(e.doc, 'platform'),
+            amountMinor: readFirestoreNumberField(e.doc, 'amountMinor'),
+            currency: readFirestoreStringField(e.doc, 'currency'),
+            completedAtMs: readFirestoreNumberField(e.doc, 'completedAtMs'),
+          });
+          if (item) publicActivities.push(item);
+        }
+        const reviews: ReviewRecord[] = reviewDocs.map((e) => ({
+          id: e.id,
+          dealId: readFirestoreStringField(e.doc, 'dealId'),
+          sellerId: readFirestoreStringField(e.doc, 'sellerId'),
+          reviewerId: readFirestoreStringField(e.doc, 'reviewerId'),
+          reviewerName: readFirestoreStringField(e.doc, 'reviewerName'),
+          score: readFirestoreNumberField(e.doc, 'score'),
+          comment: readFirestoreStringField(e.doc, 'comment'),
+          moderationStatus:
+            readFirestoreStringField(e.doc, 'moderationStatus') === 'hidden'
+              ? 'hidden'
+              : 'published',
+          createdAtMs:
+            readFirestoreTimestampMs(e.doc, 'createdAt') || Date.now(),
+        }));
+
+        const stats = computeVerifiedMarketplaceStats({
+          listings,
+          publicProfiles,
+          publicActivities,
+          reviews,
+          nowMs: Date.now(),
+        });
+
+        const payload = { ok: true, stats };
+        cachedPublicMarketplaceStats = {
+          expiresAtMs: Date.now() + 20_000,
+          payload,
+        };
+        return res.json(payload);
+      } catch {
+        return res.json({
+          ok: true,
+          stats: computeVerifiedMarketplaceStats({
+            listings: [],
+            publicProfiles: [],
+            publicActivities: [],
+            reviews: [],
+            nowMs: Date.now(),
+          }),
+        });
+      }
+    }
+  );
 
   let cachedFcmStatus: { expiresAtMs: number; payload: Record<string, unknown> } | null = null;
 
@@ -1503,11 +1806,16 @@ async function startServer() {
           !isLookupAccountActiveAndUnrevoked({
             idToken,
             expectedProjectId: cfg.projectId,
+            expectedUid: callerUid,
             disabled: verifiedUser?.disabled,
             validSinceSecondsRaw: verifiedUser?.validSince,
           })
         ) {
           return res.status(401).json({ ok: false, deliveryStatus: 'invalid_caller' });
+        }
+
+        if (!consumeAuthenticatedUidLimit(req, res, 'fcm_send', callerUid, fcmDispatchLimiter)) {
+          return;
         }
 
       const body = (req.body || {}) as Record<string, unknown>;
@@ -1997,6 +2305,10 @@ async function startServer() {
           });
         }
 
+        if (!consumeAuthenticatedUidLimit(req, res, 'ai_verify_evidence', caller.uid, aiComputeLimiter)) {
+          return;
+        }
+
         if (await isAiEmergencyStopActive(cfg)) {
           return res.status(423).json({
             available: false,
@@ -2028,13 +2340,26 @@ async function startServer() {
           .slice(0, 12)
           .map((item) => item.slice(0, 64));
 
-        const match = imageDataUrl.match(/^data:(image\/(?:png|jpeg|webp));base64,(.+)$/);
+        const match = imageDataUrl.match(/^data:(image\/(?:png|jpeg|webp));base64,([A-Za-z0-9+/=\s]+)$/);
         if (!match) {
           return res.status(400).json({ error: 'Unsupported evidence image format. Use PNG, JPEG, or WebP.' });
         }
 
         const mimeType = match[1];
-        const base64Data = match[2];
+        const base64Data = match[2]!.replace(/\s+/g, '');
+        const decodedBytes = new Uint8Array(Buffer.from(base64Data, 'base64'));
+        const magicCheck = validateImageMagicBytes(decodedBytes);
+        if (!magicCheck.valid || magicCheck.detectedMime !== mimeType) {
+          recordSecurityEvent({
+            type: 'payload_rejected',
+            endpoint: '/api/ai/verify-evidence',
+            actor: caller.uid,
+            summary: 'Rejected evidence upload failing server-side raster magic-byte verification.',
+          });
+          return res.status(400).json({
+            error: magicCheck.error || 'Evidence file binary signature does not match declared raster MIME type.',
+          });
+        }
 
         const response = await ai.models.generateContent({
           model: 'gemini-3.8-flash',
@@ -2111,6 +2436,10 @@ Remember: a screenshot alone is never direct platform API verification. Recommen
             reply: 'Administrator authentication is required to use BEXORA AI Developer.',
           });
         }
+
+      if (!consumeAuthenticatedUidLimit(req, res, 'ai_developer_chat', adminCaller.uid, aiComputeLimiter)) {
+        return;
+      }
 
       if (await isAiEmergencyStopActive(cfg)) {
         return res.status(423).json({
@@ -2306,25 +2635,19 @@ Current system snapshot: ${typeof systemContext === 'string' ? systemContext.sli
   aiAdminEngine.startBackgroundDailyScheduler();
 
   // Rate-limited, strictly privacy-redacted operational error telemetry beacon (zero private chat/PII)
-  const telemetryRateMap = new Map<string, { count: number; resetAtMs: number }>();
   app.post('/api/telemetry/client-error', (req, res) => {
-    const ipKey = String(req.ip || 'anon');
-    const now = Date.now();
-    const bucket = telemetryRateMap.get(ipKey);
-    if (!bucket || now >= bucket.resetAtMs) {
-      telemetryRateMap.set(ipKey, { count: 1, resetAtMs: now + 60_000 });
-    } else if (bucket.count >= 20) {
+    const decision = telemetryLimiter.consume(`telemetry:${getCallerClientKey(req)}`);
+    if (!decision.allowed) {
+      res.setHeader('Retry-After', String(decision.retryAfterSeconds));
       return res.status(429).json({ ok: false });
-    } else {
-      bucket.count += 1;
     }
     const body = (req.body || {}) as Record<string, unknown>;
     aiAdminEngine.recordClientTelemetryEvent({
-      kind: typeof body.kind === 'string' ? body.kind : 'runtime_error',
-      route: typeof body.route === 'string' ? body.route : '/',
+      kind: typeof body.kind === 'string' ? body.kind.slice(0, 64) : 'runtime_error',
+      route: typeof body.route === 'string' ? body.route.slice(0, 160) : '/',
       componentOrEndpoint:
-        typeof body.componentOrEndpoint === 'string' ? body.componentOrEndpoint : 'window',
-      message: typeof body.message === 'string' ? body.message : '',
+        typeof body.componentOrEndpoint === 'string' ? body.componentOrEndpoint.slice(0, 120) : 'window',
+      message: typeof body.message === 'string' ? redactSecretsFromLogText(body.message).slice(0, 240) : '',
     });
     return res.json({ ok: true });
   });
@@ -2361,6 +2684,9 @@ Current system snapshot: ${typeof systemContext === 'string' ? systemContext.sli
     if (!adminCaller) {
       return res.status(403).json({ error: 'Administrator authentication is required.' });
     }
+    if (!consumeAuthenticatedUidLimit(req, res, 'ai_audit_run', adminCaller.uid, cloudAdminMutationLimiter)) {
+      return;
+    }
     try {
       const result = await aiAdminEngine.runComprehensiveWebsiteAudit({
         trigger: 'manual',
@@ -2369,7 +2695,9 @@ Current system snapshot: ${typeof systemContext === 'string' ? systemContext.sli
       return res.json(result);
     } catch (err) {
       return res.status(500).json({
-        error: err instanceof Error ? err.message : 'Website audit encountered an unexpected failure.',
+        error: redactSecretsFromLogText(
+          err instanceof Error ? err.message : 'Website audit encountered an unexpected failure.'
+        ),
       });
     }
   });
@@ -2458,6 +2786,9 @@ Current system snapshot: ${typeof systemContext === 'string' ? systemContext.sli
     if (!adminCaller) {
       return res.status(403).json({ error: 'Administrator authentication is required.' });
     }
+    if (!consumeAuthenticatedUidLimit(req, res, 'ai_admin_chat', adminCaller.uid, aiComputeLimiter)) {
+      return;
+    }
     const body = (req.body || {}) as {
       conversationId?: string;
       message?: string;
@@ -2477,7 +2808,9 @@ Current system snapshot: ${typeof systemContext === 'string' ? systemContext.sli
       return res.json(chatRes);
     } catch (err) {
       return res.status(500).json({
-        error: err instanceof Error ? err.message : 'Assistant conversation request failed.',
+        error: redactSecretsFromLogText(
+          err instanceof Error ? err.message : 'Assistant conversation request failed.'
+        ),
       });
     }
   });
@@ -2491,6 +2824,35 @@ Current system snapshot: ${typeof systemContext === 'string' ? systemContext.sli
     }
     aiAdminEngine.markStagedProposalSynced(String(req.params.proposalId || ''));
     return res.json({ ok: true });
+  });
+
+  // Authenticated Admin-Only Deployment Archive Download (prevents unauthenticated public bundle zip scraping)
+  app.get('/api/admin/deployment-archive', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const cfg = loadVerifiedFirebaseConfig();
+    const adminCaller = await verifyAdminCaller(req, cfg);
+    if (!adminCaller) {
+      recordSecurityEvent({
+        type: 'admin_denied',
+        endpoint: '/api/admin/deployment-archive',
+        actor: getCallerClientKey(req),
+        summary: 'Blocked unauthenticated or non-admin deployment archive download attempt.',
+      });
+      return res.status(403).json({ error: 'Administrator authentication is required.' });
+    }
+    const zipPath = path.join(__dirname, 'BEXORA_INFINITYFREE_PRODUCTION.zip');
+    if (!fs.existsSync(zipPath)) {
+      return res.status(404).json({ error: 'Deployment archive has not been generated yet. Run npm run build first.' });
+    }
+    recordSecurityEvent({
+      type: 'admin_action',
+      endpoint: '/api/admin/deployment-archive',
+      actor: adminCaller.uid,
+      summary: 'Administrator downloaded BEXORA_INFINITYFREE_PRODUCTION.zip deployment archive.',
+    });
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', 'attachment; filename="BEXORA_INFINITYFREE_PRODUCTION.zip"');
+    return res.sendFile(zipPath);
   });
 
   // 5. WordPress Multi-Gateway Live Payment Bridge (Zero-Fake-Payment Architecture + DNS-Verified SSRF Guard)
@@ -2773,6 +3135,10 @@ Current system snapshot: ${typeof systemContext === 'string' ? systemContext.sli
         const caller = await verifyCallerFirebaseToken(req, cfg);
         if (!caller) {
           return res.status(401).json({ ok: false, errorCode: 'unauthorized', message: 'Sign in required to initiate checkout.' });
+        }
+
+        if (!consumeAuthenticatedUidLimit(req, res, 'wp_create_session', caller.uid, paymentSessionLimiter)) {
+          return;
         }
 
         const saved = await readPublicWordPressSettings(cfg);
@@ -3154,7 +3520,7 @@ Current system snapshot: ${typeof systemContext === 'string' ? systemContext.sli
   const isProd = isProdRuntime;
   if (isProd) {
     const distPath = path.join(__dirname, 'dist');
-    app.use(express.static(distPath));
+    app.use(express.static(distPath, { dotfiles: 'deny', index: false }));
     app.get('*', (_req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
     });

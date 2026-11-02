@@ -39,6 +39,30 @@ service cloud.firestore {
       );
     }
 
+    function isSafeHttpsOrEmptyUrl(u, maxLen) {
+      return u is string && u.size() <= maxLen
+        && u.matches('^$|^https://[A-Za-z0-9.\\-/:_?=&%#@~+!,;()]+$');
+    }
+    function isSafeImageOrHttpsOrEmpty(s, maxLen) {
+      return s is string && s.size() <= maxLen && (
+        s == ''
+        || s.matches('^https://[A-Za-z0-9.\\-/:_?=&%#@~+!,;()]+$')
+        || s.matches('^data:image/(jpeg|jpg|png|webp);base64,[A-Za-z0-9+/=\\r\\n]+$')
+      );
+    }
+    function isSafeImageOrHttpsNonEmpty(s, minLen, maxLen) {
+      return s is string && s.size() >= minLen && s.size() <= maxLen && (
+        s.matches('^https://[A-Za-z0-9.\\-/:_?=&%#@~+!,;()]+$')
+        || s.matches('^data:image/(jpeg|jpg|png|webp);base64,[A-Za-z0-9+/=\\r\\n]+$')
+      );
+    }
+    function isSafeChatMedia(s, maxLen) {
+      return isSafeImageOrHttpsOrEmpty(s, maxLen) || (
+        s is string && s.size() <= maxLen
+        && s.matches('^data:audio/(webm|ogg|mp4|mpeg|wav)(;[A-Za-z0-9=._,\\-]+)*;base64,[A-Za-z0-9+/=\\r\\n]+$')
+      );
+    }
+
     // Validation Blueprints
     function isValidPublicProfile(data, uid) {
       return data.keys().hasAll([
@@ -49,14 +73,15 @@ service cloud.firestore {
         && data.keys().hasOnly([
           'uid', 'displayName', 'username', 'bio', 'avatarUrl', 'coverUrl', 'location',
           'nidVerified', 'completedTrader', 'completedSales', 'completedPurchases',
-          'ratingSum', 'ratingCount', 'lastReviewDealId', 'followerCount', 'createdAt', 'updatedAt'
+          'ratingSum', 'ratingCount', 'lastReviewDealId', 'followerCount',
+          'hidePublicActivityName', 'createdAt', 'updatedAt'
         ])
         && data.uid == uid
         && data.displayName is string && data.displayName.size() >= 2 && data.displayName.size() <= 80
         && data.username is string && data.username.size() >= 3 && data.username.size() <= 24 && data.username.matches('^[a-z0-9_]+$')
         && data.bio is string && data.bio.size() <= 500
-        && (!('avatarUrl' in data) || (data.avatarUrl is string && data.avatarUrl.size() <= 250000))
-        && (!('coverUrl' in data) || (data.coverUrl is string && data.coverUrl.size() <= 300000))
+        && (!('avatarUrl' in data) || isSafeImageOrHttpsOrEmpty(data.avatarUrl, 250000))
+        && (!('coverUrl' in data) || isSafeImageOrHttpsOrEmpty(data.coverUrl, 300000))
         && (!('location' in data) || (data.location is string && data.location.size() <= 80))
         && data.nidVerified is bool
         && data.completedTrader is bool
@@ -66,6 +91,7 @@ service cloud.firestore {
         && data.ratingCount is int && data.ratingCount >= 0
         && (!('lastReviewDealId' in data) || isValidId(data.lastReviewDealId))
         && (!('followerCount' in data) || (data.followerCount is int && data.followerCount >= 0))
+        && (!('hidePublicActivityName' in data) || data.hidePublicActivityName is bool)
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -145,8 +171,8 @@ service cloud.firestore {
       return data.keys().hasAll(['uid', 'frontImageData', 'backImageData', 'status', 'submittedAt', 'updatedAt'])
         && data.keys().hasOnly(['uid', 'frontImageData', 'backImageData', 'status', 'rejectionReason', 'reviewedBy', 'submittedAt', 'updatedAt'])
         && data.uid == uid
-        && data.frontImageData is string && data.frontImageData.size() >= 20 && data.frontImageData.size() <= 350000
-        && data.backImageData is string && data.backImageData.size() >= 20 && data.backImageData.size() <= 350000
+        && isSafeImageOrHttpsNonEmpty(data.frontImageData, 20, 350000)
+        && isSafeImageOrHttpsNonEmpty(data.backImageData, 20, 350000)
         && data.status in ['pending_review', 'verified', 'rejected']
         && (!('rejectionReason' in data) || (data.rejectionReason is string && data.rejectionReason.size() <= 500))
         && (!('reviewedBy' in data) || (data.reviewedBy is string && data.reviewedBy.size() <= 128))
@@ -193,12 +219,17 @@ service cloud.firestore {
         && data.ageMonths is int && data.ageMonths >= 0 && data.ageMonths <= 11
         && data.metricValue is int && data.metricValue >= 0
         && data.monthlyRevenueMinor is int && data.monthlyRevenueMinor >= 0
-        && data.accountUrl is string && data.accountUrl.size() <= 300
+        && isSafeHttpsOrEmptyUrl(data.accountUrl, 300)
         && data.urlValidationStatus in ['domain_matched', 'not_applicable']
         && (!('gameName' in data) || (data.gameName is string && data.gameName.size() <= 60))
         && (!('gameUid' in data) || (data.gameUid is string && data.gameUid.size() <= 64))
         && (!('gameLevel' in data) || (data.gameLevel is int && data.gameLevel >= 0 && data.gameLevel <= 10000))
-        && data.images is list && data.images.size() <= 5 && (data.images.size() == 0 || (data.images[0] is string && data.images[0].size() <= 250000))
+        && data.images is list && data.images.size() <= 5
+        && (data.images.size() < 1 || isSafeImageOrHttpsNonEmpty(data.images[0], 12, 250000))
+        && (data.images.size() < 2 || isSafeImageOrHttpsNonEmpty(data.images[1], 12, 250000))
+        && (data.images.size() < 3 || isSafeImageOrHttpsNonEmpty(data.images[2], 12, 250000))
+        && (data.images.size() < 4 || isSafeImageOrHttpsNonEmpty(data.images[3], 12, 250000))
+        && (data.images.size() < 5 || isSafeImageOrHttpsNonEmpty(data.images[4], 12, 250000))
         && (!('activeDealId' in data) || (data.activeDealId is string && isValidId(data.activeDealId)))
         && (!('acceptedBidAmountMinor' in data) || (data.acceptedBidAmountMinor is int && data.acceptedBidAmountMinor > 0))
         && (!('reservedBuyerId' in data) || (data.reservedBuyerId is string && isValidId(data.reservedBuyerId)))
@@ -215,7 +246,12 @@ service cloud.firestore {
         && data.keys().hasOnly(['listingId', 'sellerId', 'evidenceImages', 'aiSummary', 'aiMethod', 'reviewerNotes', 'createdAt', 'updatedAt'])
         && data.listingId == listingId
         && data.sellerId is string && data.sellerId.size() <= 128
-        && data.evidenceImages is list && data.evidenceImages.size() <= 5 && (data.evidenceImages.size() == 0 || (data.evidenceImages[0] is string && data.evidenceImages[0].size() <= 250000))
+        && data.evidenceImages is list && data.evidenceImages.size() <= 5
+        && (data.evidenceImages.size() < 1 || isSafeImageOrHttpsNonEmpty(data.evidenceImages[0], 12, 250000))
+        && (data.evidenceImages.size() < 2 || isSafeImageOrHttpsNonEmpty(data.evidenceImages[1], 12, 250000))
+        && (data.evidenceImages.size() < 3 || isSafeImageOrHttpsNonEmpty(data.evidenceImages[2], 12, 250000))
+        && (data.evidenceImages.size() < 4 || isSafeImageOrHttpsNonEmpty(data.evidenceImages[3], 12, 250000))
+        && (data.evidenceImages.size() < 5 || isSafeImageOrHttpsNonEmpty(data.evidenceImages[4], 12, 250000))
         && (!('aiSummary' in data) || (data.aiSummary is string && data.aiSummary.size() <= 2000))
         && (!('aiMethod' in data) || (data.aiMethod is string && data.aiMethod.size() <= 80))
         && (!('reviewerNotes' in data) || (data.reviewerNotes is string && data.reviewerNotes.size() <= 1000))
@@ -279,7 +315,7 @@ service cloud.firestore {
         && (!('senderRole' in data) || data.senderRole in ['buyer', 'seller', 'admin', 'system'])
         && data.kind in ['text', 'image', 'voice', 'system']
         && data.text is string && data.text.size() <= 1500
-        && (!('mediaData' in data) || (data.mediaData is string && data.mediaData.size() <= 350000))
+        && (!('mediaData' in data) || isSafeChatMedia(data.mediaData, 350000))
         && data.createdAt is timestamp;
     }
 
@@ -303,7 +339,7 @@ service cloud.firestore {
           'paymentLedgerId', 'paidAtMs', 'transferSubmissionCount',
           'latestTransferSubmissionId', 'latestRejectionReason',
           'refundLedgerId', 'settlementLedgerId', 'adminHoldNote',
-          'settledAtMs', 'refundedAtMs',
+          'settledAtMs', 'refundedAtMs', 'publicActivityId',
           'status', 'createdAt', 'updatedAt'
         ])
         && data.listingId is string && data.listingId.size() <= 128
@@ -344,6 +380,7 @@ service cloud.firestore {
         && (!('adminHoldNote' in data) || (data.adminHoldNote is string && data.adminHoldNote.size() <= 1000))
         && (!('settledAtMs' in data) || (data.settledAtMs is int && data.settledAtMs >= 0))
         && (!('refundedAtMs' in data) || (data.refundedAtMs is int && data.refundedAtMs >= 0))
+        && (!('publicActivityId' in data) || isValidId(data.publicActivityId))
         && data.status in [
           'accepted_pending_payment', 'awaiting_payment', 'payment_pending_verification',
           'paid_deal_room_active', 'paid', 'transfer_in_progress', 'transfer_submitted',
@@ -400,9 +437,9 @@ service cloud.firestore {
         && data.sellerName is string && data.sellerName.size() >= 1 && data.sellerName.size() <= 80
         && data.version is int && data.version >= 1 && data.version <= 50
         && data.screenshots is list && data.screenshots.size() >= 2 && data.screenshots.size() <= 3
-        && data.screenshots[0] is string && data.screenshots[0].size() >= 30 && data.screenshots[0].size() <= 300000
-        && data.screenshots[1] is string && data.screenshots[1].size() >= 30 && data.screenshots[1].size() <= 300000
-        && (data.screenshots.size() == 2 || (data.screenshots[2] is string && data.screenshots[2].size() >= 30 && data.screenshots[2].size() <= 300000))
+        && isSafeImageOrHttpsNonEmpty(data.screenshots[0], 30, 300000)
+        && isSafeImageOrHttpsNonEmpty(data.screenshots[1], 30, 300000)
+        && (data.screenshots.size() == 2 || isSafeImageOrHttpsNonEmpty(data.screenshots[2], 30, 300000))
         && data.transferNote is string && data.transferNote.size() >= 5 && data.transferNote.size() <= 1500
         && data.completedSteps is list && data.completedSteps.size() >= 1 && data.completedSteps.size() <= 10
         && data.completedSteps[0] is string && data.completedSteps[0].size() >= 2 && data.completedSteps[0].size() <= 160
@@ -455,7 +492,15 @@ service cloud.firestore {
         ])
         && (!('dealReference' in data) || (data.dealReference is string && data.dealReference.size() <= 140))
         && data.reason is string && data.reason.size() >= 5 && data.reason.size() <= 1500
-        && (!('evidenceImages' in data) || (data.evidenceImages is list && data.evidenceImages.size() <= 3 && (data.evidenceImages.size() == 0 || (data.evidenceImages[0] is string && data.evidenceImages[0].size() <= 300000))))
+        && (
+          !('evidenceImages' in data)
+          || (
+            data.evidenceImages is list && data.evidenceImages.size() <= 3
+            && (data.evidenceImages.size() < 1 || isSafeImageOrHttpsNonEmpty(data.evidenceImages[0], 12, 300000))
+            && (data.evidenceImages.size() < 2 || isSafeImageOrHttpsNonEmpty(data.evidenceImages[1], 12, 300000))
+            && (data.evidenceImages.size() < 3 || isSafeImageOrHttpsNonEmpty(data.evidenceImages[2], 12, 300000))
+          )
+        )
         && data.status in ['open', 'evidence_requested', 'rejected_resumed', 'resolved_refund', 'resolved_release']
         && (!('adminDecisionNote' in data) || (data.adminDecisionNote is string && data.adminDecisionNote.size() <= 1000))
         && (!('decidedBy' in data) || isValidId(data.decidedBy))
@@ -481,7 +526,7 @@ service cloud.firestore {
         && data.currency == 'BDT'
         && data.senderNumber is string && data.senderNumber.size() >= 6 && data.senderNumber.size() <= 24
         && data.transactionId is string && data.transactionId.size() >= 4 && data.transactionId.size() <= 64
-        && (!('screenshotData' in data) || (data.screenshotData is string && data.screenshotData.size() <= 300000))
+        && (!('screenshotData' in data) || isSafeImageOrHttpsOrEmpty(data.screenshotData, 300000))
         && data.status in ['pending', 'approved', 'rejected']
         && (!('rejectionReason' in data) || (data.rejectionReason is string && data.rejectionReason.size() <= 500))
         && (!('reviewedBy' in data) || (data.reviewedBy is string && data.reviewedBy.size() <= 128))
@@ -497,7 +542,8 @@ service cloud.firestore {
         && data.keys().hasOnly([
           'userId', 'userName', 'method', 'payoutAccount',
           'amountMinor', 'currency', 'status', 'referenceId',
-          'rejectionReason', 'reviewedBy', 'reviewedAtMs', 'createdAt', 'updatedAt'
+          'rejectionReason', 'reviewedBy', 'reviewedAtMs', 'publicActivityId',
+          'createdAt', 'updatedAt'
         ])
         && data.userId is string && data.userId.size() <= 128
         && data.userName is string && data.userName.size() <= 80
@@ -510,6 +556,7 @@ service cloud.firestore {
         && (!('rejectionReason' in data) || (data.rejectionReason is string && data.rejectionReason.size() <= 500))
         && (!('reviewedBy' in data) || (data.reviewedBy is string && data.reviewedBy.size() <= 128))
         && (!('reviewedAtMs' in data) || (data.reviewedAtMs is int && data.reviewedAtMs >= 0))
+        && (!('publicActivityId' in data) || isValidId(data.publicActivityId))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -528,14 +575,22 @@ service cloud.firestore {
 
     function isValidReview(data) {
       return data.keys().hasAll(['dealId', 'sellerId', 'reviewerId', 'reviewerName', 'score', 'comment', 'createdAt'])
-        && data.keys().hasOnly(['dealId', 'sellerId', 'reviewerId', 'reviewerName', 'score', 'comment', 'createdAt'])
+        && data.keys().hasOnly([
+          'dealId', 'sellerId', 'sellerName', 'listingId', 'listingTitle', 'platform',
+          'reviewerId', 'reviewerName', 'score', 'comment', 'moderationStatus', 'createdAt'
+        ])
         && data.dealId is string && data.dealId.size() <= 128
         && data.sellerId is string && data.sellerId.size() <= 128
+        && (!('sellerName' in data) || (data.sellerName is string && data.sellerName.size() <= 80))
+        && (!('listingId' in data) || isValidId(data.listingId))
+        && (!('listingTitle' in data) || (data.listingTitle is string && data.listingTitle.size() <= 120))
+        && (!('platform' in data) || data.platform in ['youtube', 'facebook', 'instagram', 'tiktok', 'telegram', 'website', 'domain', 'gaming'])
         && data.reviewerId is string && data.reviewerId.size() <= 128
         && data.reviewerId != data.sellerId
         && data.reviewerName is string && data.reviewerName.size() <= 80
         && data.score is int && data.score >= 1 && data.score <= 5
         && data.comment is string && data.comment.size() >= 3 && data.comment.size() <= 600
+        && (!('moderationStatus' in data) || data.moderationStatus in ['published', 'hidden'])
         && data.createdAt is timestamp;
     }
 
@@ -720,7 +775,7 @@ service cloud.firestore {
         && data.subcategory is string && data.subcategory.size() >= 1 && data.subcategory.size() <= 80
         && data.priceMinor is int && data.priceMinor >= 100
         && data.currency in ['BDT', 'USD']
-        && (!('thumbnailUrl' in data) || (data.thumbnailUrl is string && data.thumbnailUrl.size() <= 350000))
+        && (!('thumbnailUrl' in data) || isSafeImageOrHttpsOrEmpty(data.thumbnailUrl, 350000))
         && data.createdAtMs is int && data.createdAtMs >= 0
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
@@ -740,7 +795,7 @@ service cloud.firestore {
         && data.followerId != data.sellerId
         && data.sellerName is string && data.sellerName.size() >= 1 && data.sellerName.size() <= 80
         && data.sellerUsername is string && data.sellerUsername.size() >= 1 && data.sellerUsername.size() <= 40
-        && (!('sellerAvatarUrl' in data) || (data.sellerAvatarUrl is string && data.sellerAvatarUrl.size() <= 350000))
+        && (!('sellerAvatarUrl' in data) || isSafeImageOrHttpsOrEmpty(data.sellerAvatarUrl, 350000))
         && data.sellerVerified is bool
         && data.createdAtMs is int && data.createdAtMs >= 0
         && data.createdAt is timestamp
@@ -840,6 +895,66 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function isValidRecentSearch(data, uid) {
+      return data.keys().hasAll([
+          'uid', 'query', 'platform', 'subcategory', 'monetization',
+          'verifiedOnly', 'sortBy', 'summaryLabel', 'searchedAtMs', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid', 'query', 'platform', 'subcategory', 'monetization',
+          'verifiedOnly', 'sortBy', 'summaryLabel', 'searchedAtMs', 'updatedAt'
+        ])
+        && data.uid == uid
+        && data.query is string && data.query.size() <= 120
+        && data.platform in ['all', 'youtube', 'facebook', 'instagram', 'tiktok', 'telegram', 'website', 'domain', 'gaming']
+        && data.subcategory is string && data.subcategory.size() <= 80
+        && data.monetization in ['all', 'monetized', 'non-monetized']
+        && data.verifiedOnly is bool
+        && data.sortBy in ['newest', 'price_asc', 'price_desc', 'revenue_desc']
+        && data.summaryLabel is string && data.summaryLabel.size() >= 1 && data.summaryLabel.size() <= 180
+        && data.searchedAtMs is int && data.searchedAtMs >= 0
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidPublicActivity(data) {
+      return data.keys().hasAll([
+          'kind', 'actorDisplayName', 'actorVerified',
+          'amountMinor', 'currency', 'completedAtMs', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'kind', 'actorDisplayName', 'actorVerified', 'assetTitle', 'platform',
+          'amountMinor', 'currency', 'completedAtMs', 'createdAt'
+        ])
+        && data.kind in ['sold', 'payout']
+        && data.actorDisplayName is string && data.actorDisplayName.size() >= 2 && data.actorDisplayName.size() <= 80
+        && data.actorVerified is bool
+        && (!('assetTitle' in data) || (data.assetTitle is string && data.assetTitle.size() >= 2 && data.assetTitle.size() <= 120))
+        && (!('platform' in data) || data.platform in ['youtube', 'facebook', 'instagram', 'tiktok', 'telegram', 'website', 'domain', 'gaming'])
+        && data.amountMinor is int && data.amountMinor > 0
+        && data.currency in ['BDT', 'USD']
+        && data.completedAtMs is int && data.completedAtMs > 0
+        && data.createdAt is timestamp;
+    }
+
+    function isValidReviewReport(data) {
+      return data.keys().hasAll([
+          'reviewId', 'dealId', 'reporterId', 'reporterName',
+          'reason', 'status', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'reviewId', 'dealId', 'reporterId', 'reporterName',
+          'reason', 'status', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.reviewId)
+        && isValidId(data.dealId)
+        && isValidId(data.reporterId)
+        && data.reporterName is string && data.reporterName.size() >= 1 && data.reporterName.size() <= 80
+        && data.reason is string && data.reason.size() >= 8 && data.reason.size() <= 600
+        && data.status in ['open', 'dismissed', 'hidden']
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
     // 0. Health Connection Test Path (Read-only doc lookup)
     match /test/{docId} {
       allow get: if docId == 'connection';
@@ -874,7 +989,8 @@ service cloud.firestore {
           || (
             request.auth.uid == userId
             && incoming().diff(existing()).affectedKeys().hasOnly([
-              'displayName', 'username', 'bio', 'avatarUrl', 'coverUrl', 'location', 'updatedAt'
+              'displayName', 'username', 'bio', 'avatarUrl', 'coverUrl',
+              'location', 'hidePublicActivityName', 'updatedAt'
             ])
           )
           || (
@@ -1000,6 +1116,42 @@ service cloud.firestore {
         allow delete: if isSignedIn()
           && isValidId(userId)
           && isValidId(tokenId)
+          && request.auth.uid == userId;
+      }
+
+      // 2c. Strictly Owner-Private Recent Marketplace Searches
+      match /recentSearches/{searchId} {
+        allow get: if isSignedIn()
+          && isValidId(userId)
+          && isValidId(searchId)
+          && request.auth.uid == userId
+          && exists(/databases/$(database)/documents/privateUsers/$(userId));
+        allow list: if isSignedIn()
+          && isValidId(userId)
+          && request.auth.uid == userId
+          && resource.data.uid == request.auth.uid;
+        allow create: if isSignedIn()
+          && isValidId(userId)
+          && isValidId(searchId)
+          && request.auth.uid == userId
+          && exists(/databases/$(database)/documents/privateUsers/$(userId))
+          && isValidRecentSearch(incoming(), userId)
+          && incoming().updatedAt == request.time;
+        allow update: if isSignedIn()
+          && isValidId(userId)
+          && isValidId(searchId)
+          && request.auth.uid == userId
+          && exists(/databases/$(database)/documents/privateUsers/$(userId))
+          && isValidRecentSearch(incoming(), userId)
+          && incoming().uid == existing().uid
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'query', 'platform', 'subcategory', 'monetization',
+            'verifiedOnly', 'sortBy', 'summaryLabel', 'searchedAtMs', 'updatedAt'
+          ]);
+        allow delete: if isSignedIn()
+          && isValidId(userId)
+          && isValidId(searchId)
           && request.auth.uid == userId;
       }
     }
@@ -1332,8 +1484,15 @@ service cloud.firestore {
           && isValidId(msgId)
           && isValidChatMessage(incoming())
           && incoming().senderId == request.auth.uid
+          && (incoming().kind != 'system' || isAdmin())
           && incoming().createdAt == request.time
-          && isConvParticipant();
+          && isConvParticipant()
+          && (
+            !('senderRole' in incoming())
+            || (incoming().senderRole == 'buyer' && request.auth.uid == get(/databases/$(database)/documents/conversations/$(convId)).data.buyerId)
+            || (incoming().senderRole == 'seller' && request.auth.uid == get(/databases/$(database)/documents/conversations/$(convId)).data.sellerId)
+            || (incoming().senderRole in ['admin', 'system'] && isAdmin())
+          );
         allow update, delete: if false;
       }
     }
@@ -1435,6 +1594,10 @@ service cloud.firestore {
             && (
               incoming().status != 'settled'
               || (
+                existing().status == 'settled'
+                && incoming().diff(existing()).affectedKeys().hasOnly(['publicActivityId', 'updatedAt'])
+              )
+              || (
                 !(existing().status in ['accepted_pending_payment', 'awaiting_payment', 'settled', 'refunded'])
                 && !exists(/databases/$(database)/documents/walletLedger/$('led_release_' + dealId))
                 && existsAfter(/databases/$(database)/documents/walletLedger/$('led_release_' + dealId))
@@ -1534,8 +1697,15 @@ service cloud.firestore {
           && isValidId(msgId)
           && isValidChatMessage(incoming())
           && incoming().senderId == request.auth.uid
+          && (incoming().kind != 'system' || isAdmin())
           && incoming().createdAt == request.time
-          && isDealParticipant();
+          && isDealParticipant()
+          && (
+            !('senderRole' in incoming())
+            || (incoming().senderRole == 'buyer' && request.auth.uid == get(/databases/$(database)/documents/deals/$(dealId)).data.buyerId)
+            || (incoming().senderRole == 'seller' && request.auth.uid == get(/databases/$(database)/documents/deals/$(dealId)).data.sellerId)
+            || (incoming().senderRole in ['admin', 'system'] && isAdmin())
+          );
         allow update, delete: if false;
       }
 
@@ -1601,7 +1771,11 @@ service cloud.firestore {
           && incoming().status == 'open'
           && incoming().createdAt == request.time
           && incoming().updatedAt == request.time
-          && isDealMember();
+          && isDealMember()
+          && (
+            (incoming().reporterRole == 'buyer' && request.auth.uid == get(/databases/$(database)/documents/deals/$(dealId)).data.buyerId)
+            || (incoming().reporterRole == 'seller' && request.auth.uid == get(/databases/$(database)/documents/deals/$(dealId)).data.sellerId)
+          );
         allow update: if isAdmin()
           && isValidId(dealId)
           && isValidId(reportId)
@@ -1629,7 +1803,12 @@ service cloud.firestore {
           && isValidDealAuditEvent(incoming(), dealId)
           && incoming().actorId == request.auth.uid
           && incoming().createdAt == request.time
-          && isEventDealParticipant();
+          && isEventDealParticipant()
+          && (
+            (incoming().actorRole == 'buyer' && request.auth.uid == get(/databases/$(database)/documents/deals/$(dealId)).data.buyerId)
+            || (incoming().actorRole == 'seller' && request.auth.uid == get(/databases/$(database)/documents/deals/$(dealId)).data.sellerId)
+            || (incoming().actorRole in ['admin', 'system'] && isAdmin())
+          );
         allow update, delete: if false;
       }
     }
@@ -1685,14 +1864,24 @@ service cloud.firestore {
       allow update: if isAdmin()
         && isValidId(withdrawalId)
         && isValidWithdrawalRequest(incoming())
-        && existing().status == 'pending'
         && incoming().userId == existing().userId
         && incoming().amountMinor == existing().amountMinor
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
-        && incoming().diff(existing()).affectedKeys().hasOnly([
-          'status', 'referenceId', 'rejectionReason', 'reviewedBy', 'reviewedAtMs', 'updatedAt'
-        ]);
+        && (
+          (
+            existing().status == 'pending'
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'status', 'referenceId', 'rejectionReason', 'reviewedBy',
+              'reviewedAtMs', 'publicActivityId', 'updatedAt'
+            ])
+          )
+          || (
+            existing().status == 'paid'
+            && incoming().status == 'paid'
+            && incoming().diff(existing()).affectedKeys().hasOnly(['publicActivityId', 'updatedAt'])
+          )
+        );
       allow delete: if false;
     }
 
@@ -1729,18 +1918,29 @@ service cloud.firestore {
     // 14. Authentic Transaction-Verified Seller Reviews
     match /reviews/{reviewId} {
       allow get: if isValidId(reviewId);
-      allow list: if resource.data.sellerId is string;
+      allow list: if resource.data.sellerId is string || (request.query.limit != null && request.query.limit <= 100);
       allow create: if isSignedIn()
         && isValidId(reviewId)
         && reviewId == ('rev_' + incoming().dealId)
         && isValidReview(incoming())
         && incoming().reviewerId == request.auth.uid
+        && (!('moderationStatus' in incoming()) || incoming().moderationStatus == 'published')
         && incoming().createdAt == request.time
         && exists(/databases/$(database)/documents/deals/$(incoming().dealId))
         && get(/databases/$(database)/documents/deals/$(incoming().dealId)).data.buyerId == request.auth.uid
         && get(/databases/$(database)/documents/deals/$(incoming().dealId)).data.sellerId == incoming().sellerId
         && get(/databases/$(database)/documents/deals/$(incoming().dealId)).data.status == 'settled';
-      allow update, delete: if false;
+      allow update: if isAdmin()
+        && isValidId(reviewId)
+        && isValidReview(incoming())
+        && incoming().dealId == existing().dealId
+        && incoming().sellerId == existing().sellerId
+        && incoming().reviewerId == existing().reviewerId
+        && incoming().score == existing().score
+        && incoming().comment == existing().comment
+        && incoming().createdAt == existing().createdAt
+        && incoming().diff(existing()).affectedKeys().hasOnly(['moderationStatus']);
+      allow delete: if false;
     }
 
     // 15. Public Platform Settings (Support contacts, fees, categories, branding)
@@ -2063,6 +2263,56 @@ service cloud.firestore {
           'notifyInApp', 'notifyTelegram', 'notifyEmail',
           'updatedBy', 'updatedAt'
         ]);
+      allow delete: if false;
+    }
+
+    // 25. Sanitized PII-Free Public Activity Ticker Feed (Settled Deals & Paid Withdrawals Only)
+    match /publicActivity/{activityId} {
+      allow get: if isValidId(activityId);
+      allow list: if resource.data.kind in ['sold', 'payout'] || (request.query.limit != null && request.query.limit <= 40);
+      allow create: if isAdmin()
+        && isValidId(activityId)
+        && isValidPublicActivity(incoming())
+        && incoming().createdAt == request.time;
+      allow update: if isAdmin()
+        && isValidId(activityId)
+        && isValidPublicActivity(incoming())
+        && incoming().createdAt == existing().createdAt
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'actorDisplayName', 'actorVerified', 'assetTitle', 'platform',
+          'amountMinor', 'currency', 'completedAtMs'
+        ]);
+      allow delete: if isAdmin() && isValidId(activityId);
+    }
+
+    // 26. Authenticated Review Abuse Reports (1 per user per review; Admin moderation)
+    match /reviewReports/{reportId} {
+      allow get: if isSignedIn() && isValidId(reportId) && (
+        resource == null
+        || existing().reporterId == request.auth.uid
+        || isAdmin()
+      );
+      allow list: if isAdmin() && resource.data.reviewId is string;
+      allow create: if isSignedIn()
+        && request.auth.token.email_verified == true
+        && isValidId(reportId)
+        && reportId == ('rrep_' + incoming().reviewId + '_' + request.auth.uid)
+        && isValidReviewReport(incoming())
+        && incoming().reporterId == request.auth.uid
+        && incoming().status == 'open'
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && exists(/databases/$(database)/documents/reviews/$(incoming().reviewId));
+      allow update: if isAdmin()
+        && isValidId(reportId)
+        && isValidReviewReport(incoming())
+        && incoming().reviewId == existing().reviewId
+        && incoming().dealId == existing().dealId
+        && incoming().reporterId == existing().reporterId
+        && incoming().reason == existing().reason
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']);
       allow delete: if false;
     }
   }

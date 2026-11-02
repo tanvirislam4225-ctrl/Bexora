@@ -1,6 +1,7 @@
 import {
   CurrencyCode,
   DealRecord,
+  InfoTopicId,
   MarketplaceListing,
   PlatformId,
   PublicSettings,
@@ -28,6 +29,9 @@ export type FullScreenPage =
   | 'favorites'
   | 'my-bids'
   | 'following'
+  | 'recent-searches'
+  | 'reviews'
+  | 'info'
   | 'chat'
   | 'deals'
   | 'profile'
@@ -35,6 +39,15 @@ export type FullScreenPage =
   | 'admin';
 
 export type AuthScreenMode = 'login' | 'register' | 'forgot';
+export type ProfileRouteTab =
+  | 'overview'
+  | 'listings'
+  | 'bids'
+  | 'reviews'
+  | 'settings'
+  | 'edit'
+  | 'password'
+  | 'nid';
 
 export interface AppRouteState {
   page: FullScreenPage;
@@ -47,6 +60,8 @@ export interface AppRouteState {
   sellerUid?: string;
   authMode?: AuthScreenMode;
   platformFilter?: PlatformId;
+  infoTopic?: InfoTopicId;
+  profileTab?: ProfileRouteTab;
 }
 
 const SAFE_ROUTE_ID_REGEX = /^[a-zA-Z0-9_-]{1,128}$/;
@@ -60,6 +75,45 @@ const VALID_PLATFORMS = new Set<string>([
   'domain',
   'gaming',
 ]);
+
+export const VALID_INFO_TOPICS = new Set<InfoTopicId>([
+  'how-buying-works',
+  'how-selling-works',
+  'escrow-protection',
+  'buyer-verification',
+  'seller-guidelines',
+  'listing-moderation',
+  'dispute-process',
+  'account-security',
+  'terms-of-service',
+  'privacy-policy',
+  'cookie-policy',
+  'refund-policy',
+  'dispute-policy',
+  'acceptable-use',
+  'user-responsibilities',
+]);
+
+const VALID_PROFILE_TABS = new Set<ProfileRouteTab>([
+  'overview',
+  'listings',
+  'bids',
+  'reviews',
+  'settings',
+  'edit',
+  'password',
+  'nid',
+]);
+
+export function sanitizeInfoTopic(raw: string | null | undefined): InfoTopicId {
+  const cleaned = String(raw || '').trim().toLowerCase() as InfoTopicId;
+  return VALID_INFO_TOPICS.has(cleaned) ? cleaned : 'escrow-protection';
+}
+
+export function sanitizeProfileTab(raw: string | null | undefined): ProfileRouteTab | undefined {
+  const cleaned = String(raw || '').trim().toLowerCase() as ProfileRouteTab;
+  return VALID_PROFILE_TABS.has(cleaned) ? cleaned : undefined;
+}
 
 export function sanitizeRouteId(raw: string | null | undefined): string | undefined {
   const trimmed = String(raw || '').trim();
@@ -165,6 +219,17 @@ export function parseRouteFromSearch(search: string): AppRouteState {
       return { page: 'my-bids' };
     case 'following':
       return { page: 'following' };
+    case 'recent-searches':
+      return { page: 'recent-searches' };
+    case 'reviews':
+      return { page: 'reviews' };
+    case 'info':
+    case 'guide':
+    case 'policy':
+      return {
+        page: 'info',
+        infoTopic: sanitizeInfoTopic(params.get('topic')),
+      };
     case 'chat': {
       const convId = sanitizeRouteId(params.get('convId'));
       return { page: 'chat', convId };
@@ -173,8 +238,10 @@ export function parseRouteFromSearch(search: string): AppRouteState {
       const dealId = sanitizeRouteId(params.get('dealId'));
       return { page: 'deals', dealId };
     }
-    case 'profile':
-      return { page: 'profile' };
+    case 'profile': {
+      const profileTab = sanitizeProfileTab(params.get('tab'));
+      return profileTab ? { page: 'profile', profileTab } : { page: 'profile' };
+    }
     case 'seller':
     case 'public-profile': {
       const uid = sanitizeRouteId(params.get('uid'));
@@ -264,6 +331,16 @@ export function buildSearchForRoute(
     case 'following':
       out.set('view', 'following');
       break;
+    case 'recent-searches':
+      out.set('view', 'recent-searches');
+      break;
+    case 'reviews':
+      out.set('view', 'reviews');
+      break;
+    case 'info':
+      out.set('view', 'info');
+      out.set('topic', sanitizeInfoTopic(route.infoTopic));
+      break;
     case 'chat':
       out.set('view', 'chat');
       if (route.convId && sanitizeRouteId(route.convId)) {
@@ -278,6 +355,9 @@ export function buildSearchForRoute(
       break;
     case 'profile':
       out.set('view', 'profile');
+      if (route.profileTab && sanitizeProfileTab(route.profileTab)) {
+        out.set('tab', route.profileTab);
+      }
       break;
     case 'public-profile':
       if (route.sellerUid && sanitizeRouteId(route.sellerUid)) {
@@ -362,7 +442,9 @@ export type PendingAuthIntent =
         | 'admin'
         | 'favorites'
         | 'my-bids'
-        | 'following';
+        | 'following'
+        | 'reviews'
+        | 'recent-searches';
       dealId?: string;
       convId?: string;
       returnPage: FullScreenPage;
@@ -454,6 +536,8 @@ export function describePendingAuthIntent(intent: PendingAuthIntent | null): {
         favorites: 'view your Saved Favorites',
         'my-bids': 'view and manage My Bids',
         following: 'view your Followed Sellers',
+        reviews: 'report or manage Reviews & Ratings',
+        'recent-searches': 'sync your Recent Searches',
       };
       return {
         heading: `Sign in or create an account to ${pageNames[intent.targetPage]}`,
@@ -575,7 +659,9 @@ export function deserializePendingAuthIntent(
         targetPage !== 'admin' &&
         targetPage !== 'favorites' &&
         targetPage !== 'my-bids' &&
-        targetPage !== 'following'
+        targetPage !== 'following' &&
+        targetPage !== 'reviews' &&
+        targetPage !== 'recent-searches'
       ) {
         return null;
       }

@@ -6,6 +6,7 @@ import {
   formatMoneyFromMinor,
   getCategoryMetricLabel,
   PLATFORM_CATALOG,
+  sanitizeSafeImageSrc,
 } from '../lib/marketplaceLogic';
 import { PLATFORM_BANNER_BG, PlatformIcon } from './Icons';
 
@@ -31,7 +32,8 @@ export const ListingCard: React.FC<ListingCardProps> = ({
   const [imgFailed, setImgFailed] = useState(false);
   const platformDef = PLATFORM_CATALOG[listing.platform];
   const metricLabel = getCategoryMetricLabel(listing.platform, listing.subcategory);
-  const hasImage = listing.images && listing.images.length > 0 && !imgFailed;
+  const safeCoverSrc = listing.images && listing.images.length > 0 ? sanitizeSafeImageSrc(listing.images[0]) : '';
+  const hasImage = Boolean(safeCoverSrc) && !imgFailed;
 
   const isVerifiedMonetization = listing.verifiedOptions.length > 0;
   const monetizationSummary =
@@ -67,7 +69,7 @@ export const ListingCard: React.FC<ListingCardProps> = ({
         >
           {hasImage ? (
             <img
-              src={listing.images[0]}
+              src={safeCoverSrc}
               alt={listing.title}
               referrerPolicy="no-referrer"
               onError={() => setImgFailed(true)}
@@ -115,29 +117,36 @@ export const ListingCard: React.FC<ListingCardProps> = ({
       </div>
 
       {/* Card Body — Clean Unboxed Metadata Discipline */}
-      <div className="p-4 flex flex-col gap-2.5 flex-1 min-w-0">
-        <div className="flex items-center gap-1.5 text-xs font-semibold flex-wrap" style={{ color: 'var(--text-2)' }}>
+      <div className="p-3.5 flex flex-col gap-2 flex-1 min-w-0">
+        <div
+          className="flex items-center gap-1.5 text-[11.5px] font-semibold min-w-0"
+          style={{ color: 'var(--text-2)' }}
+        >
           {!listing.subcategory.toLowerCase().startsWith(platformDef.name.toLowerCase()) && (
             <>
-              <span>{platformDef.name}</span>
-              <span aria-hidden="true">·</span>
+              <span className="shrink-0">{platformDef.name}</span>
+              <span aria-hidden="true" className="shrink-0">
+                ·
+              </span>
             </>
           )}
-          <span>{listing.subcategory}</span>
-          <span aria-hidden="true">·</span>
-          <span>{formatAccountAge(listing.ageYears, listing.ageMonths)}</span>
+          <span className="truncate">{listing.subcategory}</span>
+          <span aria-hidden="true" className="shrink-0">
+            ·
+          </span>
+          <span className="shrink-0 tabular-nums">{formatAccountAge(listing.ageYears, listing.ageMonths)}</span>
         </div>
 
         <button
           type="button"
           onClick={() => onOpen(listing)}
-          className="text-left font-extrabold text-[15px] leading-snug line-clamp-2 hover:underline"
+          className="text-left font-extrabold text-[14.5px] leading-snug line-clamp-2 min-h-[2.5rem] hover:underline"
           style={{ color: 'var(--text)' }}
         >
           {listing.title}
         </button>
 
-        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs tabular-nums" style={{ color: 'var(--text-2)' }}>
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs tabular-nums" style={{ color: 'var(--text-2)' }}>
           {listing.platform === 'gaming' ? (
             <span>Level {listing.gameLevel ?? listing.metricValue}</span>
           ) : (
@@ -156,7 +165,7 @@ export const ListingCard: React.FC<ListingCardProps> = ({
         </div>
 
         <div
-          className="text-xs font-bold truncate"
+          className="text-[11.5px] font-bold truncate"
           style={{
             color: isReserved
               ? 'var(--orange)'
@@ -172,7 +181,7 @@ export const ListingCard: React.FC<ListingCardProps> = ({
 
         {/* Footer Baseline */}
         <div
-          className="mt-auto pt-3 border-t flex items-center justify-between gap-2"
+          className="mt-auto pt-2.5 border-t flex items-center justify-between gap-2"
           style={{ borderColor: 'var(--border-soft)' }}
         >
           <button
@@ -182,7 +191,7 @@ export const ListingCard: React.FC<ListingCardProps> = ({
               if (onOpenSellerProfile) onOpenSellerProfile(listing.sellerId);
               else onOpen(listing);
             }}
-            className="inline-flex items-center gap-2 min-w-0 text-left hover:underline"
+            className="inline-flex items-center gap-1.5 min-w-0 text-left hover:underline"
             aria-label={`View seller ${listing.sellerName}`}
           >
             <span
@@ -210,7 +219,7 @@ export const ListingCard: React.FC<ListingCardProps> = ({
                 </span>
               </div>
             ) : (
-              <span className="font-extrabold text-base" style={{ color: 'var(--text)' }}>
+              <span className="font-extrabold text-[15px]" style={{ color: 'var(--text)' }}>
                 {formatMoneyFromMinor(listing.priceMinor, displayCurrency, listing.currency, usdToBdtRate)}
               </span>
             )}

@@ -14,6 +14,7 @@ import {
   doc,
   getDoc,
   getDocs,
+  limit,
   onSnapshot,
   query,
   runTransaction,
@@ -76,6 +77,7 @@ import {
   getListingStatusBadgeMeta,
   isBidAcceptedAwaitingPaymentStatus,
   normalizeUsername,
+  sanitizeSafeImageSrc,
   validateStrongPassword,
   validateUsername,
 } from '../lib/marketplaceLogic';
@@ -113,6 +115,7 @@ interface OwnerProfileProps {
   onOpenPublicSelf: () => void;
   onAuthTokenRefreshed?: () => Promise<void> | void;
   onFlash: (msg: string) => void;
+  initialTab?: 'overview' | 'listings' | 'bids' | 'reviews' | 'settings' | 'edit' | 'password' | 'nid';
 }
 
 interface VisitorProfileProps {
@@ -200,7 +203,8 @@ const VisitorProfileSection: React.FC<VisitorProfileProps> = ({
         const listQ = query(
           collection(db, 'listings'),
           where('sellerId', '==', targetUid),
-          where('status', 'in', ['active', 'reserved'])
+          where('status', 'in', ['active', 'reserved']),
+          limit(100)
         );
         const listSnap = await getDocs(listQ);
         if (!active) return;
@@ -243,22 +247,26 @@ const VisitorProfileSection: React.FC<VisitorProfileProps> = ({
         loadedListings.sort((a, b) => b.createdAtMs - a.createdAtMs);
         setSellerListings(loadedListings);
 
-        const revQ = query(collection(db, 'reviews'), where('sellerId', '==', targetUid));
+        const revQ = query(collection(db, 'reviews'), where('sellerId', '==', targetUid), limit(100));
         const revSnap = await getDocs(revQ);
         if (!active) return;
-        const loadedReviews: ReviewRecord[] = revSnap.docs.map((rDoc) => {
-          const rd = rDoc.data();
-          return {
-            id: rDoc.id,
-            dealId: rd.dealId,
-            sellerId: rd.sellerId,
-            reviewerId: rd.reviewerId,
-            reviewerName: rd.reviewerName,
-            score: Number(rd.score || 0),
-            comment: rd.comment || '',
-            createdAtMs: rd.createdAt?.toMillis ? rd.createdAt.toMillis() : Date.now(),
-          };
-        });
+        const loadedReviews: ReviewRecord[] = revSnap.docs
+          .map((rDoc) => {
+            const rd = rDoc.data();
+            return {
+              id: rDoc.id,
+              dealId: rd.dealId,
+              sellerId: rd.sellerId,
+              reviewerId: rd.reviewerId,
+              reviewerName: rd.reviewerName,
+              score: Number(rd.score || 0),
+              comment: rd.comment || '',
+              moderationStatus:
+                rd.moderationStatus === 'hidden' ? ('hidden' as const) : ('published' as const),
+              createdAtMs: rd.createdAt?.toMillis ? rd.createdAt.toMillis() : Date.now(),
+            };
+          })
+          .filter((r) => r.moderationStatus !== 'hidden');
         loadedReviews.sort((a, b) => b.createdAtMs - a.createdAtMs);
         setReviews(loadedReviews);
       } catch (err) {
@@ -303,7 +311,7 @@ const VisitorProfileSection: React.FC<VisitorProfileProps> = ({
     .toUpperCase();
 
   return (
-    <div className="max-w-6xl mx-auto px-4 py-8 space-y-8">
+    <div className="bx-wrap-wide py-8 space-y-8">
       <div className="flex items-center justify-between">
         <button
           type="button"
@@ -324,10 +332,11 @@ const VisitorProfileSection: React.FC<VisitorProfileProps> = ({
         <div className="p-6 sm:p-8 -mt-12 flex flex-col sm:flex-row sm:items-end justify-between gap-6">
           <div className="flex flex-col sm:flex-row sm:items-end gap-4">
             <div className="w-24 h-24 rounded-xl border-2 border-[var(--bx-border)] bg-[var(--bx-surface)] overflow-hidden flex items-center justify-center text-2xl font-black shadow-[3px_3px_0_var(--bx-shadow)]">
-              {pubProfile.avatarUrl ? (
+              {sanitizeSafeImageSrc(pubProfile.avatarUrl) ? (
                 <img
-                  src={pubProfile.avatarUrl}
+                  src={sanitizeSafeImageSrc(pubProfile.avatarUrl)}
                   alt={pubProfile.displayName}
+                  referrerPolicy="no-referrer"
                   className="w-full h-full object-cover"
                 />
               ) : (
@@ -450,7 +459,7 @@ const VisitorProfileSection: React.FC<VisitorProfileProps> = ({
             <p className="text-sm font-bold opacity-75">No active public listings from this seller yet.</p>
           </div>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 min-[1400px]:grid-cols-4 gap-5">
             {sellerListings.map((item) => (
               <ListingCard
                 key={item.id}
@@ -524,12 +533,19 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
   onOpenPublicSelf,
   onAuthTokenRefreshed,
   onFlash,
+  initialTab,
 }) => {
-  const [activeTab, setActiveTab] = useState<OwnerTab>('overview');
+  const [activeTab, setActiveTab] = useState<OwnerTab>(initialTab || 'overview');
   const [listingFilter, setListingFilter] = useState<
     'all' | 'active' | 'reserved' | 'pending' | 'draft' | 'rejected' | 'suspended' | 'sold'
   >('all');
   const [reviews, setReviews] = useState<ReviewRecord[]>([]);
+
+  useEffect(() => {
+    if (initialTab) {
+      setActiveTab(initialTab);
+    }
+  }, [initialTab]);
 
   // Edit Profile State
   const [displayName, setDisplayName] = useState(profile.displayName);
@@ -537,6 +553,9 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
   const [bio, setBio] = useState(profile.bio || '');
   const [location, setLocation] = useState(profile.location || '');
   const [avatarUrl, setAvatarUrl] = useState(profile.avatarUrl || '');
+  const [hidePublicActivityName, setHidePublicActivityName] = useState(
+    Boolean(profile.hidePublicActivityName)
+  );
   const [savingProfile, setSavingProfile] = useState(false);
   const [profileErr, setProfileErr] = useState('');
   const avatarInputRef = useRef<HTMLInputElement | null>(null);
@@ -605,27 +624,34 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
     setBio(profile.bio || '');
     setLocation(profile.location || '');
     setAvatarUrl(profile.avatarUrl || '');
+    setHidePublicActivityName(Boolean(profile.hidePublicActivityName));
   }, [profile]);
 
   useEffect(() => {
     let active = true;
     async function loadReviewsAndNid() {
       try {
-        const revSnap = await getDocs(query(collection(db, 'reviews'), where('sellerId', '==', userUid)));
+        const revSnap = await getDocs(
+          query(collection(db, 'reviews'), where('sellerId', '==', userUid), limit(100))
+        );
         if (!active) return;
-        const loaded: ReviewRecord[] = revSnap.docs.map((d) => {
-          const rd = d.data();
-          return {
-            id: d.id,
-            dealId: rd.dealId,
-            sellerId: rd.sellerId,
-            reviewerId: rd.reviewerId,
-            reviewerName: rd.reviewerName,
-            score: Number(rd.score || 0),
-            comment: rd.comment || '',
-            createdAtMs: rd.createdAt?.toMillis ? rd.createdAt.toMillis() : Date.now(),
-          };
-        });
+        const loaded: ReviewRecord[] = revSnap.docs
+          .map((d) => {
+            const rd = d.data();
+            return {
+              id: d.id,
+              dealId: rd.dealId,
+              sellerId: rd.sellerId,
+              reviewerId: rd.reviewerId,
+              reviewerName: rd.reviewerName,
+              score: Number(rd.score || 0),
+              comment: rd.comment || '',
+              moderationStatus:
+                rd.moderationStatus === 'hidden' ? ('hidden' as const) : ('published' as const),
+              createdAtMs: rd.createdAt?.toMillis ? rd.createdAt.toMillis() : Date.now(),
+            };
+          })
+          .filter((r) => r.moderationStatus !== 'hidden');
         loaded.sort((a, b) => b.createdAtMs - a.createdAtMs);
         setReviews(loaded);
 
@@ -727,6 +753,7 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
           username: newNorm,
           bio: cleanBio,
           location: cleanLocation,
+          hidePublicActivityName: Boolean(hidePublicActivityName),
           updatedAt: serverTimestamp(),
         };
         if (avatarUrl) {
@@ -1102,13 +1129,18 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
       : 'Not Verified';
 
   return (
-    <div className="max-w-6xl mx-auto px-4 py-8 space-y-6">
+    <div className="bx-wrap-wide py-8 space-y-6">
       {/* Top Owner Profile Banner */}
       <section className="bx-card p-6 sm:p-8 flex flex-col lg:flex-row lg:items-center justify-between gap-6">
         <div className="flex items-center gap-4">
           <div className="w-20 h-20 rounded-xl border-2 border-[var(--bx-border)] bg-[var(--bx-surface-alt)] overflow-hidden flex items-center justify-center text-2xl font-black shrink-0">
-            {profile.avatarUrl ? (
-              <img src={profile.avatarUrl} alt={profile.displayName} className="w-full h-full object-cover" />
+            {sanitizeSafeImageSrc(profile.avatarUrl) ? (
+              <img
+                src={sanitizeSafeImageSrc(profile.avatarUrl)}
+                alt={profile.displayName}
+                referrerPolicy="no-referrer"
+                className="w-full h-full object-cover"
+              />
             ) : (
               <span>{profile.displayName.slice(0, 2).toUpperCase()}</span>
             )}
@@ -1452,7 +1484,7 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
               <p className="text-sm font-bold opacity-75">No listings in this status yet.</p>
             </div>
           ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 min-[1400px]:grid-cols-4 gap-5">
               {filteredListings.map((item) => {
                 const badgeMeta = getListingStatusBadgeMeta(item.status);
                 return (
@@ -1798,8 +1830,8 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
 
           <div className="flex items-center gap-4">
             <div className="w-16 h-16 rounded-xl border-2 border-[var(--bx-border)] bg-[var(--bx-surface-alt)] overflow-hidden flex items-center justify-center font-black">
-              {avatarUrl ? (
-                <img src={avatarUrl} alt="Avatar preview" className="w-full h-full object-cover" />
+              {sanitizeSafeImageSrc(avatarUrl) ? (
+                <img src={sanitizeSafeImageSrc(avatarUrl)} alt="Avatar preview" className="w-full h-full object-cover" />
               ) : (
                 <span>{displayName.slice(0, 2).toUpperCase()}</span>
               )}
@@ -1884,6 +1916,28 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
               placeholder="Describe the digital assets you specialize in…"
               className="bx-input w-full px-3.5 py-2.5 text-sm"
             />
+          </div>
+
+          <div
+            className="p-3.5 rounded-xl border flex items-start gap-3"
+            style={{ background: 'var(--surface-2)', borderColor: 'var(--border-soft)' }}
+          >
+            <input
+              id="bx-edit-hide-public-activity"
+              type="checkbox"
+              checked={hidePublicActivityName}
+              onChange={(e) => setHidePublicActivityName(e.target.checked)}
+              className="mt-0.5 w-4 h-4 accent-[#793A91] cursor-pointer"
+            />
+            <label htmlFor="bx-edit-hide-public-activity" className="text-xs leading-relaxed cursor-pointer">
+              <strong className="block font-extrabold" style={{ color: 'var(--text)' }}>
+                Mask my display name in public homepage activity tickers
+              </strong>
+              <span style={{ color: 'var(--text-2)' }}>
+                When enabled, completed escrow sales and confirmed payouts display{' '}
+                <strong>{profile.nidVerified ? 'Verified Seller' : 'BEXORA User'}</strong> instead of your public display name.
+              </span>
+            </label>
           </div>
 
           <button
@@ -2043,11 +2097,11 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div className="p-3 border-2 border-[var(--bx-border)] space-y-2">
                     <div className="text-xs font-extrabold uppercase">Submitted Front Document</div>
-                    <img src={nidFrontData} alt="Submitted NID Front" className="w-full h-40 object-cover rounded border border-[var(--bx-border)]" />
+                    <img src={sanitizeSafeImageSrc(nidFrontData) || undefined} alt="Submitted NID Front" className="w-full h-40 object-cover rounded border border-[var(--bx-border)]" />
                   </div>
                   <div className="p-3 border-2 border-[var(--bx-border)] space-y-2">
                     <div className="text-xs font-extrabold uppercase">Submitted Back Document</div>
-                    <img src={nidBackData} alt="Submitted NID Back" className="w-full h-40 object-cover rounded border border-[var(--bx-border)]" />
+                    <img src={sanitizeSafeImageSrc(nidBackData) || undefined} alt="Submitted NID Back" className="w-full h-40 object-cover rounded border border-[var(--bx-border)]" />
                   </div>
                 </div>
               )}
@@ -2080,7 +2134,7 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
                   {nidFrontData ? (
                     <div className="space-y-2">
                       <img
-                        src={nidFrontData}
+                        src={sanitizeSafeImageSrc(nidFrontData) || undefined}
                         alt="NID Front Preview"
                         className="w-full h-40 object-cover border border-[var(--bx-border)] bg-black/5"
                       />
@@ -2125,7 +2179,7 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
                   {nidBackData ? (
                     <div className="space-y-2">
                       <img
-                        src={nidBackData}
+                        src={sanitizeSafeImageSrc(nidBackData) || undefined}
                         alt="NID Back Preview"
                         className="w-full h-40 object-cover border border-[var(--bx-border)] bg-black/5"
                       />

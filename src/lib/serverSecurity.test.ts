@@ -5,7 +5,9 @@ import {
   buildContentSecurityPolicy,
   buildSecurityHeaders,
   evaluateApiCorsAndCsrf,
+  extractClientIpKey,
   getRecentSecurityEvents,
+  isBlockedSensitiveHttpPath,
   isLookupAccountActiveAndUnrevoked,
   isPrivateOrReservedIp,
   recordSecurityEvent,
@@ -14,9 +16,17 @@ import {
   SlidingWindowRateLimiter,
   validateSafeExternalHttpsUrl,
 } from './serverSecurity';
+import {
+  computeWordPressWebhookSignatures,
+  verifyWordPressWebhookRequest,
+} from './serverWebhookSecurity';
 import { convertOrderMinorToWalletBdtMinor } from './checkoutAndIntentLogic';
 import {
   calculateDisputeRefundBreakdown,
+  sanitizeSafeAudioSrc,
+  sanitizeSafeExternalHttpsUrl,
+  sanitizeSafeImageSrc,
+  validateAudioMagicBytes,
   validateImageMagicBytes,
 } from './marketplaceLogic';
 
@@ -335,3 +345,219 @@ test('Security Event Logger: redacts Bearer tokens, API keys, private keys, and 
   assert.equal(evt.actor, '[redacted-email]');
   assert.ok(getRecentSecurityEvents(5).some((e) => e.id === evt.id));
 });
+
+test('Rate Limit IP Spoof Defense & CSRF Header Hardening: uses rightmost X-Forwarded-For hop and blocks X-Forwarded-Host spoofing & cross-origin Referer', () => {
+  // Attacker prepends forged IPs in X-Forwarded-For; ingress appends real client IP 203.0.113.45 at the end
+  assert.equal(
+    extractClientIpKey({
+      xForwardedFor: '1.1.1.1, 8.8.8.8, 203.0.113.45',
+      remoteAddress: '10.0.0.2',
+    }),
+    '203.0.113.45'
+  );
+  assert.equal(
+    extractClientIpKey({
+      xForwardedFor: 'not-an-ip, ::ffff:198.51.100.77',
+    }),
+    '198.51.100.77'
+  );
+
+  // Spoofed X-Forwarded-Host must NOT authorize a matching evil Origin
+  const spoofedForwardedHost = evaluateApiCorsAndCsrf({
+    method: 'POST',
+    path: '/api/fcm/send',
+    originHeader: 'https://evil.attacker.example',
+    hostHeader: 'bexora.example.com',
+    forwardedHostHeader: 'evil.attacker.example',
+  });
+  assert.equal(spoofedForwardedHost.allowed, false);
+  assert.equal(spoofedForwardedHost.errorCode, 'csrf_origin_mismatch');
+
+  // Missing Origin with cross-origin Referer on state-changing request is blocked
+  const crossOriginReferer = evaluateApiCorsAndCsrf({
+    method: 'POST',
+    path: '/api/payments/wordpress/create-session',
+    refererHeader: 'https://phishing.attacker.example/checkout',
+    hostHeader: 'bexora.example.com',
+  });
+  assert.equal(crossOriginReferer.allowed, false);
+  assert.equal(crossOriginReferer.errorCode, 'csrf_referer_mismatch');
+});
+
+test('Sensitive HTTP Path Guard: blocks dotfiles, source maps, server code, rules, scripts, and deployment zip while preserving SPA routes and assets', () => {
+  for (const blockedPath of [
+    '/server.ts',
+    '/src/server/aiAdminEngine.ts',
+    '/.env',
+    '/.env.local',
+    '/.bexora-runtime/ai-admin-state.json',
+    '/firestore.rules',
+    '/firestore.rules.test.ts',
+    '/storage.rules',
+    '/firebase-blueprint.json',
+    '/package.json',
+    '/bun.lock',
+    '/scripts/build-infinityfree-zip.mjs',
+    '/assets/index-abc123.js.map',
+    '/node_modules/.vite/deps/react.js.map',
+    '/BEXORA_INFINITYFREE_PRODUCTION.zip',
+    '/@fs/app/applet/server.ts',
+    '/@fs/app/applet/.bexora-runtime/ai-admin-state.json',
+  ]) {
+    assert.equal(
+      isBlockedSensitiveHttpPath(blockedPath),
+      true,
+      `Expected ${blockedPath} to be blocked`
+    );
+  }
+
+  for (const allowedPath of [
+    '/',
+    '/index.html',
+    '/icon.svg',
+    '/manifest.webmanifest',
+    '/src/main.tsx',
+    '/src/App.tsx',
+    '/@vite/client',
+    '/node_modules/.vite/deps/react.js?v=f1cbc0d2',
+    '/deals',
+    '/listing/lst_123',
+  ]) {
+    assert.equal(
+      isBlockedSensitiveHttpPath(allowedPath),
+      false,
+      `Expected ${allowedPath} to remain accessible`
+    );
+  }
+});
+
+test('JWT Header & Claim Hardening: rejects alg:none, HS256 downgrade, expectedUid mismatch, and future iat tokens', () => {
+  const nowSec = 1_750_000_000;
+  const payload = {
+    aud: 'responsive-dragon-tmn89',
+    iss: 'https://securetoken.google.com/responsive-dragon-tmn89',
+    sub: 'user_abc',
+    iat: nowSec - 30,
+    exp: nowSec + 3000,
+  };
+
+  const algNoneToken = `${Buffer.from(JSON.stringify({ alg: 'none', typ: 'JWT' })).toString('base64url')}.${Buffer.from(
+    JSON.stringify(payload)
+  ).toString('base64url')}.sig`;
+  const hs256Token = `${Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url')}.${Buffer.from(
+    JSON.stringify(payload)
+  ).toString('base64url')}.sig`;
+
+  assert.equal(
+    isLookupAccountActiveAndUnrevoked({
+      idToken: algNoneToken,
+      expectedProjectId: 'responsive-dragon-tmn89',
+      nowSeconds: nowSec,
+    }),
+    false
+  );
+  assert.equal(
+    isLookupAccountActiveAndUnrevoked({
+      idToken: hs256Token,
+      expectedProjectId: 'responsive-dragon-tmn89',
+      nowSeconds: nowSec,
+    }),
+    false
+  );
+
+  // expectedUid mismatch rejected
+  const validToken = makeTestJwt(payload);
+  assert.equal(
+    isLookupAccountActiveAndUnrevoked({
+      idToken: validToken,
+      expectedProjectId: 'responsive-dragon-tmn89',
+      expectedUid: 'different_uid',
+      nowSeconds: nowSec,
+    }),
+    false
+  );
+
+  // Future iat (> +60s clock skew) rejected
+  const futureIatToken = makeTestJwt({ ...payload, iat: nowSec + 600 });
+  assert.equal(
+    isLookupAccountActiveAndUnrevoked({
+      idToken: futureIatToken,
+      expectedProjectId: 'responsive-dragon-tmn89',
+      nowSeconds: nowSec,
+    }),
+    false
+  );
+});
+
+test('Audio Magic-Byte & URI Scheme Sanitizers: enforces genuine audio headers and blocks javascript:, data:image/svg+xml, data:text/html, and http:', () => {
+  const webmBytes = new Uint8Array([0x1a, 0x45, 0xdf, 0xa3, 0x9f, 0x42, 0x86, 0x81, 0x01, 0x42, 0xf7, 0x81]);
+  const oggBytes = new Uint8Array([0x4f, 0x67, 0x67, 0x53, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+  const mp4Bytes = new Uint8Array([0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70, 0x4d, 0x34, 0x41, 0x20]);
+  const wavBytes = new Uint8Array([0x52, 0x49, 0x46, 0x46, 0x24, 0x00, 0x00, 0x00, 0x57, 0x41, 0x56, 0x45]);
+  const mp3Bytes = new Uint8Array([0x49, 0x44, 0x33, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+  const htmlSpoof = new TextEncoder().encode('<script>alert(document.cookie)</script>');
+
+  assert.equal(validateAudioMagicBytes(webmBytes).detectedMime, 'audio/webm');
+  assert.equal(validateAudioMagicBytes(oggBytes).detectedMime, 'audio/ogg');
+  assert.equal(validateAudioMagicBytes(mp4Bytes).detectedMime, 'audio/mp4');
+  assert.equal(validateAudioMagicBytes(wavBytes).detectedMime, 'audio/wav');
+  assert.equal(validateAudioMagicBytes(mp3Bytes).detectedMime, 'audio/mpeg');
+  assert.equal(validateAudioMagicBytes(htmlSpoof).valid, false);
+
+  // External link sanitizer
+  assert.equal(sanitizeSafeExternalHttpsUrl('javascript:alert(1)'), '');
+  assert.equal(sanitizeSafeExternalHttpsUrl('data:text/html;base64,PHNjcmlwdD4='), '');
+  assert.equal(sanitizeSafeExternalHttpsUrl('http://insecure.example.com'), '');
+  assert.equal(sanitizeSafeExternalHttpsUrl('https://user:pass@youtube.com/@chan'), '');
+  assert.equal(sanitizeSafeExternalHttpsUrl('https://www.youtube.com/@bexora'), 'https://www.youtube.com/@bexora');
+
+  // Image & audio src sanitizers
+  assert.equal(sanitizeSafeImageSrc('data:image/svg+xml;base64,PHN2ZyBvbmxvYWQ9YWxlcnQoMSk+'), '');
+  assert.equal(sanitizeSafeImageSrc('javascript:alert(1)'), '');
+  assert.equal(
+    sanitizeSafeImageSrc('data:image/webp;base64,UklGRiQAAABXRUJQ'),
+    'data:image/webp;base64,UklGRiQAAABXRUJQ'
+  );
+  assert.equal(sanitizeSafeAudioSrc('data:text/html;base64,PHNjcmlwdD4='), '');
+  assert.equal(
+    sanitizeSafeAudioSrc('data:audio/webm;codecs=opus;base64,GkXfo59ChoEB'),
+    'data:audio/webm;codecs=opus;base64,GkXfo59ChoEB'
+  );
+});
+
+test('Webhook Replay Cache Bounding: enforces FIFO cap at 5,000 entries while blocking active replays', () => {
+  const replayCache = new Map<string, number>();
+  const nowMs = 1_750_000_000_000;
+  for (let i = 0; i < 5005; i++) {
+    replayCache.set(`evt_seed_${i}`, nowMs - 1000);
+  }
+  const body = JSON.stringify({ order_id: 'ord_99', status: 'paid' });
+  const secret = 'whsec_unit_test_secret_123456';
+  const ts = String(Math.floor(nowMs / 1000));
+  const sig = computeWordPressWebhookSignatures(body, secret, ts).timestampedHex;
+
+  const first = verifyWordPressWebhookRequest({
+    rawBody: body,
+    signatureHeader: `sha256=${sig}`,
+    timestampHeader: ts,
+    secret,
+    eventKey: 'evt_live_new',
+    nowMs,
+    replayCache,
+  });
+  assert.equal(first.ok, true);
+  assert.ok(replayCache.size <= 5000);
+
+  const replay = verifyWordPressWebhookRequest({
+    rawBody: body,
+    signatureHeader: `sha256=${sig}`,
+    timestampHeader: ts,
+    secret,
+    eventKey: 'evt_live_new',
+    nowMs: nowMs + 500,
+    replayCache,
+  });
+  assert.equal(replay.ok, false);
+  assert.equal(replay.code, 'replay_detected');
+});
+

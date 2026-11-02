@@ -170,6 +170,9 @@ export default defineConfig(() => {
         '@': path.resolve(__dirname, '.'),
       },
     },
+    build: {
+      sourcemap: false,
+    },
     server: {
       ws: hmrDisabled ? (false as const) : undefined,
       hmr: hmrDisabled ? (false as const) : { overlay: false },

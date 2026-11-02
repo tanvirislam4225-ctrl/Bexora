@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Headset, Mail, MessageCircle, Send, X } from 'lucide-react';
 import { PublicSettings } from '../types';
+import { sanitizeSafeExternalHttpsUrl } from '../lib/marketplaceLogic';
 
 interface FloatingSupportWidgetProps {
   settings: PublicSettings;
@@ -9,18 +10,20 @@ interface FloatingSupportWidgetProps {
 export const FloatingSupportWidget: React.FC<FloatingSupportWidgetProps> = ({ settings }) => {
   const [open, setOpen] = useState(false);
 
-  const cleanWaDigits = (settings.supportWhatsapp || '').replace(/[^0-9]/g, '');
+  const cleanWaDigits = (settings.supportWhatsapp || '').replace(/[^0-9]/g, '').slice(0, 20);
   const waHref = cleanWaDigits ? `https://wa.me/${cleanWaDigits}` : '';
 
   const rawTg = (settings.supportTelegram || '').trim();
-  const tgHref = rawTg
+  const candidateTg = rawTg
     ? rawTg.startsWith('https://')
       ? rawTg
-      : `https://t.me/${rawTg.replace(/^@/, '')}`
+      : `https://t.me/${rawTg.replace(/^@/, '').replace(/[^a-zA-Z0-9_]/g, '')}`
     : '';
+  const tgHref = sanitizeSafeExternalHttpsUrl(candidateTg);
 
   const email = (settings.supportEmail || '').trim();
-  const mailHref = email ? `mailto:${email}` : '';
+  const safeEmail = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/.test(email) ? email : '';
+  const mailHref = safeEmail ? `mailto:${safeEmail}` : '';
 
   const anyConfigured = Boolean(waHref || tgHref || mailHref);
 

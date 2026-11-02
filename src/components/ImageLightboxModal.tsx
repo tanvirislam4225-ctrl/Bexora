@@ -1,5 +1,6 @@
 import React, { useEffect } from 'react';
 import { ChevronLeft, ChevronRight, X, ZoomIn } from 'lucide-react';
+import { sanitizeSafeImageSrc } from '../lib/marketplaceLogic';
 
 export interface LightboxImageItem {
   src: string;
@@ -77,7 +78,7 @@ export const ImageLightboxModal: React.FC<ImageLightboxModalProps> = ({
 
         <div className="relative flex min-h-[320px] flex-1 items-center justify-center overflow-auto bg-slate-950 p-4">
           <img
-            src={current.src}
+            src={sanitizeSafeImageSrc(current.src)}
             alt={current.caption || `${title} ${activeIndex + 1}`}
             referrerPolicy="no-referrer"
             className="max-h-[74vh] w-auto max-w-full rounded-lg object-contain select-none"
@@ -122,7 +123,7 @@ export const ImageLightboxModal: React.FC<ImageLightboxModalProps> = ({
                   }`}
                 >
                   <img
-                    src={item.src}
+                    src={sanitizeSafeImageSrc(item.src)}
                     alt={`Thumbnail ${idx + 1}`}
                     referrerPolicy="no-referrer"
                     className="h-full w-full object-cover"

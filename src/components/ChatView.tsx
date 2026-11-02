@@ -3,6 +3,7 @@ import {
   addDoc,
   collection,
   doc,
+  limit,
   onSnapshot,
   orderBy,
   query,
@@ -20,7 +21,12 @@ import {
 } from 'lucide-react';
 import { ChatMessageRecord, ConversationRecord, PublicProfile } from '../types';
 import { db, validateAndProcessImageFile } from '../lib/firebase';
-import { detectSensitiveOrOffPlatformContent } from '../lib/marketplaceLogic';
+import {
+  detectSensitiveOrOffPlatformContent,
+  sanitizeSafeAudioSrc,
+  sanitizeSafeImageSrc,
+  validateAudioMagicBytes,
+} from '../lib/marketplaceLogic';
 
 interface ChatViewProps {
   userUid: string | null;
@@ -63,7 +69,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
     }
     const q = query(
       collection(db, 'conversations', selectedId, 'messages'),
-      orderBy('createdAt', 'asc')
+      orderBy('createdAt', 'asc'),
+      limit(300)
     );
     const unsub = onSnapshot(
       q,
@@ -200,11 +207,24 @@ export const ChatView: React.FC<ChatViewProps> = ({
           setWarning('Voice clip is too long. Keep voice messages under 15 seconds.');
           return;
         }
+        const rawBuf = new Uint8Array(await blob.arrayBuffer());
+        const magicCheck = validateAudioMagicBytes(rawBuf);
+        if (!magicCheck.valid) {
+          setWarning(magicCheck.error || 'Voice recording format could not be verified.');
+          return;
+        }
+        const normalizedBlob = new Blob([rawBuf], {
+          type: magicCheck.detectedMime || 'audio/webm',
+        });
         const dataUrl = await new Promise<string>((resolve) => {
           const r = new FileReader();
           r.onload = () => resolve(String(r.result || ''));
-          r.readAsDataURL(blob);
+          r.readAsDataURL(normalizedBlob);
         });
+        if (!sanitizeSafeAudioSrc(dataUrl)) {
+          setWarning('Voice recording format is not permitted.');
+          return;
+        }
         await sendPayload('voice', 'Voice message', dataUrl);
       };
       mediaRecorderRef.current = recorder;
@@ -351,15 +371,20 @@ export const ChatView: React.FC<ChatViewProps> = ({
                             color: mine ? '#FFFFFF' : 'var(--text)',
                           }}
                         >
-                          {m.kind === 'image' && m.mediaData && (
+                          {m.kind === 'image' && sanitizeSafeImageSrc(m.mediaData) && (
                             <img
-                              src={m.mediaData}
+                              src={sanitizeSafeImageSrc(m.mediaData)}
                               alt="Chat attachment"
+                              referrerPolicy="no-referrer"
                               className="rounded-xl max-h-52 object-cover"
                             />
                           )}
-                          {m.kind === 'voice' && m.mediaData && (
-                            <audio controls src={m.mediaData} className="max-w-full h-9" />
+                          {m.kind === 'voice' && sanitizeSafeAudioSrc(m.mediaData) && (
+                            <audio
+                              controls
+                              src={sanitizeSafeAudioSrc(m.mediaData)}
+                              className="max-w-full h-9"
+                            />
                           )}
                           {m.text && <p className="leading-relaxed break-words">{m.text}</p>}
                           <span className="block text-[10px] opacity-75 font-bold">

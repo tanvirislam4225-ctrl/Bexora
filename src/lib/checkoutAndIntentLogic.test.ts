@@ -110,6 +110,32 @@ test('Full-Screen Route Parser & Builder: round-trips all full-screen views and 
   assert.deepEqual(parseRouteFromSearch('?view=my-bids'), { page: 'my-bids' });
   assert.equal(buildSearchForRoute({ page: 'following' }), '?view=following');
   assert.deepEqual(parseRouteFromSearch('?view=following'), { page: 'following' });
+
+  // Footer discovery, policy info center, and profile My Listings tab routes round-trip cleanly
+  assert.equal(buildSearchForRoute({ page: 'recent-searches' }), '?view=recent-searches');
+  assert.deepEqual(parseRouteFromSearch('?view=recent-searches'), { page: 'recent-searches' });
+  assert.equal(buildSearchForRoute({ page: 'reviews' }), '?view=reviews');
+  assert.deepEqual(parseRouteFromSearch('?view=reviews'), { page: 'reviews' });
+  assert.equal(
+    buildSearchForRoute({ page: 'info', infoTopic: 'refund-policy' }),
+    '?view=info&topic=refund-policy'
+  );
+  assert.deepEqual(parseRouteFromSearch('?view=info&topic=refund-policy'), {
+    page: 'info',
+    infoTopic: 'refund-policy',
+  });
+  assert.deepEqual(parseRouteFromSearch('?view=info&topic=invalid-script'), {
+    page: 'info',
+    infoTopic: 'escrow-protection',
+  });
+  assert.equal(
+    buildSearchForRoute({ page: 'profile', profileTab: 'listings' }),
+    '?view=profile&tab=listings'
+  );
+  assert.deepEqual(parseRouteFromSearch('?view=profile&tab=listings'), {
+    page: 'profile',
+    profileTab: 'listings',
+  });
 });
 
 test('Auth Intent Continuation: gates execution until both Auth and Firestore profile/wallet are hydrated', () => {

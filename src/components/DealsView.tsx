@@ -4,6 +4,7 @@ import {
   collection,
   deleteField,
   doc,
+  limit,
   onSnapshot,
   orderBy,
   query,
@@ -60,6 +61,7 @@ import {
   isDealTransferSubmittedStatus,
   isDealUnpaidStatus,
   PLATFORM_CATALOG,
+  sanitizeSafeImageSrc,
   validateBuyerTransferRejection,
   validateDealReportInput,
 } from '../lib/marketplaceLogic';
@@ -206,10 +208,10 @@ export const DealsView: React.FC<DealsViewProps> = ({
       return;
     }
 
-    const mq = query(collection(db, 'deals', activeDeal.id, 'messages'), orderBy('createdAt', 'asc'));
-    const tq = query(collection(db, 'deals', activeDeal.id, 'transfers'), orderBy('version', 'desc'));
-    const rq = query(collection(db, 'deals', activeDeal.id, 'reports'), orderBy('createdAt', 'desc'));
-    const eq = query(collection(db, 'deals', activeDeal.id, 'events'), orderBy('createdAt', 'desc'));
+    const mq = query(collection(db, 'deals', activeDeal.id, 'messages'), orderBy('createdAt', 'asc'), limit(300));
+    const tq = query(collection(db, 'deals', activeDeal.id, 'transfers'), orderBy('version', 'desc'), limit(100));
+    const rq = query(collection(db, 'deals', activeDeal.id, 'reports'), orderBy('createdAt', 'desc'), limit(100));
+    const eq = query(collection(db, 'deals', activeDeal.id, 'events'), orderBy('createdAt', 'desc'), limit(150));
 
     const unsubM = onSnapshot(
       mq,
@@ -1059,10 +1061,15 @@ export const DealsView: React.FC<DealsViewProps> = ({
         tx.set(revRef, {
           dealId: activeDeal.id,
           sellerId: activeDeal.sellerId,
+          sellerName: (activeDeal.sellerName || '').slice(0, 80),
           reviewerId: userUid,
           reviewerName: profile.displayName,
+          listingId: activeDeal.listingId,
+          listingTitle: (activeDeal.listingTitle || '').slice(0, 120),
+          platform: activeDeal.platform,
           score: reviewScore,
           comment: reviewComment.trim().slice(0, 600),
+          moderationStatus: 'published',
           createdAt: serverTimestamp(),
         });
 
@@ -1503,7 +1510,7 @@ export const DealsView: React.FC<DealsViewProps> = ({
                                 style={{ borderColor: 'var(--border-soft)' }}
                               >
                                 <img
-                                  src={src}
+                                  src={sanitizeSafeImageSrc(src) || undefined}
                                   alt={`Transfer v${sub.version} proof ${idx + 1}`}
                                   referrerPolicy="no-referrer"
                                   className="h-full w-full object-cover transition-transform duration-150 group-hover:scale-[1.03]"
@@ -1777,7 +1784,7 @@ export const DealsView: React.FC<DealsViewProps> = ({
                           <div className="grid grid-cols-3 gap-2">
                             {reportEvidence.map((img, idx) => (
                               <div key={idx} className="relative rounded-lg overflow-hidden border" style={{ borderColor: 'var(--border-soft)' }}>
-                                <img src={img} alt={`Report evidence ${idx + 1}`} className="h-24 w-full object-cover" />
+                                <img src={sanitizeSafeImageSrc(img) || undefined} alt={`Report evidence ${idx + 1}`} className="h-24 w-full object-cover" />
                                 <button
                                   type="button"
                                   onClick={() => setReportEvidence((prev) => prev.filter((_, i) => i !== idx))}
@@ -1842,7 +1849,7 @@ export const DealsView: React.FC<DealsViewProps> = ({
                                 onClick={() => openLightbox(evItems, idx, 'Dispute Report Evidence')}
                                 className="h-16 w-24 overflow-hidden rounded border border-red-300"
                               >
-                                <img src={ev.src} alt={ev.caption} className="h-full w-full object-cover" />
+                                <img src={sanitizeSafeImageSrc(ev.src) || undefined} alt={ev.caption} className="h-full w-full object-cover" />
                               </button>
                             ))}
                           </div>

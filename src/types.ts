@@ -79,6 +79,7 @@ export interface PublicProfile {
   ratingCount: number;
   lastReviewDealId?: string;
   followerCount?: number;
+  hidePublicActivityName?: boolean;
   createdAt?: unknown;
   updatedAt?: unknown;
 }
@@ -250,6 +251,7 @@ export interface DealRecord {
   adminHoldNote?: string;
   settledAtMs?: number;
   refundedAtMs?: number;
+  publicActivityId?: string;
   status: DealStatus;
   createdAtMs: number;
 }
@@ -342,6 +344,7 @@ export interface WithdrawalRequestRecord {
   rejectionReason?: string;
   reviewedBy?: string;
   reviewedAtMs?: number;
+  publicActivityId?: string;
   createdAtMs: number;
 }
 
@@ -349,10 +352,15 @@ export interface ReviewRecord {
   id: string;
   dealId: string;
   sellerId: string;
+  sellerName?: string;
+  listingId?: string;
+  listingTitle?: string;
+  platform?: PlatformId;
   reviewerId: string;
   reviewerName: string;
   score: number;
   comment: string;
+  moderationStatus?: 'published' | 'hidden';
   createdAtMs: number;
 }
 
@@ -512,4 +520,68 @@ export type TokenServiceStatus =
 
 export type AuthProviderStatus = 'enabled' | 'disabled' | 'unable_to_verify';
 
+export type PublicActivityKind = 'sold' | 'payout';
 
+export interface PublicActivityItem {
+  id: string;
+  kind: PublicActivityKind;
+  actorDisplayName: string;
+  actorVerified: boolean;
+  assetTitle?: string;
+  platform?: PlatformId;
+  amountMinor: number;
+  currency: CurrencyCode;
+  completedAtMs: number;
+}
+
+export interface RecentSearchRecord {
+  id: string;
+  query: string;
+  platform?: PlatformId | '';
+  subcategory?: string;
+  monetization?: string;
+  verifiedOnly?: boolean;
+  sortBy?: string;
+  summaryLabel: string;
+  searchedAtMs: number;
+}
+
+export interface ReviewReportRecord {
+  id: string;
+  reviewId: string;
+  dealId: string;
+  reporterId: string;
+  reporterName: string;
+  reason: string;
+  status: 'open' | 'dismissed' | 'actioned';
+  createdAtMs: number;
+}
+
+export interface MarketplaceLiveStats {
+  activeListingsCount: number;
+  completedSalesCount: number;
+  registeredMembersCount: number;
+  verifiedSellersCount: number;
+  publishedReviewsCount: number;
+  averageRating: number;
+  settledVolumeBdtMinor: number;
+  settledVolumeUsdMinor: number;
+  updatedAtMs: number;
+}
+
+export type InfoTopicId =
+  | 'how-buying-works'
+  | 'how-selling-works'
+  | 'escrow-protection'
+  | 'buyer-verification'
+  | 'seller-guidelines'
+  | 'listing-moderation'
+  | 'dispute-process'
+  | 'account-security'
+  | 'terms-of-service'
+  | 'privacy-policy'
+  | 'cookie-policy'
+  | 'refund-policy'
+  | 'dispute-policy'
+  | 'acceptable-use'
+  | 'user-responsibilities';

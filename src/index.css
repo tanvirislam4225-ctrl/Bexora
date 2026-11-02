@@ -144,8 +144,17 @@ button {
   padding-right: 16px;
 }
 
+.bx-wrap-wide {
+  width: 100%;
+  max-width: 1440px;
+  margin: 0 auto;
+  padding-left: 16px;
+  padding-right: 16px;
+}
+
 @media (min-width: 768px) {
-  .bx-wrap {
+  .bx-wrap,
+  .bx-wrap-wide {
     padding-left: 24px;
     padding-right: 24px;
   }
@@ -391,6 +400,36 @@ button {
 .tabular-nums {
   font-variant-numeric: tabular-nums;
 }
+
+/* ============================= LIVE ACTIVITY TICKERS ============================= */
+.bx-ticker-viewport {
+  overflow: hidden;
+  flex: 1 1 0%;
+  min-width: 0;
+  position: relative;
+}
+
+.bx-ticker-track {
+  display: flex;
+  align-items: center;
+  width: max-content;
+  will-change: transform;
+  animation: bx-ticker-scroll var(--bx-ticker-duration, 36s) linear infinite;
+}
+
+.bx-ticker-row:hover .bx-ticker-track,
+.bx-ticker-row:focus-within .bx-ticker-track {
+  animation-play-state: paused;
+}
+}
+
+@keyframes bx-ticker-scroll {
+  0% {
+    transform: translate3d(0, 0, 0);
+  }
+  100% {
+    transform: translate3d(-50%, 0, 0);
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -399,5 +438,14 @@ button {
   *::after {
     animation-duration: 0.001ms !important;
     transition-duration: 0.001ms !important;
+  }
+
+  .bx-ticker-viewport {
+    overflow-x: auto;
+  }
+
+  .bx-ticker-track {
+    animation: none !important;
+    transform: none !important;
   }
 }

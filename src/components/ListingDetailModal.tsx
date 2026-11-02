@@ -4,6 +4,7 @@ import {
   collection,
   deleteField,
   doc,
+  limit,
   onSnapshot,
   query,
   runTransaction,
@@ -53,6 +54,8 @@ import {
   getProtectionDurationHours,
   isBidAcceptedAwaitingPaymentStatus,
   PLATFORM_CATALOG,
+  sanitizeSafeExternalHttpsUrl,
+  sanitizeSafeImageSrc,
   validateBidSubmission,
 } from '../lib/marketplaceLogic';
 import {
@@ -155,9 +158,9 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
   const activeBids = useMemo(() => getActiveBids(bids), [bids]);
   const highestActiveBidMinor = useMemo(() => getHighestActiveBidMinor(bids), [bids]);
 
-  // Subscribe to real bids for this listing
+  // Subscribe to real bids for this listing (bounded to prevent unbounded snapshot abuse)
   useEffect(() => {
-    const q = query(collection(db, 'bids'), where('listingId', '==', listing.id));
+    const q = query(collection(db, 'bids'), where('listingId', '==', listing.id), limit(250));
     const unsub = onSnapshot(
       q,
       (snap) => {
@@ -871,9 +874,9 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
                   borderColor: 'var(--border-soft)',
                 }}
               >
-                {listing.images && listing.images[selectedImg] ? (
+                {listing.images && sanitizeSafeImageSrc(listing.images[selectedImg]) ? (
                   <img
-                    src={listing.images[selectedImg]}
+                    src={sanitizeSafeImageSrc(listing.images[selectedImg])}
                     alt={listing.title}
                     referrerPolicy="no-referrer"
                     className="w-full h-full object-cover"
@@ -888,19 +891,28 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
 
               {listing.images && listing.images.length > 1 && (
                 <div className="grid grid-cols-4 sm:flex sm:items-center gap-2 sm:overflow-x-auto pb-1">
-                  {listing.images.map((src, idx) => (
-                    <button
-                      key={idx}
-                      type="button"
-                      onClick={() => setSelectedImg(idx)}
-                      className="w-full sm:w-20 aspect-[16/10] rounded-lg overflow-hidden border-2 shrink-0"
-                      style={{
-                        borderColor: idx === selectedImg ? 'var(--orange)' : 'var(--border-soft)',
-                      }}
-                    >
-                      <img src={src} alt={`Thumbnail ${idx + 1}`} className="w-full h-full object-cover" />
-                    </button>
-                  ))}
+                  {listing.images.map((src, idx) => {
+                    const safeThumb = sanitizeSafeImageSrc(src);
+                    if (!safeThumb) return null;
+                    return (
+                      <button
+                        key={idx}
+                        type="button"
+                        onClick={() => setSelectedImg(idx)}
+                        className="w-full sm:w-20 aspect-[16/10] rounded-lg overflow-hidden border-2 shrink-0"
+                        style={{
+                          borderColor: idx === selectedImg ? 'var(--orange)' : 'var(--border-soft)',
+                        }}
+                      >
+                        <img
+                          src={safeThumb}
+                          alt={`Thumbnail ${idx + 1}`}
+                          referrerPolicy="no-referrer"
+                          className="w-full h-full object-cover"
+                        />
+                      </button>
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -978,20 +990,20 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
             </div>
 
             {/* Public Direct Account/Page URL — Visible to ALL Visitors including Logged-Out */}
-            {listing.accountUrl && (
+            {sanitizeSafeExternalHttpsUrl(listing.accountUrl) && (
               <div className="p-3.5 rounded-xl bx-soft flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                 <div className="min-w-0">
                   <span className="text-xs font-extrabold block" style={{ color: 'var(--text-2)' }}>
                     Public Asset URL (Domain Matched · Seller Declared)
                   </span>
                   <a
-                    href={listing.accountUrl}
+                    href={sanitizeSafeExternalHttpsUrl(listing.accountUrl)}
                     target="_blank"
                     rel="noopener noreferrer nofollow"
                     className="inline-flex items-center gap-1.5 text-sm font-bold underline break-all mt-0.5"
                     style={{ color: 'var(--orange)' }}
                   >
-                    <span>{listing.accountUrl}</span>
+                    <span>{sanitizeSafeExternalHttpsUrl(listing.accountUrl)}</span>
                     <ExternalLink className="w-3.5 h-3.5 shrink-0" />
                   </a>
                 </div>

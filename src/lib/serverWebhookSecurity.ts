@@ -29,6 +29,7 @@ export interface WebhookVerificationResult {
 
 const DEFAULT_MAX_SKEW_MS = 5 * 60 * 1000; // 5 minutes
 const REPLAY_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const MAX_REPLAY_CACHE_ENTRIES = 5000;
 
 export function computeWordPressWebhookSignatures(
   rawBody: string,
@@ -125,7 +126,7 @@ export function verifyWordPressWebhookRequest(
     };
   }
 
-  const cleanEventKey = String(input.eventKey || input.eventId || '').trim();
+  const cleanEventKey = String(input.eventKey || input.eventId || '').trim().slice(0, 160);
   if (cleanEventKey && input.replayCache) {
     for (const [key, seenAt] of input.replayCache.entries()) {
       if (nowMs - seenAt > REPLAY_TTL_MS) {
@@ -139,6 +140,11 @@ export function verifyWordPressWebhookRequest(
         code: 'replay_detected',
         reason: 'Duplicate or replayed webhook event ignored.',
       };
+    }
+    while (input.replayCache.size >= MAX_REPLAY_CACHE_ENTRIES) {
+      const oldestKey = input.replayCache.keys().next().value;
+      if (oldestKey === undefined) break;
+      input.replayCache.delete(oldestKey);
     }
     input.replayCache.set(cleanEventKey, nowMs);
   }

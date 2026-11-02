@@ -5,6 +5,7 @@ import {
   documentId,
   getDoc,
   getDocs,
+  limit,
   query,
   runTransaction,
   serverTimestamp,
@@ -414,7 +415,7 @@ export async function fanoutNewListingToFollowers(
 
   try {
     const followsSnap = await getDocs(
-      query(collection(db, 'sellerFollows'), where('sellerId', '==', listing.sellerId))
+      query(collection(db, 'sellerFollows'), where('sellerId', '==', listing.sellerId), limit(500))
     );
     if (followsSnap.empty) {
       return { notifiedCount: 0, skippedByPrefCount: 0 };

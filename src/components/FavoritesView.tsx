@@ -172,7 +172,7 @@ export const FavoritesView: React.FC<FavoritesViewProps> = ({
   };
 
   return (
-    <section className="bx-wrap py-8 space-y-6" aria-label="Saved Favorites">
+    <section className="bx-wrap-wide py-8 space-y-6" aria-label="Saved Favorites">
       {/* Header */}
       <div
         className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 pb-5 border-b"
@@ -254,7 +254,7 @@ export const FavoritesView: React.FC<FavoritesViewProps> = ({
         </div>
       ) : (
         <>
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 min-[1400px]:grid-cols-4 gap-5">
             {filteredItems.slice(0, visibleLimit).map((item) => {
               const platformDef = PLATFORM_CATALOG[item.platform];
               const hasImg = Boolean(item.thumbnailUrl && !failedImages[item.favoriteId]);

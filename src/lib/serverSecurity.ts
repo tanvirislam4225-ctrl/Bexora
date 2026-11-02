@@ -59,6 +59,7 @@ export interface CorsCsrfInput {
   method: string;
   path: string;
   originHeader?: string;
+  refererHeader?: string;
   hostHeader?: string;
   forwardedHostHeader?: string;
   secFetchSiteHeader?: string;
@@ -85,13 +86,30 @@ export function evaluateApiCorsAndCsrf(input: CorsCsrfInput): CorsCsrfDecision {
   const method = String(input.method || 'GET').toUpperCase();
   const path = String(input.path || '');
   const originRaw = String(input.originHeader || '').trim();
-  const effectiveHost =
-    normalizeHostValue(input.forwardedHostHeader) || normalizeHostValue(input.hostHeader);
+  const refererRaw = String(input.refererHeader || '').trim();
+  const primaryHost = normalizeHostValue(input.hostHeader);
   const allowlist = new Set(
     (input.allowedOrigins || [])
       .map((o) => o.trim().replace(/\/+$/, '').toLowerCase())
       .filter(Boolean)
   );
+  const allowlistHosts = new Set<string>();
+  for (const item of allowlist) {
+    try {
+      allowlistHosts.add(new URL(item).host.toLowerCase());
+    } catch {
+      // Ignore malformed configured origin entries
+    }
+  }
+
+  // Never trust an arbitrary client-supplied X-Forwarded-Host unless it matches Host or an explicitly allowlisted host
+  const candidateForwardedHost = normalizeHostValue(input.forwardedHostHeader);
+  const trustedForwardedHost =
+    candidateForwardedHost &&
+    (candidateForwardedHost === primaryHost || allowlistHosts.has(candidateForwardedHost))
+      ? candidateForwardedHost
+      : '';
+  const trustedHosts = new Set<string>([primaryHost, trustedForwardedHost].filter(Boolean));
 
   let originMatchesTrusted = false;
   let normalizedOrigin = '';
@@ -104,10 +122,7 @@ export function evaluateApiCorsAndCsrf(input: CorsCsrfInput): CorsCsrfDecision {
         const parsedOrigin = new URL(originRaw);
         normalizedOrigin = parsedOrigin.origin;
         const originHost = parsedOrigin.host.toLowerCase();
-        if (
-          (effectiveHost && originHost === effectiveHost) ||
-          allowlist.has(parsedOrigin.origin.toLowerCase())
-        ) {
+        if (trustedHosts.has(originHost) || allowlist.has(parsedOrigin.origin.toLowerCase())) {
           originMatchesTrusted = true;
         }
       } catch {
@@ -135,6 +150,27 @@ export function evaluateApiCorsAndCsrf(input: CorsCsrfInput): CorsCsrfDecision {
     return { allowed: true };
   }
 
+  // Fallback Referer origin validation when Origin header is omitted on state-changing requests
+  if (isMutating && !originRaw && refererRaw) {
+    try {
+      const parsedReferer = new URL(refererRaw);
+      const refHost = parsedReferer.host.toLowerCase();
+      if (!trustedHosts.has(refHost) && !allowlist.has(parsedReferer.origin.toLowerCase())) {
+        return {
+          allowed: false,
+          statusCode: 403,
+          errorCode: 'csrf_referer_mismatch',
+        };
+      }
+    } catch {
+      return {
+        allowed: false,
+        statusCode: 403,
+        errorCode: 'csrf_invalid_referer',
+      };
+    }
+  }
+
   const secFetchSite = String(input.secFetchSiteHeader || '').trim().toLowerCase();
   if (isMutating && !originRaw && secFetchSite === 'cross-site') {
     return {
@@ -148,6 +184,109 @@ export function evaluateApiCorsAndCsrf(input: CorsCsrfInput): CorsCsrfDecision {
     allowed: true,
     corsOriginToReflect: originMatchesTrusted ? normalizedOrigin : undefined,
   };
+}
+
+/**
+ * Extracts a spoof-resistant client IP key behind a single trusted ingress proxy (e.g. Cloud Run).
+ * Uses the rightmost valid IP appended by the ingress proxy in X-Forwarded-For rather than index [0],
+ * which can be forged by an unauthenticated caller to evade IP rate limiting.
+ */
+export function extractClientIpKey(params: {
+  xForwardedFor?: string;
+  reqIp?: string;
+  remoteAddress?: string;
+}): string {
+  const rawXff = String(params.xForwardedFor || '').trim();
+  if (rawXff) {
+    const hops = rawXff
+      .split(',')
+      .map((s) => s.trim().replace(/^::ffff:/i, ''))
+      .filter((s) => net.isIP(s) !== 0);
+    if (hops.length > 0) {
+      return hops[hops.length - 1]!;
+    }
+  }
+  const fallback = String(params.reqIp || params.remoteAddress || '')
+    .trim()
+    .replace(/^::ffff:/i, '');
+  return fallback && net.isIP(fallback) !== 0 ? fallback : fallback || 'anon';
+}
+
+/**
+ * Blocks direct HTTP access to server source files, security rule definitions, runtime state,
+ * dotfiles, source maps, build scripts, and internal archives across both dev and production servers.
+ */
+export function isBlockedSensitiveHttpPath(rawRequestPath: string): boolean {
+  let decoded = String(rawRequestPath || '').split('?')[0] || '/';
+  try {
+    decoded = decodeURIComponent(decoded);
+  } catch {
+    return true;
+  }
+  const normalized = decoded.replace(/\\/g, '/').toLowerCase();
+
+  if (normalized.includes('\0') || normalized.includes('..')) {
+    return true;
+  }
+  if (normalized.endsWith('.map')) {
+    return true;
+  }
+
+  // Allow Vite's dev-server pre-bundled dependency cache (/node_modules/.vite/deps/*)
+  if (normalized.startsWith('/node_modules/.vite/')) {
+    return false;
+  }
+
+  // Block hidden dotfiles/directories (/.env*, /.bexora-runtime/*, /.git*, /.htaccess, /.aistudio*, /.playwright-cli*)
+  // while preserving Vite's internal virtual module prefixes (/@vite/*, /@react-refresh, /@fs/*, /@id/*)
+  const segments = normalized.split('/').filter(Boolean);
+  for (const seg of segments) {
+    if (seg.startsWith('.')) {
+      return true;
+    }
+  }
+
+  // Block direct access to server code, security rules, lockfiles, and unauthenticated admin deployment zip
+  if (
+    normalized === '/server.ts' ||
+    normalized === '/server.js' ||
+    normalized.startsWith('/src/server/') ||
+    normalized === '/src/server' ||
+    normalized.startsWith('/scripts/') ||
+    normalized === '/scripts' ||
+    normalized === '/firestore.rules' ||
+    normalized.startsWith('/firestore.rules.') ||
+    normalized === '/storage.rules' ||
+    normalized === '/firebase-blueprint.json' ||
+    normalized === '/security_spec.md' ||
+    normalized === '/package.json' ||
+    normalized === '/package-lock.json' ||
+    normalized === '/bun.lock' ||
+    normalized === '/tsconfig.json' ||
+    normalized === '/vite.config.ts' ||
+    normalized === '/eslint.config.js' ||
+    normalized === '/bexora_infinityfree_production.zip'
+  ) {
+    return true;
+  }
+
+  // Also block Vite /@fs/ bypass attempts targeting any sensitive server/runtime/config file
+  if (normalized.startsWith('/@fs/')) {
+    if (
+      normalized.includes('/.env') ||
+      normalized.includes('/.bexora-runtime') ||
+      normalized.includes('/server.ts') ||
+      normalized.includes('/src/server/') ||
+      normalized.includes('/firestore.rules') ||
+      normalized.includes('/storage.rules') ||
+      normalized.includes('/scripts/') ||
+      normalized.includes('bexora_infinityfree_production.zip')
+    ) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 function parseIpv4Octets(ip: string): [number, number, number, number] | null {
@@ -453,13 +592,16 @@ export function sanitizeJsonPayload<T = unknown>(value: T, depth = 0): T {
 
 export function decodeJwtClaimsUnverified(
   idToken: string
-): { aud?: string; iss?: string; iat?: number; exp?: number; sub?: string } | null {
+): { alg?: string; aud?: string; iss?: string; iat?: number; exp?: number; sub?: string } | null {
   const parts = String(idToken || '').split('.');
-  if (parts.length !== 3) return null;
+  if (parts.length !== 3 || !parts[0] || !parts[1] || !parts[2]) return null;
   try {
-    const payloadJson = Buffer.from(parts[1]!, 'base64url').toString('utf8');
+    const headerJson = Buffer.from(parts[0], 'base64url').toString('utf8');
+    const payloadJson = Buffer.from(parts[1], 'base64url').toString('utf8');
+    const header = JSON.parse(headerJson) as Record<string, unknown>;
     const parsed = JSON.parse(payloadJson) as Record<string, unknown>;
     return {
+      alg: typeof header.alg === 'string' ? header.alg : undefined,
       aud: typeof parsed.aud === 'string' ? parsed.aud : undefined,
       iss: typeof parsed.iss === 'string' ? parsed.iss : undefined,
       iat: typeof parsed.iat === 'number' ? parsed.iat : undefined,
@@ -474,6 +616,7 @@ export function decodeJwtClaimsUnverified(
 export function isLookupAccountActiveAndUnrevoked(params: {
   idToken: string;
   expectedProjectId: string;
+  expectedUid?: string;
   disabled?: boolean;
   validSinceSecondsRaw?: string | number;
   nowSeconds?: number;
@@ -481,29 +624,36 @@ export function isLookupAccountActiveAndUnrevoked(params: {
   if (params.disabled === true) {
     return false;
   }
-  const claims = decodeJwtClaimsUnverified(params.idToken);
-  if (!claims) return false;
-  if (params.expectedProjectId && claims.aud && claims.aud !== params.expectedProjectId) {
+  const expectedProject = String(params.expectedProjectId || '').trim();
+  if (!expectedProject) {
     return false;
   }
-  if (
-    params.expectedProjectId &&
-    claims.iss &&
-    claims.iss !== `https://securetoken.google.com/${params.expectedProjectId}`
-  ) {
+  const claims = decodeJwtClaimsUnverified(params.idToken);
+  if (!claims) return false;
+  if (claims.alg !== 'RS256') {
+    return false;
+  }
+  if (!claims.aud || claims.aud !== expectedProject) {
+    return false;
+  }
+  if (!claims.iss || claims.iss !== `https://securetoken.google.com/${expectedProject}`) {
+    return false;
+  }
+  if (!claims.sub || claims.sub.length > 128) {
+    return false;
+  }
+  if (params.expectedUid && claims.sub !== params.expectedUid) {
     return false;
   }
   const nowSec = params.nowSeconds ?? Math.floor(Date.now() / 1000);
-  if (typeof claims.exp === 'number' && claims.exp < nowSec - 30) {
+  if (typeof claims.exp !== 'number' || !Number.isFinite(claims.exp) || claims.exp < nowSec - 30) {
+    return false;
+  }
+  if (typeof claims.iat !== 'number' || !Number.isFinite(claims.iat) || claims.iat > nowSec + 60) {
     return false;
   }
   const validSinceSec = Number(params.validSinceSecondsRaw || 0);
-  if (
-    Number.isFinite(validSinceSec) &&
-    validSinceSec > 0 &&
-    typeof claims.iat === 'number' &&
-    claims.iat < validSinceSec
-  ) {
+  if (Number.isFinite(validSinceSec) && validSinceSec > 0 && claims.iat < validSinceSec) {
     return false;
   }
   return true;

@@ -1842,6 +1842,123 @@ export function validateImageMagicBytes(bytes: Uint8Array): {
   };
 }
 
+/**
+ * Validates raw audio container magic bytes (WebM/EBML, Ogg, MP4/M4A ftyp, RIFF/WAVE, MP3/ID3)
+ * before encoding voice messages to base64 so arbitrary non-audio blobs cannot be stored as voice clips.
+ */
+export function validateAudioMagicBytes(bytes: Uint8Array): {
+  valid: boolean;
+  detectedMime?: 'audio/webm' | 'audio/ogg' | 'audio/mp4' | 'audio/wav' | 'audio/mpeg';
+  error?: string;
+} {
+  if (!(bytes instanceof Uint8Array) || bytes.length < 12) {
+    return {
+      valid: false,
+      error: 'Recorded audio clip is empty or corrupted.',
+    };
+  }
 
+  // WebM / Matroska EBML header: 1A 45 DF A3
+  if (bytes[0] === 0x1a && bytes[1] === 0x45 && bytes[2] === 0xdf && bytes[3] === 0xa3) {
+    return { valid: true, detectedMime: 'audio/webm' };
+  }
 
+  // Ogg container: "OggS" (4F 67 67 53)
+  if (bytes[0] === 0x4f && bytes[1] === 0x67 && bytes[2] === 0x67 && bytes[3] === 0x53) {
+    return { valid: true, detectedMime: 'audio/ogg' };
+  }
 
+  // ISO BMFF / MP4 / M4A: bytes 4..7 == "ftyp" (66 74 79 70)
+  if (bytes[4] === 0x66 && bytes[5] === 0x74 && bytes[6] === 0x79 && bytes[7] === 0x70) {
+    return { valid: true, detectedMime: 'audio/mp4' };
+  }
+
+  // WAV: "RIFF" (52 49 46 46) ... "WAVE" (57 41 56 45)
+  if (
+    bytes[0] === 0x52 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x46 &&
+    bytes[8] === 0x57 &&
+    bytes[9] === 0x41 &&
+    bytes[10] === 0x56 &&
+    bytes[11] === 0x45
+  ) {
+    return { valid: true, detectedMime: 'audio/wav' };
+  }
+
+  // MP3: "ID3" (49 44 33) or MPEG frame sync (FF FB / FF F3 / FF F2)
+  if (
+    (bytes[0] === 0x49 && bytes[1] === 0x44 && bytes[2] === 0x33) ||
+    (bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0)
+  ) {
+    return { valid: true, detectedMime: 'audio/mpeg' };
+  }
+
+  return {
+    valid: false,
+    error: 'Unsupported or invalid voice recording format.',
+  };
+}
+
+/**
+ * Ensures an external link uses strictly `https:` without embedded credentials or control characters.
+ * Blocks `javascript:`, `data:`, `vbscript:`, `file:`, and `http:` schemes at the UI rendering layer.
+ */
+export function sanitizeSafeExternalHttpsUrl(rawUrl: string | undefined | null): string {
+  const trimmed = String(rawUrl || '').trim();
+  if (!trimmed || trimmed.length > 500 || /[\u0000-\u001F\u007F]/.test(trimmed)) {
+    return '';
+  }
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== 'https:' || parsed.username || parsed.password) {
+      return '';
+    }
+    return parsed.toString();
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Ensures `<img src>` only renders safe `data:image/(jpeg|jpg|png|webp);base64,...`, `https://`,
+ * or curated local icon paths (`./icon.svg`, `/icon.svg`, `/bexora-logo.svg`).
+ * Rejects `data:image/svg+xml`, `data:text/html`, and `javascript:` URIs.
+ */
+export function sanitizeSafeImageSrc(rawSrc: string | undefined | null): string {
+  const trimmed = String(rawSrc || '').trim();
+  if (!trimmed || trimmed.length > 400_000 || /[\u0000-\u001F\u007F]/.test(trimmed)) {
+    return '';
+  }
+  if (
+    trimmed === './icon.svg' ||
+    trimmed === '/icon.svg' ||
+    trimmed === './bexora-logo.svg' ||
+    trimmed === '/bexora-logo.svg'
+  ) {
+    return trimmed;
+  }
+  if (/^data:image\/(?:jpeg|jpg|png|webp);base64,[A-Za-z0-9+/=\s]+$/i.test(trimmed)) {
+    return trimmed;
+  }
+  return sanitizeSafeExternalHttpsUrl(trimmed);
+}
+
+/**
+ * Ensures `<audio src>` only renders safe `data:audio/(webm|ogg|mp4|mpeg|wav)...;base64,...` payloads.
+ */
+export function sanitizeSafeAudioSrc(rawSrc: string | undefined | null): string {
+  const trimmed = String(rawSrc || '').trim();
+  if (!trimmed || trimmed.length > 400_000 || /[\u0000-\u001F\u007F]/.test(trimmed)) {
+    return '';
+  }
+  if (
+    /^data:audio\/(?:webm|ogg|mp4|mpeg|wav)(?:;[A-Za-z0-9=._\-]+)*;base64,[A-Za-z0-9+/=\s]+$/i.test(
+      trimmed
+    )
+  ) {
+    return trimmed;
+  }
+  return '';
+}

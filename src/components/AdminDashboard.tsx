@@ -85,6 +85,11 @@ import {
   publishAdminNotification,
 } from '../lib/notificationService';
 import {
+  buildSanitizedPayoutTickerPayload,
+  buildSanitizedSoldTickerPayload,
+  generateOpaquePublicActivityId,
+} from '../lib/activityTickerLogic';
+import {
   calculateCommission,
   calculateDisputeRefundBreakdown,
   DEFAULT_PUBLIC_SETTINGS,
@@ -556,6 +561,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               rejectionReason: wd.rejectionReason,
               reviewedBy: wd.reviewedBy,
               reviewedAtMs: wd.reviewedAtMs ? Number(wd.reviewedAtMs) : undefined,
+              publicActivityId: wd.publicActivityId ? String(wd.publicActivityId) : undefined,
               createdAtMs: wd.createdAt?.toMillis ? wd.createdAt.toMillis() : Date.now(),
             };
           });
@@ -614,6 +620,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               adminHoldNote: dl.adminHoldNote,
               settledAtMs: dl.settledAtMs ? Number(dl.settledAtMs) : undefined,
               refundedAtMs: dl.refundedAtMs ? Number(dl.refundedAtMs) : undefined,
+              publicActivityId: dl.publicActivityId ? String(dl.publicActivityId) : undefined,
               status: dl.status,
               createdAtMs: dl.createdAt?.toMillis ? dl.createdAt.toMillis() : Date.now(),
             };
@@ -743,6 +750,96 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       })
       .catch(() => setEvidenceDoc({ evidenceImages: [] }));
   }, [selectedListingId, allListings]);
+
+  // One-time idempotent backfill: project any historical settled deals or paid withdrawals
+  // missing `publicActivityId` into `/publicActivity` so live tickers reflect genuine history.
+  const backfilledActivityRef = React.useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const missingSold = deals.filter(
+      (d) =>
+        d.status === 'settled' &&
+        !d.publicActivityId &&
+        !backfilledActivityRef.current.has(`deal:${d.id}`)
+    );
+    const missingPayout = withdrawals.filter(
+      (w) =>
+        w.status === 'paid' &&
+        !w.publicActivityId &&
+        !backfilledActivityRef.current.has(`wd:${w.id}`)
+    );
+    if (missingSold.length === 0 && missingPayout.length === 0) return;
+
+    let cancelled = false;
+    (async () => {
+      for (const deal of missingSold.slice(0, 15)) {
+        if (cancelled) return;
+        backfilledActivityRef.current.add(`deal:${deal.id}`);
+        try {
+          const pubSnap = await getDoc(doc(db, 'publicProfiles', deal.sellerId));
+          const settledTs = deal.settledAtMs || deal.createdAtMs || Date.now();
+          const actId = generateOpaquePublicActivityId(settledTs);
+          const payload = buildSanitizedSoldTickerPayload({
+            deal: { ...deal, settledAtMs: settledTs },
+            sellerDisplayName: pubSnap.exists()
+              ? String(pubSnap.data()?.displayName || deal.sellerName || '')
+              : deal.sellerName,
+            sellerNidVerified: Boolean(pubSnap.exists() && pubSnap.data()?.nidVerified),
+            hidePublicActivityName: Boolean(
+              pubSnap.exists() && pubSnap.data()?.hidePublicActivityName
+            ),
+            nowMs: settledTs,
+          });
+          if (!payload) continue;
+          await setDoc(doc(db, 'publicActivity', actId), {
+            ...payload,
+            createdAt: serverTimestamp(),
+          });
+          await updateDoc(doc(db, 'deals', deal.id), {
+            publicActivityId: actId,
+            updatedAt: serverTimestamp(),
+          });
+        } catch {
+          // Non-fatal backfill skip
+        }
+      }
+
+      for (const wd of missingPayout.slice(0, 15)) {
+        if (cancelled) return;
+        backfilledActivityRef.current.add(`wd:${wd.id}`);
+        try {
+          const pubSnap = await getDoc(doc(db, 'publicProfiles', wd.userId));
+          const paidTs = wd.reviewedAtMs || wd.createdAtMs || Date.now();
+          const actId = generateOpaquePublicActivityId(paidTs);
+          const payload = buildSanitizedPayoutTickerPayload({
+            withdrawal: { ...wd, reviewedAtMs: paidTs },
+            userDisplayName: pubSnap.exists()
+              ? String(pubSnap.data()?.displayName || wd.userName || '')
+              : wd.userName,
+            userNidVerified: Boolean(pubSnap.exists() && pubSnap.data()?.nidVerified),
+            hidePublicActivityName: Boolean(
+              pubSnap.exists() && pubSnap.data()?.hidePublicActivityName
+            ),
+            nowMs: paidTs,
+          });
+          if (!payload) continue;
+          await setDoc(doc(db, 'publicActivity', actId), {
+            ...payload,
+            createdAt: serverTimestamp(),
+          });
+          await updateDoc(doc(db, 'withdrawals', wd.id), {
+            publicActivityId: actId,
+            updatedAt: serverTimestamp(),
+          });
+        } catch {
+          // Non-fatal backfill skip
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [deals, withdrawals]);
 
   // Real-time subscriptions for selected deal's 3-party room (reports, transfers, messages, audit events)
   useEffect(() => {
@@ -1313,10 +1410,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       await runTransaction(db, async (tx) => {
         const wdRef = doc(db, 'withdrawals', wd.id);
         const userRef = doc(db, 'privateUsers', wd.userId);
+        const pubRef = doc(db, 'publicProfiles', wd.userId);
         const ledgerRef = doc(collection(db, 'walletLedger'));
 
-        const wdSnap = await tx.get(wdRef);
-        const userSnap = await tx.get(userRef);
+        const [wdSnap, userSnap, pubSnap] = await Promise.all([
+          tx.get(wdRef),
+          tx.get(userRef),
+          tx.get(pubRef),
+        ]);
         if (!wdSnap.exists() || wdSnap.data().status !== 'pending') {
           throw new Error('Withdrawal has already been processed.');
         }
@@ -1325,15 +1426,40 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         const curAvail = Number(userSnap.data().walletBalanceMinor || 0);
         const curRes = Number(userSnap.data().reservedBalanceMinor || 0);
         const nextRes = Math.max(0, curRes - wd.amountMinor);
+        const reviewedNowMs = Date.now();
 
         if (markPaid) {
+          const actId = generateOpaquePublicActivityId(reviewedNowMs);
+          const payoutPayload = buildSanitizedPayoutTickerPayload({
+            withdrawal: {
+              ...wd,
+              status: 'paid',
+              reviewedAtMs: reviewedNowMs,
+            },
+            userDisplayName: pubSnap.exists()
+              ? String(pubSnap.data()?.displayName || wd.userName || '')
+              : wd.userName,
+            userNidVerified: Boolean(pubSnap.exists() && pubSnap.data()?.nidVerified),
+            hidePublicActivityName: Boolean(
+              pubSnap.exists() && pubSnap.data()?.hidePublicActivityName
+            ),
+            nowMs: reviewedNowMs,
+          });
+
           tx.update(wdRef, {
             status: 'paid',
             referenceId: cleanRef,
             reviewedBy: adminUid,
-            reviewedAtMs: Date.now(),
+            reviewedAtMs: reviewedNowMs,
+            ...(payoutPayload ? { publicActivityId: actId } : {}),
             updatedAt: serverTimestamp(),
           });
+          if (payoutPayload) {
+            tx.set(doc(db, 'publicActivity', actId), {
+              ...payoutPayload,
+              createdAt: serverTimestamp(),
+            });
+          }
           tx.update(userRef, {
             reservedBalanceMinor: nextRes,
             updatedAt: serverTimestamp(),
@@ -1898,14 +2024,40 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           });
         }
 
+        const settledNowMs = Date.now();
+        const actId = generateOpaquePublicActivityId(settledNowMs);
+        const soldPayload = buildSanitizedSoldTickerPayload({
+          deal: {
+            ...deal,
+            status: 'settled',
+            settledAtMs: settledNowMs,
+          },
+          sellerDisplayName: sPubSnap.exists()
+            ? String(sPubSnap.data()?.displayName || deal.sellerName || '')
+            : deal.sellerName,
+          sellerNidVerified: Boolean(sPubSnap.exists() && sPubSnap.data()?.nidVerified),
+          hidePublicActivityName: Boolean(
+            sPubSnap.exists() && sPubSnap.data()?.hidePublicActivityName
+          ),
+          nowMs: settledNowMs,
+        });
+
         tx.update(dealRef, {
           status: 'settled',
           unresolvedReportCount: 0,
           settlementLedgerId: ledgerId,
-          settledAtMs: Date.now(),
+          settledAtMs: settledNowMs,
           adminHoldNote: cleanNote,
+          ...(soldPayload ? { publicActivityId: actId } : {}),
           updatedAt: serverTimestamp(),
         });
+
+        if (soldPayload) {
+          tx.set(doc(db, 'publicActivity', actId), {
+            ...soldPayload,
+            createdAt: serverTimestamp(),
+          });
+        }
 
         const sellerPayoutWalletBdtMinor = convertOrderMinorToWalletBdtMinor(
           deal.sellerPayoutMinor,
@@ -2431,13 +2583,31 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const handleDownloadInfinityZip = async () => {
     setDownloadingInfinityZip(true);
     try {
+      const idToken = await auth.currentUser?.getIdToken();
+      if (!idToken) {
+        onFlash('Administrator authentication is required to download the deployment archive.');
+        return;
+      }
+      const resp = await fetch('/api/admin/deployment-archive', {
+        headers: { Authorization: `Bearer ${idToken}` },
+      });
+      if (!resp.ok) {
+        const errPayload = (await resp.json().catch(() => ({}))) as { error?: string };
+        onFlash(errPayload.error || `Archive download failed (HTTP ${resp.status}).`);
+        return;
+      }
+      const blob = await resp.blob();
+      const objectUrl = URL.createObjectURL(blob);
       const a = document.createElement('a');
-      a.href = '/BEXORA_INFINITYFREE_PRODUCTION.zip';
+      a.href = objectUrl;
       a.download = 'BEXORA_INFINITYFREE_PRODUCTION.zip';
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
-      onFlash('Downloading BEXORA_INFINITYFREE_PRODUCTION.zip deployment archive.');
+      URL.revokeObjectURL(objectUrl);
+      onFlash('Downloaded BEXORA_INFINITYFREE_PRODUCTION.zip deployment archive.');
+    } catch (err) {
+      onFlash(err instanceof Error ? err.message : 'Failed to download deployment archive.');
     } finally {
       setDownloadingInfinityZip(false);
     }
@@ -2643,14 +2813,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     Real-time Firebase Cloud Firestore telemetry — zero synthetic metrics.
                   </p>
                 </div>
-                <a
-                  href="/BEXORA_INFINITYFREE_PRODUCTION.zip"
-                  download="BEXORA_INFINITYFREE_PRODUCTION.zip"
+                <button
+                  type="button"
+                  disabled={downloadingInfinityZip}
+                  onClick={handleDownloadInfinityZip}
                   className="bx-btn bx-btn-primary px-4 py-2.5 text-xs font-extrabold inline-flex items-center gap-2"
                 >
                   <Download className="w-4 h-4" />
-                  Download InfinityFree ZIP
-                </a>
+                  {downloadingInfinityZip ? 'Preparing Archive…' : 'Download InfinityFree ZIP'}
+                </button>
               </div>
 
               <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 tabular-nums">

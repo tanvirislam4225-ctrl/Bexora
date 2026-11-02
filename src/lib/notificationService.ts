@@ -4,6 +4,8 @@ import {
   doc,
   getDoc,
   getDocs,
+  limit,
+  query,
   serverTimestamp,
   setDoc,
   updateDoc,
@@ -359,7 +361,7 @@ export async function publishAdminNotification(
 
   let recipientUids: string[] = [];
   try {
-    const profilesSnap = await getDocs(collection(db, 'publicProfiles'));
+    const profilesSnap = await getDocs(query(collection(db, 'publicProfiles'), limit(100)));
     recipientUids = profilesSnap.docs
       .map((d) => d.id)
       .filter((uid) => isValidFirestoreDocId(uid));

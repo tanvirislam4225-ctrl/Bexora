@@ -167,4 +167,54 @@ test('Firestore & Storage Rules Security Hardening: enforces atomic wallet debit
   assert.match(storageRules, /allow\s+delete:\s*if\s+false;/);
 });
 
+test('Firestore Rules: enforces HTTPS/raster/audio URI allowlists across all media arrays and prevents buyer/seller/admin role spoofing in chat & Deal Rooms', () => {
+  // Safe URI & media scheme helpers block javascript:, data:image/svg+xml, data:text/html, and http:
+  assert.match(rules, /function\s+isSafeHttpsOrEmptyUrl\(u,\s*maxLen\)/);
+  assert.match(rules, /function\s+isSafeImageOrHttpsNonEmpty\(s,\s*minLen,\s*maxLen\)/);
+  assert.match(rules, /function\s+isSafeChatMedia\(s,\s*maxLen\)/);
+  assert.match(rules, /isSafeHttpsOrEmptyUrl\(data\.accountUrl,\s*300\)/);
+  assert.match(rules, /isSafeImageOrHttpsNonEmpty\(data\.images\[4\],\s*12,\s*250000\)/);
+  assert.match(rules, /isSafeImageOrHttpsNonEmpty\(data\.evidenceImages\[4\],\s*12,\s*250000\)/);
+  assert.match(rules, /isSafeImageOrHttpsNonEmpty\(data\.screenshots\[2\],\s*30,\s*300000\)/);
 
+  // Anti-role-impersonation in conversations & deals subcollections
+  assert.match(
+    rules,
+    /incoming\(\)\.senderRole\s*==\s*'buyer'\s*&&\s*request\.auth\.uid\s*==\s*get\(\/databases\/\$\(database\)\/documents\/deals\/\$\(dealId\)\)\.data\.buyerId/
+  );
+  assert.match(
+    rules,
+    /incoming\(\)\.reporterRole\s*==\s*'buyer'\s*&&\s*request\.auth\.uid\s*==\s*get\(\/databases\/\$\(database\)\/documents\/deals\/\$\(dealId\)\)\.data\.buyerId/
+  );
+  assert.match(
+    rules,
+    /incoming\(\)\.actorRole\s*==\s*'buyer'\s*&&\s*request\.auth\.uid\s*==\s*get\(\/databases\/\$\(database\)\/documents\/deals\/\$\(dealId\)\)\.data\.buyerId/
+  );
+  assert.match(rules, /incoming\(\)\.actorRole\s+in\s+\['admin',\s*'system'\]\s*&&\s*isAdmin\(\)/);
+});
+
+test('Firestore Rules: enforces PII-free admin-only publicActivity projections, owner-only recentSearches with Master Gate, and verified 1x reviewReports', () => {
+  // 1. PublicActivity rejects PII/IDs via strict schema & restricts writes strictly to isAdmin()
+  assert.match(rules, /function\s+isValidPublicActivity\(data\)/);
+  assert.match(rules, /match\s+\/publicActivity\/\{activityId\}[\s\S]*?allow\s+create:\s*if\s+isAdmin\(\)/);
+  assert.doesNotMatch(
+    rules.slice(
+      rules.indexOf('function isValidPublicActivity'),
+      rules.indexOf('function isValidReviewReport')
+    ),
+    /payoutAccount|senderNumber|frontImageData|dealId|withdrawalId/
+  );
+
+  // 2. Owner-private recentSearches with parent privateUsers Master Gate and 0-lookup list rule
+  assert.match(rules, /function\s+isValidRecentSearch\(data,\s*uid\)/);
+  assert.match(rules, /match\s+\/recentSearches\/\{searchId\}[\s\S]*?request\.auth\.uid\s*==\s*userId/);
+
+  // 3. PublicProfile privacy opt-out toggle & Review abuse reports
+  assert.match(rules, /hidePublicActivityName/);
+  assert.match(rules, /function\s+isValidReviewReport\(data\)/);
+  assert.match(
+    rules,
+    /reportId\s*==\s*\('rrep_'\s*\+\s*incoming\(\)\.reviewId\s*\+\s*'_'\s*\+\s*request\.auth\.uid\)/
+  );
+  assert.match(rules, /moderationStatus/);
+});

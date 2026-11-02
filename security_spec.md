@@ -16,6 +16,9 @@
 12. **Atomic Escrow Wallet Debit & Fee Integrity**: Non-admin Buy Now (`create /deals/{dealId}`) and Accepted-Bid payment (`update /deals/{dealId}`) enforce configured platform fee percentages, exact `buyerFeeMinor`/`sellerFeeMinor` rounding, listing transition to `sold`, deterministic ledger creation `led_pay_{dealId}`, and verified deduction of `buyerTotalMinor` (converted to BDT minor units for USD deals) from `privateUsers/{buyerId}.walletBalanceMinor`.
 13. **Atomic Withdrawal Balance Reservation**: Creating `/withdrawals/{withdrawalId}` enforces `currency == 'BDT'`, deterministic ledger creation `led_wd_{withdrawalId}`, exact deduction from `privateUsers/{userId}.walletBalanceMinor`, and equal increment of `reservedBalanceMinor`.
 14. **Single-Review Atomic Rating Synchronization**: `/reviews/{reviewId}` enforces deterministic ID `rev_{dealId}` on a `settled` deal, and `/publicProfiles/{sellerId}` rating updates require non-self caller + atomic creation of `reviews/rev_{lastReviewDealId}` with exact score delta.
+15. **Sanitized Admin-Only Public Activity Projection**: `/publicActivity/{activityId}` uses opaque IDs (`act_<ts>_<rand>`), rejects all PII or internal transaction IDs (`uid`, `email`, `phone`, `payoutAccount`, `dealId`, `withdrawalId`), and restricts `create`, `update`, and `delete` strictly to `isAdmin()`.
+16. **Strictly Owner-Private Recent Searches**: `/privateUsers/{userId}/recentSearches/{searchId}` enforces `request.auth.uid == userId` + parent `exists(/databases/$(database)/documents/privateUsers/$(userId))` Master Gate on `get`, `list`, `create`, `update`, and `delete` (even admins cannot snoop user search history).
+17. **Verified Single-Report Review Abuse Governance**: `/reviewReports/{reportId}` requires `email_verified == true`, deterministic ID `rrep_${reviewId}_${request.auth.uid}`, verified existence of `/reviews/{reviewId}`, and restricts listing/moderation strictly to `isAdmin()`.
 
 ## 2. The "Dirty Dozen" Adversarial Payloads
 
@@ -52,5 +55,7 @@
 31. **Zero-Reservation Withdrawal Spam**: User creates `/withdrawals/W1` without deducting `walletBalanceMinor` and reserving `reservedBalanceMinor` -> `PERMISSION_DENIED` (`led_wd_{withdrawalId}` + exact balance reservation enforced).
 32. **Unverified Seller Rating Inflation / Sabotage**: Attacker increments `publicProfiles/seller1.ratingCount` and `ratingSum` without creating a settled-deal review -> `PERMISSION_DENIED` (`!exists` + `existsAfter` on `reviews/rev_{lastReviewDealId}` with exact score delta enforced).
 33. **Duplicate Review Spam on Single Settled Deal**: Buyer posts multiple reviews for the same settled `dealId` -> `PERMISSION_DENIED` (deterministic `reviewId == 'rev_' + incoming().dealId` enforced).
-
-
+34. **Fake Sold / Payout Ticker Injection**: Non-admin user attempts `POST /publicActivity/act_fake` -> `PERMISSION_DENIED` (`isAdmin()` strictly required on all writes).
+35. **PII Leak in Public Activity Ticker**: Admin or script attempts `POST /publicActivity/act_1` with `{ ..., payoutAccount: "017...", dealId: "d1" }` -> `PERMISSION_DENIED` (`hasOnly` rejects unlisted fields).
+36. **Cross-User Recent Search Snooping**: Authenticated user or admin attempts `LIST /privateUsers/victim/recentSearches` -> `PERMISSION_DENIED` (`request.auth.uid == userId` + `resource.data.uid == request.auth.uid` strictly enforced).
+37. **Duplicate or Unverified Review Report Spam**: Unverified user or attacker submits multiple `/reviewReports` for one review -> `PERMISSION_DENIED` (`email_verified == true` and deterministic `rrep_${reviewId}_${request.auth.uid}` enforced).
