@@ -12,7 +12,9 @@ import {
 } from 'firebase/firestore';
 import {
   ArrowLeft,
+  Flag,
   ImagePlus,
+  Lock,
   MessageSquare,
   Mic,
   Send,
@@ -27,6 +29,14 @@ import {
   sanitizeSafeImageSrc,
   validateAudioMagicBytes,
 } from '../lib/marketplaceLogic';
+import { PAUSED_CONVERSATION_NOTICE } from '../lib/moderationEngine';
+import {
+  inspectMediaClient,
+  inspectTextClient,
+  stripDataUrlPrefix,
+  type ReportModalTarget,
+} from '../lib/moderationClient';
+import { emitUserNotification } from '../lib/notificationService';
 
 interface ChatViewProps {
   userUid: string | null;
@@ -34,6 +44,7 @@ interface ChatViewProps {
   conversations: ConversationRecord[];
   initialConvId: string | null;
   onRequireAuth: () => void;
+  onReportConversation?: (target: ReportModalTarget) => void;
   onFlash: (msg: string) => void;
 }
 
@@ -43,6 +54,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   conversations,
   initialConvId,
   onRequireAuth,
+  onReportConversation,
   onFlash,
 }) => {
   const [selectedId, setSelectedId] = useState<string | null>(initialConvId);
@@ -51,6 +63,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const [warning, setWarning] = useState('');
   const [sending, setSending] = useState(false);
   const [recording, setRecording] = useState(false);
+  const [locallyPausedConvIds, setLocallyPausedConvIds] = useState<Record<string, string>>({});
 
   const imgInputRef = useRef<HTMLInputElement | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -131,8 +144,19 @@ export const ChatView: React.FC<ChatViewProps> = ({
     }
   };
 
+  const isPausedForModeration = Boolean(
+    activeConv && (activeConv.moderationPaused || locallyPausedConvIds[activeConv.id])
+  );
+  const pauseNoticeText =
+    (activeConv && (locallyPausedConvIds[activeConv.id] || activeConv.moderationPauseReason)) ||
+    PAUSED_CONVERSATION_NOTICE;
+
   const sendPayload = async (kind: 'text' | 'image' | 'voice', bodyText: string, mediaData?: string) => {
     if (!activeConv) return;
+    if (isPausedForModeration) {
+      setWarning('Messaging is temporarily paused while BEXORA reviews this conversation.');
+      return;
+    }
     setWarning('');
     const check = detectSensitiveOrOffPlatformContent(bodyText);
     if (check.blocked) {
@@ -142,6 +166,73 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
     setSending(true);
     try {
+      const counterpartyId = isBuyerInConv ? activeConv.sellerId : activeConv.buyerId;
+      const counterpartyName = isBuyerInConv ? activeConv.sellerName : activeConv.buyerName;
+
+      if (kind === 'text') {
+        const modRes = await inspectTextClient({
+          surface: 'pre_deal_chat',
+          callerName: profile.displayName,
+          text: bodyText,
+          conversationId: activeConv.id,
+          listingId: activeConv.listingId,
+          counterpartyId,
+          counterpartyName,
+        });
+        if (modRes.conversationPaused) {
+          setLocallyPausedConvIds((prev) => ({
+            ...prev,
+            [activeConv.id]: modRes.pauseNotice || PAUSED_CONVERSATION_NOTICE,
+          }));
+          return;
+        }
+        if (!modRes.allowed) {
+          setWarning(
+            `${modRes.userNoticeTitle ? `${modRes.userNoticeTitle}: ` : ''}${
+              modRes.userNoticeMessage || 'Message blocked by BEXORA Trust & Safety.'
+            }`
+          );
+          return;
+        }
+      } else if ((kind === 'image' || kind === 'voice') && mediaData) {
+        const parsedMedia = stripDataUrlPrefix(mediaData);
+        if (parsedMedia) {
+          const modMedia = await inspectMediaClient({
+            surface: 'pre_deal_chat',
+            callerName: profile.displayName,
+            items: [
+              {
+                id: `chat_${kind}_${Date.now()}`,
+                kind: kind === 'voice' ? 'audio' : 'image',
+                mimeType: parsedMedia.mimeType,
+                base64Data: parsedMedia.base64Data,
+              },
+            ],
+            conversationId: activeConv.id,
+            listingId: activeConv.listingId,
+          });
+          if (modMedia.conversationPaused) {
+            setLocallyPausedConvIds((prev) => ({
+              ...prev,
+              [activeConv.id]: modMedia.pauseNotice || PAUSED_CONVERSATION_NOTICE,
+            }));
+            return;
+          }
+          if (
+            !modMedia.allowed ||
+            modMedia.mediaScanStatus === 'blocked' ||
+            modMedia.mediaScanStatus === 'quarantined'
+          ) {
+            setWarning(
+              `${modMedia.userNoticeTitle ? `${modMedia.userNoticeTitle}: ` : ''}${
+                modMedia.userNoticeMessage || 'Attachment blocked by BEXORA Trust & Safety.'
+              }`
+            );
+            return;
+          }
+        }
+      }
+
       const msgPayload: Record<string, unknown> = {
         senderId: userUid,
         senderName: profile.displayName,
@@ -151,7 +242,16 @@ export const ChatView: React.FC<ChatViewProps> = ({
       };
       if (mediaData) msgPayload.mediaData = mediaData;
 
-      await addDoc(collection(db, 'conversations', activeConv.id, 'messages'), msgPayload);
+      const msgRef = await addDoc(
+        collection(db, 'conversations', activeConv.id, 'messages'),
+        msgPayload
+      );
+      const summaryPreview =
+        kind === 'image'
+          ? 'Sent an image attachment in pre-deal chat.'
+          : kind === 'voice'
+          ? 'Sent a voice message in pre-deal chat.'
+          : bodyText.trim().slice(0, 140);
       await updateDoc(doc(db, 'conversations', activeConv.id), {
         lastMessage:
           kind === 'image'
@@ -161,6 +261,23 @@ export const ChatView: React.FC<ChatViewProps> = ({
             : bodyText.slice(0, 200),
         updatedAt: serverTimestamp(),
       });
+      if (counterpartyId && counterpartyId !== userUid) {
+        void emitUserNotification({
+          recipientId: counterpartyId,
+          actorId: userUid,
+          actorRole: 'user',
+          eventKey: `chat_msg_${msgRef.id}`,
+          category: 'deal',
+          severity: 'info',
+          title: `New Message from ${profile.displayName}`,
+          preview: summaryPreview,
+          body: `${profile.displayName} sent a message regarding "${activeConv.listingTitle || 'Marketplace Listing'}":\n\n${summaryPreview}`,
+          refType: 'conversation',
+          refId: activeConv.id,
+          referenceLabel: (activeConv.listingTitle || 'Pre-Deal Messenger').slice(0, 80),
+          destination: `chat:${activeConv.id}`,
+        });
+      }
       if (kind === 'text') setText('');
     } catch (err) {
       setWarning(err instanceof Error ? err.message : 'Could not send message.');
@@ -306,23 +423,47 @@ export const ChatView: React.FC<ChatViewProps> = ({
           ) : (
             <>
               <div
-                className="p-4 border-b flex items-center gap-3"
+                className="p-4 border-b flex items-center justify-between gap-3"
                 style={{ borderColor: 'var(--border-soft)' }}
               >
-                <button
-                  type="button"
-                  onClick={() => setSelectedId(null)}
-                  className="bx-icon-btn !w-9 !h-9 lg:hidden"
-                  aria-label="Back to conversations"
-                >
-                  <ArrowLeft className="w-4 h-4" />
-                </button>
-                <div className="min-w-0">
-                  <h3 className="font-extrabold text-sm truncate">
-                    {activeConv.buyerId === userUid ? activeConv.sellerName : activeConv.buyerName}
-                  </h3>
-                  <p className="bx-hint truncate">Asset: {activeConv.listingTitle}</p>
+                <div className="flex items-center gap-3 min-w-0">
+                  <button
+                    type="button"
+                    onClick={() => setSelectedId(null)}
+                    className="bx-icon-btn !w-9 !h-9 lg:hidden"
+                    aria-label="Back to conversations"
+                  >
+                    <ArrowLeft className="w-4 h-4" />
+                  </button>
+                  <div className="min-w-0">
+                    <h3 className="font-extrabold text-sm truncate">
+                      {activeConv.buyerId === userUid ? activeConv.sellerName : activeConv.buyerName}
+                    </h3>
+                    <p className="bx-hint truncate">Asset: {activeConv.listingTitle}</p>
+                  </div>
                 </div>
+                {onReportConversation && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      onReportConversation({
+                        reportedUserId:
+                          activeConv.buyerId === userUid ? activeConv.sellerId : activeConv.buyerId,
+                        reportedUserName:
+                          activeConv.buyerId === userUid ? activeConv.sellerName : activeConv.buyerName,
+                        surface: 'pre_deal_chat',
+                        conversationId: activeConv.id,
+                        listingId: activeConv.listingId,
+                        listingTitle: activeConv.listingTitle,
+                      })
+                    }
+                    aria-label="Report conversation participant"
+                    className="bx-btn bx-btn-ghost px-3 py-1.5 text-xs font-extrabold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                  >
+                    <Flag className="w-3.5 h-3.5 text-rose-600 dark:text-rose-400" />
+                    <span>Report</span>
+                  </button>
+                )}
               </div>
 
               {/* Mandatory First-Message Safety Notice */}
@@ -398,6 +539,19 @@ export const ChatView: React.FC<ChatViewProps> = ({
                     })}
                   </div>
 
+                  {isPausedForModeration && (
+                    <div
+                      className="mx-4 mb-2 p-3.5 rounded-xl border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 text-amber-950 dark:text-amber-100 text-xs space-y-1.5"
+                      role="status"
+                    >
+                      <div className="flex items-center gap-1.5 font-extrabold">
+                        <Lock className="w-3.5 h-3.5 shrink-0" />
+                        <span>Safety Review Hold</span>
+                      </div>
+                      <p className="whitespace-pre-line leading-relaxed">{pauseNoticeText}</p>
+                    </div>
+                  )}
+
                   {warning && (
                     <div
                       className="mx-4 mb-2 p-2.5 rounded-xl text-xs font-bold"
@@ -416,11 +570,13 @@ export const ChatView: React.FC<ChatViewProps> = ({
                       ref={imgInputRef}
                       type="file"
                       accept="image/jpeg,image/png,image/webp"
+                      disabled={isPausedForModeration || sending}
                       onChange={(e) => handleImageAttachment(e.target.files)}
                       className="hidden"
                     />
                     <button
                       type="button"
+                      disabled={isPausedForModeration || sending}
                       onClick={() => imgInputRef.current?.click()}
                       className="bx-icon-btn !w-10 !h-10"
                       aria-label="Send image message"
@@ -431,6 +587,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
                     <button
                       type="button"
+                      disabled={isPausedForModeration || sending}
                       onClick={toggleVoiceRecording}
                       className="bx-icon-btn !w-10 !h-10"
                       style={recording ? { background: 'var(--red)', color: '#fff' } : {}}
@@ -442,24 +599,29 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
                     <input
                       type="text"
+                      disabled={isPausedForModeration}
                       value={text}
                       onChange={(e) => {
                         setText(e.target.value);
                         setWarning('');
                       }}
                       onKeyDown={(e) => {
-                        if (e.key === 'Enter' && text.trim() && !sending) {
+                        if (e.key === 'Enter' && text.trim() && !sending && !isPausedForModeration) {
                           e.preventDefault();
                           sendPayload('text', text.trim());
                         }
                       }}
-                      placeholder="Write a message…"
+                      placeholder={
+                        isPausedForModeration
+                          ? 'Conversation paused pending administrator review…'
+                          : 'Write a message…'
+                      }
                       className="bx-input flex-1 !min-h-[40px]"
                     />
 
                     <button
                       type="button"
-                      disabled={!text.trim() || sending}
+                      disabled={!text.trim() || sending || isPausedForModeration}
                       onClick={() => sendPayload('text', text.trim())}
                       className="bx-btn bx-btn-primary !min-h-[40px] !px-3.5"
                       aria-label="Send message"

@@ -557,48 +557,183 @@ export function detectBrowserPushEnvironment(
   };
 }
 
-// --- Client-Side Audio Autoplay Unlock, Sound Playback & Vibration Dispatcher ---
+// --- Client-Side Audio Autoplay Unlock, Web Audio Buffer Preloading & Vibration Dispatcher ---
 
 let audioUnlockedByGesture = false;
 let unlockListenersAttached = false;
+let sharedAudioContext: AudioContext | null = null;
+let preloadStarted = false;
+const decodedBufferCache = new Map<NotificationSoundId, AudioBuffer>();
 const audioCache = new Map<NotificationSoundId, HTMLAudioElement>();
 let lastSoundPlayedAtMs = 0;
+
+function getOrCreateAudioContext(): AudioContext | null {
+  if (typeof window === 'undefined') return null;
+  if (sharedAudioContext && sharedAudioContext.state !== 'closed') {
+    return sharedAudioContext;
+  }
+  const AudioCtx =
+    window.AudioContext ||
+    (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  if (!AudioCtx) return null;
+  try {
+    sharedAudioContext = new AudioCtx();
+    return sharedAudioContext;
+  } catch {
+    return null;
+  }
+}
+
+function preloadNotificationSoundBuffers(ctx: AudioContext): void {
+  if (preloadStarted || typeof fetch !== 'function') return;
+  preloadStarted = true;
+  for (const entry of NOTIFICATION_SOUND_CATALOG) {
+    void fetch(entry.path)
+      .then((res) => (res.ok ? res.arrayBuffer() : null))
+      .then((arr) => (arr ? ctx.decodeAudioData(arr.slice(0)) : null))
+      .then((decoded) => {
+        if (decoded) {
+          decodedBufferCache.set(entry.id, decoded);
+        }
+      })
+      .catch(() => {
+        // Fallback to synthesized chime / HTMLAudioElement if fetch fails offline
+      });
+  }
+}
+
+function unlockWebAudioFromUserGesture(): void {
+  audioUnlockedByGesture = true;
+  const ctx = getOrCreateAudioContext();
+  if (!ctx) return;
+
+  try {
+    if (ctx.state === 'suspended') {
+      void ctx.resume().catch(() => {});
+    }
+    // Play a 1-frame silent buffer inside the valid user activation to permanently unlock Web Audio in Safari/Chrome/Firefox
+    const silentBuffer = ctx.createBuffer(1, 1, 22050);
+    const source = ctx.createBufferSource();
+    source.buffer = silentBuffer;
+    source.connect(ctx.destination);
+    source.start(0);
+    preloadNotificationSoundBuffers(ctx);
+  } catch {
+    // Non-fatal
+  }
+}
 
 export function attachAudioUnlockListeners(): void {
   if (unlockListenersAttached || typeof window === 'undefined') return;
   unlockListenersAttached = true;
 
-  const markUnlocked = () => {
-    audioUnlockedByGesture = true;
-    window.removeEventListener('pointerdown', markUnlocked, true);
-    window.removeEventListener('keydown', markUnlocked, true);
+  const handleUserActivation = () => {
+    unlockWebAudioFromUserGesture();
+    if (sharedAudioContext && sharedAudioContext.state === 'running') {
+      window.removeEventListener('click', handleUserActivation, true);
+      window.removeEventListener('touchend', handleUserActivation, true);
+      window.removeEventListener('keydown', handleUserActivation, true);
+      window.removeEventListener('pointerdown', handleUserActivation, true);
+    }
   };
 
-  window.addEventListener('pointerdown', markUnlocked, true);
-  window.addEventListener('keydown', markUnlocked, true);
+  window.addEventListener('click', handleUserActivation, true);
+  window.addEventListener('touchend', handleUserActivation, true);
+  window.addEventListener('keydown', handleUserActivation, true);
+  window.addEventListener('pointerdown', handleUserActivation, true);
 }
 
 export function isAudioGestureUnlocked(): boolean {
   return audioUnlockedByGesture;
 }
 
+function playSynthesizedWebAudioChime(ctx: AudioContext, soundId: NotificationSoundId): boolean {
+  try {
+    const nowSec = ctx.currentTime;
+    const isDealOrUrgent = soundId === '03_premium_deal' || soundId === '04_urgent_deal';
+    const notes = isDealOrUrgent ? [587.33, 783.99, 1046.5] : [659.25, 880.0];
+    const stepSec = isDealOrUrgent ? 0.085 : 0.075;
+    const peakGain = isDealOrUrgent ? 0.16 : 0.12;
+
+    notes.forEach((freq, idx) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq, nowSec + idx * stepSec);
+      gain.gain.setValueAtTime(0.0001, nowSec + idx * stepSec);
+      gain.gain.exponentialRampToValueAtTime(peakGain, nowSec + idx * stepSec + 0.015);
+      gain.gain.exponentialRampToValueAtTime(0.0001, nowSec + idx * stepSec + 0.22);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(nowSec + idx * stepSec);
+      osc.stop(nowSec + idx * stepSec + 0.24);
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function playNotificationSoundById(
   soundId: NotificationSoundId,
   options?: { isManualPreview?: boolean }
 ): Promise<{ played: boolean; reason?: string }> {
-  if (typeof window === 'undefined' || typeof Audio === 'undefined') {
+  if (typeof window === 'undefined') {
     return { played: false, reason: 'audio_unavailable' };
   }
 
   const isPreview = Boolean(options?.isManualPreview);
   if (isPreview) {
-    audioUnlockedByGesture = true;
+    unlockWebAudioFromUserGesture();
   }
 
   // Throttle automatic notifications to at most 1 chime per 900ms to prevent overlap bursts
   const now = Date.now();
   if (!isPreview && now - lastSoundPlayedAtMs < 900) {
     return { played: false, reason: 'throttled' };
+  }
+
+  const targetVolume =
+    soundId === '03_premium_deal' || soundId === '04_urgent_deal' ? 0.88 : 0.75;
+
+  // 1. Primary path: Unlocked Web Audio API + pre-decoded WAV AudioBuffer (immune to async snapshot autoplay rejections)
+  const ctx = getOrCreateAudioContext();
+  if (ctx && (audioUnlockedByGesture || isPreview)) {
+    try {
+      if (ctx.state === 'suspended') {
+        await ctx.resume().catch(() => {});
+      }
+      preloadNotificationSoundBuffers(ctx);
+      if (ctx.state === 'running') {
+        const decoded = decodedBufferCache.get(soundId);
+        if (decoded) {
+          const src = ctx.createBufferSource();
+          const gainNode = ctx.createGain();
+          src.buffer = decoded;
+          gainNode.gain.value = targetVolume;
+          src.connect(gainNode);
+          gainNode.connect(ctx.destination);
+          src.start(0);
+          lastSoundPlayedAtMs = now;
+          return { played: true };
+        }
+        // Decoded buffer still loading on very first notification: play crisp Web Audio chime immediately
+        if (playSynthesizedWebAudioChime(ctx, soundId)) {
+          lastSoundPlayedAtMs = now;
+          return { played: true };
+        }
+      }
+    } catch {
+      // Fall through to HTMLAudioElement fallback
+    }
+  }
+
+  // 2. Fallback path: HTML5 Audio element
+  if (typeof Audio === 'undefined') {
+    return {
+      played: false,
+      reason: audioUnlockedByGesture ? 'audio_unavailable' : 'autoplay_gesture_required',
+    };
   }
 
   try {
@@ -611,7 +746,7 @@ export async function playNotificationSoundById(
     }
     audioEl.pause();
     audioEl.currentTime = 0;
-    audioEl.volume = soundId === '03_premium_deal' || soundId === '04_urgent_deal' ? 0.88 : 0.72;
+    audioEl.volume = targetVolume;
     await audioEl.play();
     lastSoundPlayedAtMs = now;
     audioUnlockedByGesture = true;
@@ -639,17 +774,20 @@ export function triggerDealRoomVibration(prefs: UserNotificationPreferences): bo
 
 export async function dispatchForegroundNotificationAlert(
   alertKind: NotificationAlertKind,
-  prefs: UserNotificationPreferences
+  prefs?: Partial<UserNotificationPreferences> | null
 ): Promise<{ soundPlayed: boolean; vibrated: boolean }> {
-  const selection = selectSoundForAlertKind(alertKind, prefs);
+  // Always keep foreground sound active in the unified Inbox system so legacy stored flags cannot silently mute chimes
+  const effectivePrefs: UserNotificationPreferences = {
+    ...normalizeNotificationPreferences(prefs),
+    inAppSoundEnabled: true,
+    dealAlertSoundEnabled: true,
+    adminAlertSoundEnabled: true,
+  };
+  const selection = selectSoundForAlertKind(alertKind, effectivePrefs);
   let vibrated = false;
   if (selection.shouldVibrate && alertKind === 'deal_room_created') {
-    vibrated = triggerDealRoomVibration(prefs);
+    vibrated = triggerDealRoomVibration(effectivePrefs);
   }
-  let soundPlayed = false;
-  if (selection.enabled) {
-    const res = await playNotificationSoundById(selection.soundId);
-    soundPlayed = res.played;
-  }
-  return { soundPlayed, vibrated };
+  const res = await playNotificationSoundById(selection.soundId);
+  return { soundPlayed: res.played, vibrated };
 }

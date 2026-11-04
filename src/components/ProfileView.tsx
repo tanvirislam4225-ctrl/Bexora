@@ -1,10 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
-  ConfirmationResult,
   EmailAuthProvider,
-  linkWithPhoneNumber,
   reauthenticateWithCredential,
-  RecaptchaVerifier,
   updatePassword,
   updateProfile,
 } from 'firebase/auth';
@@ -28,12 +25,15 @@ import {
   Camera,
   CheckCircle2,
   Clock,
+  Edit3,
   Eye,
   EyeOff,
   FileCheck2,
+  Flag,
   Gavel,
   Heart,
   KeyRound,
+  LogOut,
   Mail,
   MapPin,
   MessageSquare,
@@ -42,6 +42,7 @@ import {
   ShieldAlert,
   ShieldCheck,
   Star,
+  Trash2,
   Upload,
   UserCheck,
   UserPlus,
@@ -63,7 +64,6 @@ import {
 import {
   auth,
   db,
-  detectFirebaseAuthCapabilities,
   extractUserFacingFirestoreError,
   formatFirebaseAuthError,
   safeRefreshCurrentUserToken,
@@ -83,8 +83,24 @@ import {
 } from '../lib/marketplaceLogic';
 import { resolveSellerFollowerCount } from '../lib/engagementLogic';
 import type { FollowTargetSellerSummary } from '../lib/engagementService';
+import type { CountryCode } from 'libphonenumber-js';
 import { ListingCard } from './ListingCard';
+import { DeleteListingModal } from './DeleteListingModal';
+import { PhoneCountryInput } from './PhoneCountryInput';
+import { canSellerEditListingStatus } from '../lib/listingAndBidManagementLogic';
+import {
+  getSupportedCountryMeta,
+  resolvePhoneFormatValidationUiState,
+  splitSavedPhoneForCountryInput,
+  validateAndNormalizePhone,
+} from '../lib/phoneValidation';
 import { emitUserNotification } from '../lib/notificationService';
+import {
+  inspectMediaClient,
+  inspectTextClient,
+  stripDataUrlPrefix,
+  type ReportModalTarget,
+} from '../lib/moderationClient';
 
 interface OwnerProfileProps {
   mode: 'owner';
@@ -113,6 +129,9 @@ interface OwnerProfileProps {
   onOpenNotificationCenter?: () => void;
   onOpenWallet: () => void;
   onOpenPublicSelf: () => void;
+  onOpenSafetyAndAppeals?: () => void;
+  onLogout?: () => Promise<void>;
+  signingOut?: boolean;
   onAuthTokenRefreshed?: () => Promise<void> | void;
   onFlash: (msg: string) => void;
   initialTab?: 'overview' | 'listings' | 'bids' | 'reviews' | 'settings' | 'edit' | 'password' | 'nid';
@@ -131,6 +150,7 @@ interface VisitorProfileProps {
   onBack: () => void;
   onOpenListing: (l: MarketplaceListing) => void;
   onMessageSeller: (sellerUid: string, sellerName: string, listing?: MarketplaceListing) => void;
+  onReportUser?: (target: ReportModalTarget) => void;
 }
 
 export type ProfileViewProps = OwnerProfileProps | VisitorProfileProps;
@@ -154,6 +174,7 @@ const VisitorProfileSection: React.FC<VisitorProfileProps> = ({
   onBack,
   onOpenListing,
   onMessageSeller,
+  onReportUser,
 }) => {
   const [pubProfile, setPubProfile] = useState<PublicProfile | null>(null);
   const [sellerListings, setSellerListings] = useState<MarketplaceListing[]>([]);
@@ -414,6 +435,25 @@ const VisitorProfileSection: React.FC<VisitorProfileProps> = ({
                 <MessageSquare className="w-4 h-4 text-[#FF6500]" />
                 <span>Message Seller</span>
               </button>
+              {onReportUser && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    onReportUser({
+                      reportedUserId: pubProfile.uid,
+                      reportedUserName: pubProfile.displayName || `@${pubProfile.username}`,
+                      surface: 'public_profile',
+                      listingId: sellerListings[0]?.id,
+                      listingTitle: sellerListings[0]?.title,
+                    })
+                  }
+                  aria-label={`Report user ${pubProfile.displayName}`}
+                  className="bx-btn bx-btn-ghost px-3.5 py-2.5 text-sm font-extrabold inline-flex items-center gap-1.5 whitespace-nowrap"
+                >
+                  <Flag className="w-4 h-4 text-rose-600 dark:text-rose-400" />
+                  <span>Report User</span>
+                </button>
+              )}
             </div>
           )}
         </div>
@@ -459,7 +499,7 @@ const VisitorProfileSection: React.FC<VisitorProfileProps> = ({
             <p className="text-sm font-bold opacity-75">No active public listings from this seller yet.</p>
           </div>
         ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 min-[1400px]:grid-cols-4 gap-5">
+          <div className="bx-listing-grid">
             {sellerListings.map((item) => (
               <ListingCard
                 key={item.id}
@@ -531,6 +571,9 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
   onOpenNotificationCenter,
   onOpenWallet,
   onOpenPublicSelf,
+  onOpenSafetyAndAppeals,
+  onLogout,
+  signingOut = false,
   onAuthTokenRefreshed,
   onFlash,
   initialTab,
@@ -560,24 +603,37 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
   const [profileErr, setProfileErr] = useState('');
   const avatarInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Account Settings (Email & Phone Verification)
+  // Listing Deletion Modal & Smooth Collapse State
+  const [deleteTargetListing, setDeleteTargetListing] = useState<MarketplaceListing | null>(null);
+  const [collapsingListingId, setCollapsingListingId] = useState<string | null>(null);
+  const [hiddenDeletedIds, setHiddenDeletedIds] = useState<Set<string>>(() => new Set());
+
+  // Account Settings (Email Verification & International Phone Validation)
+  const initialPhoneSplit = splitSavedPhoneForCountryInput(
+    privateUser.phone,
+    (privateUser.phoneCountryCode as CountryCode | undefined) || 'BD'
+  );
   const [sendingEmailVer, setSendingEmailVer] = useState(false);
   const [emailCooldownSec, setEmailCooldownSec] = useState(0);
   const [refreshingEmailVer, setRefreshingEmailVer] = useState(false);
-  const [phoneInput, setPhoneInput] = useState(privateUser.phone || '');
-  const [phoneOtpCode, setPhoneOtpCode] = useState('');
-  const [phoneConfirmResult, setPhoneConfirmResult] = useState<ConfirmationResult | null>(null);
-  const [phoneBusy, setPhoneBusy] = useState(false);
+  const [phoneCountry, setPhoneCountry] = useState<CountryCode>(initialPhoneSplit.countryIso2);
+  const [phoneInput, setPhoneInput] = useState(initialPhoneSplit.localInput);
+  const [editingSavedPhone, setEditingSavedPhone] = useState(!privateUser.phone);
   const [savingContactPhone, setSavingContactPhone] = useState(false);
-  const [phoneSmsEnabled, setPhoneSmsEnabled] = useState<boolean | null>(null);
-  const [checkingPhoneCaps, setCheckingPhoneCaps] = useState(false);
   const [phoneMsg, setPhoneMsg] = useState('');
   const [phoneErr, setPhoneErr] = useState('');
-  const recaptchaVerifierRef = useRef<RecaptchaVerifier | null>(null);
 
   useEffect(() => {
-    setPhoneInput(privateUser.phone || '');
-  }, [privateUser.phone]);
+    const split = splitSavedPhoneForCountryInput(
+      privateUser.phone,
+      (privateUser.phoneCountryCode as CountryCode | undefined) || 'BD'
+    );
+    setPhoneCountry(split.countryIso2);
+    setPhoneInput(split.localInput);
+    if (!privateUser.phone) {
+      setEditingSavedPhone(true);
+    }
+  }, [privateUser.phone, privateUser.phoneCountryCode]);
 
   useEffect(() => {
     if (emailCooldownSec <= 0) return;
@@ -586,16 +642,6 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
     }, 1000);
     return () => window.clearInterval(timer);
   }, [emailCooldownSec]);
-
-  useEffect(() => {
-    let mounted = true;
-    detectFirebaseAuthCapabilities().then((caps) => {
-      if (mounted) setPhoneSmsEnabled(caps.phoneSmsEnabled);
-    });
-    return () => {
-      mounted = false;
-    };
-  }, []);
 
   // Change Password State
   const [currentPwd, setCurrentPwd] = useState('');
@@ -722,6 +768,50 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
 
     setSavingProfile(true);
     try {
+      const modText = await inspectTextClient({
+        surface: 'public_profile',
+        callerName: cleanName,
+        text: `${cleanName}\n@${unameCheck.normalized}`,
+        secondaryText: `${cleanBio}\n${cleanLocation}`,
+      });
+      if (!modText.allowed) {
+        setProfileErr(
+          modText.userNoticeMessage ||
+            'Your display name, username, or bio contains prohibited language or contact details.'
+        );
+        return;
+      }
+
+      if (avatarUrl && avatarUrl !== profile.avatarUrl && avatarUrl.startsWith('data:image/')) {
+        const parsedImg = stripDataUrlPrefix(avatarUrl);
+        if (parsedImg) {
+          const mediaCheck = await inspectMediaClient({
+            surface: 'public_profile',
+            callerName: cleanName,
+            items: [
+              {
+                id: `avatar_${Date.now()}`,
+                kind: 'image',
+                mimeType: parsedImg.mimeType,
+                base64Data: parsedImg.base64Data,
+                fileName: 'avatar.jpg',
+              },
+            ],
+          });
+          if (
+            !mediaCheck.allowed ||
+            mediaCheck.mediaScanStatus === 'blocked' ||
+            mediaCheck.mediaScanStatus === 'quarantined'
+          ) {
+            setProfileErr(
+              mediaCheck.userNoticeMessage ||
+                'Profile avatar image was blocked by BEXORA Trust & Safety.'
+            );
+            return;
+          }
+        }
+      }
+
       const oldNorm = normalizeUsername(profile.username);
       const newNorm = unameCheck.normalized;
 
@@ -834,123 +924,41 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
     }
   };
 
-  const handleSaveContactPhoneOnly = async () => {
+  const currentPhoneValidation = validateAndNormalizePhone(phoneInput, phoneCountry);
+  const currentPhoneUiState = resolvePhoneFormatValidationUiState({
+    validation: currentPhoneValidation,
+    savedPhoneE164: privateUser.phone,
+  });
+
+  const handleSaveValidatedPhone = async () => {
     setPhoneErr('');
     setPhoneMsg('');
-    const formatted = phoneInput.trim().replace(/[\s-]/g, '');
-    if (!/^\+[1-9]\d{7,14}$/.test(formatted)) {
-      setPhoneErr('Enter your phone number in international E.164 format (e.g. +8801712345678).');
+    if (!currentPhoneValidation.valid) {
+      setPhoneErr(currentPhoneValidation.error || 'Please enter a valid mobile phone number.');
       return;
     }
     setSavingContactPhone(true);
     try {
+      const normalizedE164 = currentPhoneValidation.e164;
+      const unchangedVerified =
+        Boolean(privateUser.phoneVerified) && privateUser.phone === normalizedE164;
       await updateDoc(doc(db, 'privateUsers', userUid), {
-        phone: formatted,
+        phone: normalizedE164,
+        phoneCountryCode: currentPhoneValidation.countryIso2,
+        phoneFormatValidated: true,
+        phoneVerified: unchangedVerified,
         updatedAt: serverTimestamp(),
       });
-      setPhoneInput(formatted);
-      setPhoneMsg('Contact phone saved privately to your account (unverified until SMS OTP is enabled).');
-      onFlash('Contact phone number saved.');
+      const countryName = getSupportedCountryMeta(currentPhoneValidation.countryIso2).name;
+      setEditingSavedPhone(false);
+      setPhoneMsg(
+        `Mobile number saved (${normalizedE164}). Format validated for ${countryName}.`
+      );
+      onFlash('Mobile phone number validated and saved.');
     } catch (err) {
       setPhoneErr(extractUserFacingFirestoreError(err, 'Could not save phone number.'));
     } finally {
       setSavingContactPhone(false);
-    }
-  };
-
-  const handleRecheckPhoneCapabilities = async () => {
-    setCheckingPhoneCaps(true);
-    setPhoneErr('');
-    try {
-      const caps = await detectFirebaseAuthCapabilities(true);
-      setPhoneSmsEnabled(caps.phoneSmsEnabled);
-      if (caps.phoneSmsEnabled) {
-        setPhoneMsg('Firebase Phone Auth SMS is now active! You can request an OTP code below.');
-      } else {
-        setPhoneMsg('');
-      }
-    } finally {
-      setCheckingPhoneCaps(false);
-    }
-  };
-
-  const handleSendPhoneVerification = async () => {
-    if (!auth.currentUser) return;
-    setPhoneErr('');
-    setPhoneMsg('');
-    const formatted = phoneInput.trim().replace(/[\s-]/g, '');
-    if (!/^\+[1-9]\d{7,14}$/.test(formatted)) {
-      setPhoneErr('Enter your phone number in international E.164 format (e.g. +8801712345678).');
-      return;
-    }
-    setPhoneBusy(true);
-    try {
-      if (!recaptchaVerifierRef.current) {
-        recaptchaVerifierRef.current = new RecaptchaVerifier(auth, 'bx-phone-recaptcha-container', {
-          size: 'invisible',
-        });
-      }
-      const confirmation = await linkWithPhoneNumber(auth.currentUser, formatted, recaptchaVerifierRef.current);
-      setPhoneConfirmResult(confirmation);
-      setPhoneMsg('SMS verification code sent by Firebase Phone Auth. Enter the 6-digit code below.');
-    } catch (err) {
-      if (recaptchaVerifierRef.current) {
-        recaptchaVerifierRef.current.clear();
-        recaptchaVerifierRef.current = null;
-      }
-      const raw = err instanceof Error ? err.message : String(err);
-      if (raw.includes('auth/operation-not-allowed') || raw.includes('auth/billing-not-enabled')) {
-        setPhoneSmsEnabled(false);
-        setPhoneErr(
-          'Firebase Phone Auth SMS is currently disabled on Spark free tier. Enable the Phone provider & Blaze billing in Firebase Console if you want live SMS OTP.'
-        );
-      } else {
-        setPhoneErr(formatFirebaseAuthError(err));
-      }
-    } finally {
-      setPhoneBusy(false);
-    }
-  };
-
-  const handleConfirmPhoneOtp = async () => {
-    if (!phoneConfirmResult) return;
-    setPhoneErr('');
-    if (phoneOtpCode.trim().length < 6) {
-      setPhoneErr('Enter the 6-digit SMS code.');
-      return;
-    }
-    setPhoneBusy(true);
-    try {
-      await phoneConfirmResult.confirm(phoneOtpCode.trim());
-      const refreshRes = await safeRefreshCurrentUserToken();
-      const verifiedPhone = phoneInput.trim().replace(/[\s-]/g, '');
-      await updateDoc(doc(db, 'privateUsers', userUid), {
-        phone: verifiedPhone,
-        ...(refreshRes.tokenRefreshed ? { phoneVerified: true } : {}),
-        updatedAt: serverTimestamp(),
-      });
-      await emitUserNotification({
-        recipientId: userUid,
-        eventKey: `phone_verified_${verifiedPhone.replace(/[^0-9]/g, '')}`,
-        category: 'verification',
-        severity: 'success',
-        title: 'Phone Number Verified via SMS OTP',
-        preview: `${verifiedPhone} is now verified on your BEXORA account.`,
-        body: `Your mobile number (${verifiedPhone}) was verified via Firebase Phone Authentication SMS OTP and saved privately to your BEXORA account.`,
-        refType: 'profile',
-        refId: userUid,
-        referenceLabel: verifiedPhone,
-        destination: 'profile',
-      });
-      await onAuthTokenRefreshed?.();
-      setPhoneConfirmResult(null);
-      setPhoneOtpCode('');
-      setPhoneMsg('Phone number verified and linked to your BEXORA account!');
-      onFlash('Phone number verified!');
-    } catch (err) {
-      setPhoneErr(extractUserFacingFirestoreError(err, formatFirebaseAuthError(err)));
-    } finally {
-      setPhoneBusy(false);
     }
   };
 
@@ -1112,8 +1120,11 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
     }
   };
 
+  const visibleOwnerListings = myListings.filter((l) => !hiddenDeletedIds.has(l.id));
   const filteredListings =
-    listingFilter === 'all' ? myListings : myListings.filter((l) => l.status === listingFilter);
+    listingFilter === 'all'
+      ? visibleOwnerListings
+      : visibleOwnerListings.filter((l) => l.status === listingFilter);
 
   const hasPasswordProvider = Boolean(
     auth.currentUser?.providerData.some((p) => p.providerId === 'password')
@@ -1130,6 +1141,24 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
 
   return (
     <div className="bx-wrap-wide py-8 space-y-6">
+      <DeleteListingModal
+        listing={deleteTargetListing}
+        userUid={userUid}
+        onClose={() => setDeleteTargetListing(null)}
+        onDeleted={(deletedId, successMsg) => {
+          setDeleteTargetListing(null);
+          setCollapsingListingId(deletedId);
+          onFlash(successMsg);
+          window.setTimeout(() => {
+            setHiddenDeletedIds((prev) => {
+              const next = new Set(prev);
+              next.add(deletedId);
+              return next;
+            });
+            setCollapsingListingId(null);
+          }, 260);
+        }}
+      />
       {/* Top Owner Profile Banner */}
       <section className="bx-card p-6 sm:p-8 flex flex-col lg:flex-row lg:items-center justify-between gap-6">
         <div className="flex items-center gap-4">
@@ -1185,10 +1214,40 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
           <button
             type="button"
             onClick={onOpenPublicSelf}
-            className="bx-btn bx-btn-ghost px-4 py-2.5 text-xs font-extrabold"
+            className="bx-btn bx-btn-ghost px-4 py-2.5 text-xs font-extrabold whitespace-nowrap"
           >
             View Public Profile
           </button>
+          {onOpenSafetyAndAppeals && (
+            <button
+              type="button"
+              onClick={onOpenSafetyAndAppeals}
+              className="bx-btn bx-btn-ghost px-4 py-2.5 text-xs font-extrabold inline-flex items-center gap-1.5 whitespace-nowrap"
+            >
+              <ShieldAlert className="w-4 h-4 text-[#FF6500]" />
+              <span>Safety &amp; Appeals</span>
+            </button>
+          )}
+          {onLogout && (
+            <>
+              <span
+                aria-hidden="true"
+                className="hidden sm:inline-block h-7 w-px bg-[var(--border-soft)] mx-0.5"
+              />
+              <button
+                type="button"
+                data-testid="profile-banner-logout-btn"
+                disabled={signingOut}
+                onClick={() => {
+                  void onLogout();
+                }}
+                className="bx-btn bx-btn-danger px-4 py-2.5 text-xs font-extrabold inline-flex items-center gap-1.5 whitespace-nowrap"
+              >
+                <LogOut className="w-4 h-4 shrink-0" />
+                <span>{signingOut ? 'Signing out…' : 'Logout'}</span>
+              </button>
+            </>
+          )}
         </div>
       </section>
 
@@ -1245,9 +1304,9 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
                   </span>
                 </li>
                 <li className="flex items-center justify-between">
-                  <span>Phone Verification:</span>
-                  <span className={privateUser.phoneVerified ? 'text-emerald-600' : 'text-amber-600'}>
-                    {privateUser.phoneVerified ? 'Verified' : 'Unverified'}
+                  <span>Mobile Number:</span>
+                  <span className={privateUser.phone ? 'text-emerald-600' : 'text-amber-600'}>
+                    {privateUser.phone ? 'Format Validated' : 'Not Set'}
                   </span>
                 </li>
                 <li className="flex items-center justify-between">
@@ -1484,11 +1543,19 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
               <p className="text-sm font-bold opacity-75">No listings in this status yet.</p>
             </div>
           ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 min-[1400px]:grid-cols-4 gap-5">
+            <div className="bx-listing-grid">
               {filteredListings.map((item) => {
                 const badgeMeta = getListingStatusBadgeMeta(item.status);
+                const sellerCanEdit = canSellerEditListingStatus(item.status, item.activeDealId);
+                const isCollapsing = collapsingListingId === item.id;
+
                 return (
-                  <div key={item.id} className="space-y-2">
+                  <div
+                    key={item.id}
+                    className={`w-full sm:max-w-[320px] space-y-2 transition-all duration-250 ${
+                      isCollapsing ? 'opacity-0 scale-95 pointer-events-none' : 'opacity-100 scale-100'
+                    }`}
+                  >
                     <ListingCard
                       listing={item}
                       displayCurrency={displayCurrency}
@@ -1497,9 +1564,9 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
                       isFavorited={favoriteListingIds ? favoriteListingIds.has(item.id) : false}
                       onToggleFavorite={onToggleFavorite}
                     />
-                    <div className="px-3 py-2.5 border-2 border-[var(--bx-border)] bg-[var(--bx-surface-alt)] space-y-2 text-xs font-bold">
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <span>Status: {badgeMeta.label}</span>
+                    <div className="p-2.5 sm:p-3 rounded-xl border bg-[var(--surface)] space-y-2 text-xs font-bold" style={{ borderColor: 'var(--border-soft)' }}>
+                      <div className="flex flex-wrap items-center justify-between gap-1.5">
+                        <span className="truncate">Status: {badgeMeta.label}</span>
                         {item.activeDealId &&
                           onOpenDeal &&
                           (item.status === 'reserved' || item.status === 'sold') && (
@@ -1508,7 +1575,7 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
                               onClick={() => onOpenDeal(item.activeDealId!)}
                               className="text-[#FF6500] hover:underline shrink-0"
                             >
-                              Open Deal Room →
+                              Deal Room →
                             </button>
                           )}
                       </div>
@@ -1517,15 +1584,32 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
                           Moderator Note: {item.rejectionReason}
                         </p>
                       )}
-                      {onEditListing && (item.status === 'draft' || item.status === 'rejected') && (
+                      <div className="grid grid-cols-2 gap-1.5 pt-0.5">
+                        {onEditListing && (
+                          <button
+                            type="button"
+                            disabled={!sellerCanEdit}
+                            onClick={() => onEditListing(item)}
+                            className="bx-btn bx-btn-primary bx-btn-sm justify-center !px-2 text-[11px]"
+                            title={
+                              sellerCanEdit
+                                ? 'Edit listing details or gallery'
+                                : 'Editing is locked while an active deal is in progress'
+                            }
+                          >
+                            <Edit3 className="w-3 h-3 shrink-0" />
+                            <span className="truncate">Edit Listing</span>
+                          </button>
+                        )}
                         <button
                           type="button"
-                          onClick={() => onEditListing(item)}
-                          className="bx-btn bx-btn-primary bx-btn-sm w-full justify-center"
+                          onClick={() => setDeleteTargetListing(item)}
+                          className="bx-btn bx-btn-danger bx-btn-sm justify-center !px-2 text-[11px]"
                         >
-                          {item.status === 'draft' ? 'Edit & Submit Draft' : 'Edit & Resubmit Listing'}
+                          <Trash2 className="w-3 h-3 shrink-0" />
+                          <span className="truncate">Delete Listing</span>
                         </button>
-                      )}
+                      </div>
                     </div>
                   </div>
                 );
@@ -1687,131 +1771,118 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
             )}
           </div>
 
-          {/* Phone Verification Card (Firebase Phone Auth — Spark/Blaze Aware, Zero 3P SMS) */}
+          {/* International Country-Code Phone Format Validation Card (No OTP Required) */}
           <div className="bx-card p-6 space-y-4">
-            <div className="flex items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2">
                 <Phone className="w-5 h-5 text-[#FF6500]" />
-                <h2 className="text-base font-black">Phone Number</h2>
+                <h2 className="text-base font-black">International Mobile Number</h2>
               </div>
-              {privateUser.phoneVerified ? (
+              {privateUser.phone && !editingSavedPhone ? (
                 <span className="inline-flex items-center gap-1 text-xs font-extrabold px-2.5 py-1 bg-emerald-600 text-white border border-black">
                   <CheckCircle2 className="w-3.5 h-3.5" />
-                  Verified
+                  Format Validated
                 </span>
-              ) : phoneSmsEnabled === false ? (
-                <span className="inline-flex items-center gap-1 text-xs font-extrabold px-2.5 py-1 bg-slate-200 text-black border border-black">
+              ) : currentPhoneUiState.status === 'invalid' ? (
+                <span className="inline-flex items-center gap-1 text-xs font-extrabold px-2.5 py-1 bg-red-600 text-white border border-black">
                   <ShieldAlert className="w-3.5 h-3.5" />
-                  SMS OTP Off (Spark Plan)
+                  Invalid Number
                 </span>
               ) : (
                 <span className="inline-flex items-center gap-1 text-xs font-extrabold px-2.5 py-1 bg-amber-400 text-black border border-black">
-                  <Clock className="w-3.5 h-3.5" />
-                  Unverified
+                  <Phone className="w-3.5 h-3.5" />
+                  {currentPhoneUiState.badgeLabel}
                 </span>
               )}
             </div>
 
-            <div id="bx-phone-recaptcha-container" />
-
-            {privateUser.phoneVerified ? (
-              <div className="p-3 border-2 border-[var(--bx-border)] bg-[var(--bx-surface-alt)] text-sm font-bold">
-                {privateUser.phone}
-              </div>
-            ) : (
+            {privateUser.phone && !editingSavedPhone ? (
               <div className="space-y-3">
-                <div>
-                  <label htmlFor="bx-settings-phone" className="block text-xs font-extrabold mb-1">
-                    Mobile Number (E.164 Format)
-                  </label>
-                  <input
-                    id="bx-settings-phone"
-                    type="tel"
-                    value={phoneInput}
-                    onChange={(e) => setPhoneInput(e.target.value)}
-                    placeholder="+8801712345678"
-                    className="bx-input w-full px-3 py-2 text-sm"
-                  />
-                </div>
-
-                {phoneSmsEnabled === false ? (
-                  <div className="space-y-2.5">
-                    <div className="p-3 border-2 border-[var(--bx-border)] bg-[var(--bx-surface-alt)] text-xs leading-relaxed">
-                      <strong>Free-Tier Notice:</strong> Live SMS OTP is currently off because Firebase
-                      Phone Authentication requires enabling the Phone provider and upgrading from
-                      Spark (free) to Blaze billing in Firebase Console. You can still save your
-                      contact number privately below, and verify via Email + NID for full trading
-                      trust.
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                      <button
-                        type="button"
-                        disabled={savingContactPhone}
-                        onClick={handleSaveContactPhoneOnly}
-                        className="bx-btn bx-btn-primary px-4 py-2 text-xs font-extrabold"
-                      >
-                        {savingContactPhone ? 'Saving…' : 'Save Contact Number'}
-                      </button>
-                      <button
-                        type="button"
-                        disabled={checkingPhoneCaps}
-                        onClick={handleRecheckPhoneCapabilities}
-                        className="bx-btn bx-btn-ghost px-3.5 py-2 text-xs font-bold inline-flex items-center gap-1.5"
-                      >
-                        <RefreshCw className={`w-3.5 h-3.5 ${checkingPhoneCaps ? 'animate-spin' : ''}`} />
-                        {checkingPhoneCaps ? 'Checking…' : 'Re-check SMS Status'}
-                      </button>
+                <div className="p-3.5 rounded-xl border-2 border-[var(--bx-border)] bg-[var(--bx-surface-alt)] flex flex-wrap items-center justify-between gap-3">
+                  <div className="space-y-0.5">
+                    <div className="text-sm font-black tabular-nums">{privateUser.phone}</div>
+                    <div className="text-xs font-bold text-emerald-600">
+                      International E.164 format validated and saved privately.
                     </div>
                   </div>
-                ) : !phoneConfirmResult ? (
-                  <div className="flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      disabled={phoneBusy}
-                      onClick={handleSendPhoneVerification}
-                      className="bx-btn bx-btn-primary px-4 py-2 text-xs font-extrabold"
-                    >
-                      {phoneBusy ? 'Requesting SMS…' : 'Send SMS Code'}
-                    </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditingSavedPhone(true);
+                      setPhoneMsg('');
+                      setPhoneErr('');
+                    }}
+                    className="bx-btn bx-btn-sm"
+                  >
+                    Change Number
+                  </button>
+                </div>
+                {phoneMsg && <p className="text-xs font-bold text-emerald-600">{phoneMsg}</p>}
+              </div>
+            ) : (
+              <div className="space-y-3.5">
+                <PhoneCountryInput
+                  idPrefix="settings"
+                  label="Mobile Phone Number"
+                  countryIso2={phoneCountry}
+                  onCountryChange={(nextC) => {
+                    setPhoneCountry(nextC);
+                    setPhoneErr('');
+                    setPhoneMsg('');
+                  }}
+                  phoneValue={phoneInput}
+                  onPhoneChange={(nextP) => {
+                    setPhoneInput(nextP);
+                    setPhoneErr('');
+                    setPhoneMsg('');
+                  }}
+                  savedPhoneE164={privateUser.phone}
+                  formatValidationOnly={true}
+                  disabled={savingContactPhone}
+                />
+
+                {phoneErr && (
+                  <p role="alert" className="text-xs font-bold text-red-600">
+                    {phoneErr}
+                  </p>
+                )}
+
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    disabled={savingContactPhone || !currentPhoneValidation.valid}
+                    onClick={() => void handleSaveValidatedPhone()}
+                    className="bx-btn bx-btn-primary px-4 py-2 text-xs font-extrabold"
+                  >
+                    {savingContactPhone
+                      ? 'Saving…'
+                      : privateUser.phone
+                      ? 'Update Phone Number'
+                      : 'Save Phone Number'}
+                  </button>
+                  {privateUser.phone && (
                     <button
                       type="button"
                       disabled={savingContactPhone}
-                      onClick={handleSaveContactPhoneOnly}
-                      className="bx-btn bx-btn-ghost px-3.5 py-2 text-xs font-bold"
+                      onClick={() => {
+                        const split = splitSavedPhoneForCountryInput(
+                          privateUser.phone,
+                          (privateUser.phoneCountryCode as CountryCode | undefined) || 'BD'
+                        );
+                        setPhoneCountry(split.countryIso2);
+                        setPhoneInput(split.localInput);
+                        setPhoneErr('');
+                        setPhoneMsg('');
+                        setEditingSavedPhone(false);
+                      }}
+                      className="bx-btn bx-btn-sm"
                     >
-                      {savingContactPhone ? 'Saving…' : 'Save Without OTP'}
+                      Cancel
                     </button>
-                  </div>
-                ) : (
-                  <div className="space-y-2">
-                    <label htmlFor="bx-settings-phone-otp" className="block text-xs font-extrabold">
-                      Enter 6-Digit SMS Code
-                    </label>
-                    <div className="flex gap-2">
-                      <input
-                        id="bx-settings-phone-otp"
-                        type="text"
-                        inputMode="numeric"
-                        maxLength={6}
-                        value={phoneOtpCode}
-                        onChange={(e) => setPhoneOtpCode(e.target.value)}
-                        placeholder="123456"
-                        className="bx-input flex-1 px-3 py-2 text-sm"
-                      />
-                      <button
-                        type="button"
-                        disabled={phoneBusy}
-                        onClick={handleConfirmPhoneOtp}
-                        className="bx-btn bx-btn-primary px-4 py-2 text-xs font-extrabold"
-                      >
-                        Confirm OTP
-                      </button>
-                    </div>
-                  </div>
-                )}
+                  )}
+                </div>
 
                 {phoneMsg && <p className="text-xs font-bold text-emerald-600">{phoneMsg}</p>}
-                {phoneErr && <p className="text-xs font-bold text-red-600">{phoneErr}</p>}
               </div>
             )}
           </div>

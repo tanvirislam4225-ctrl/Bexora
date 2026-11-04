@@ -9,23 +9,29 @@ import {
   query,
   runTransaction,
   serverTimestamp,
-  updateDoc,
   where,
 } from 'firebase/firestore';
 import {
   ArrowLeft,
   ArrowRight,
   Check,
+  ChevronDown,
+  ChevronUp,
   CreditCard,
+  Edit3,
   ExternalLink,
+  Flag,
   Heart,
   Lock,
   MessageSquare,
   RotateCcw,
   Share2,
   ShieldCheck,
+  Trash2,
   UserCheck,
   UserPlus,
+  XCircle,
+  ZoomIn,
 } from 'lucide-react';
 import {
   BidRecord,
@@ -62,8 +68,18 @@ import {
   appendDealAuditEvent,
   emitUserNotification,
 } from '../lib/notificationService';
+import {
+  canBuyerWithdrawBid,
+  canSellerEditListingStatus,
+  canSellerRejectBid,
+  partitionBidsForListingView,
+} from '../lib/listingAndBidManagementLogic';
 import { executeShareListing } from '../lib/engagementLogic';
+import type { ReportModalTarget } from '../lib/moderationClient';
+import { BidActionConfirmModal } from './BidActionConfirmModal';
+import { DeleteListingModal } from './DeleteListingModal';
 import { PLATFORM_BANNER_BG, PlatformIcon } from './Icons';
+import { ImageLightboxModal } from './ImageLightboxModal';
 
 interface ListingDetailModalProps {
   listing: MarketplaceListing;
@@ -97,6 +113,9 @@ interface ListingDetailModalProps {
     username: string;
     nidVerified: boolean;
   }) => void;
+  onReportListingOrSeller?: (target: ReportModalTarget) => void;
+  onEditListing?: (listing: MarketplaceListing) => void;
+  onListingDeleted?: (listingId: string) => void;
 }
 
 export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
@@ -122,22 +141,32 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
   isFollowingSeller = false,
   sellerFollowerCount,
   onToggleFollowSeller,
+  onReportListingOrSeller,
+  onEditListing,
+  onListingDeleted,
 }) => {
   void privateUser;
   const [selectedImg, setSelectedImg] = useState(0);
+  const [lightboxOpen, setLightboxOpen] = useState(false);
+  const [deleteModalOpen, setDeleteModalOpen] = useState(false);
+  const [bidConfirmTarget, setBidConfirmTarget] = useState<{
+    mode: 'withdraw' | 'reject';
+    bid: BidRecord;
+  } | null>(null);
+  const [showHistoricalBids, setShowHistoricalBids] = useState(false);
   const [bids, setBids] = useState<BidRecord[]>([]);
   const [bidAmount, setBidAmount] = useState(initialDraftBidAmount);
   const [bidError, setBidError] = useState('');
   const [busyAction, setBusyAction] = useState(false);
-  const [withdrawingBidId, setWithdrawingBidId] = useState<string | null>(null);
   const [shareFeedback, setShareFeedback] = useState<'idle' | 'copied' | 'shared'>('idle');
   const submittingBidRef = useRef(false);
-  const withdrawingBidRef = useRef<string | null>(null);
   const viewCountedRef = useRef<string | null>(null);
   const shareFeedbackTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     setShareFeedback('idle');
+    setSelectedImg(0);
+    setLightboxOpen(false);
     return () => {
       if (shareFeedbackTimerRef.current) {
         window.clearTimeout(shareFeedbackTimerRef.current);
@@ -243,16 +272,25 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
         (acceptedBidRecord && acceptedBidRecord.buyerId === userUid))
   );
 
-  const visibleBids = useMemo(() => {
-    if (isSellerOwner) return bids;
-    return bids.filter(
-      (b) =>
-        b.status === 'pending' ||
-        isBidAcceptedAwaitingPaymentStatus(b.status) ||
-        b.status === 'paid' ||
-        (userUid && b.buyerId === userUid)
-    );
-  }, [bids, isSellerOwner, userUid]);
+  const partitionedBids = useMemo(
+    () => partitionBidsForListingView(bids, userUid, isSellerOwner),
+    [bids, userUid, isSellerOwner]
+  );
+
+  const activeAndAcceptedBids = useMemo(
+    () => [...partitionedBids.acceptedDealBids, ...partitionedBids.activePendingBids],
+    [partitionedBids.acceptedDealBids, partitionedBids.activePendingBids]
+  );
+
+  const safeGalleryImages = useMemo(
+    () =>
+      (listing.images || [])
+        .map((src) => sanitizeSafeImageSrc(src))
+        .filter((src): src is string => Boolean(src)),
+    [listing.images]
+  );
+
+  const canSellerEdit = isSellerOwner && canSellerEditListingStatus(listing.status, listing.activeDealId);
 
   const handleBuyNow = () => {
     if (!userUid) {
@@ -430,111 +468,7 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
     }
   };
 
-  const handleWithdrawBid = async (bid: BidRecord) => {
-    if (!userUid || bid.buyerId !== userUid || bid.status !== 'pending') return;
-    if (withdrawingBidRef.current) return;
-
-    withdrawingBidRef.current = bid.id;
-    setWithdrawingBidId(bid.id);
-    setBusyAction(true);
-    setBidError('');
-
-    // Optimistic state update so the withdrawn bid disappears immediately from active bids & highest bid
-    setBids((prev) =>
-      prev.map((item) => (item.id === bid.id ? { ...item, status: 'withdrawn' } : item))
-    );
-
-    try {
-      const bidRef = doc(db, 'bids', bid.id);
-      await runTransaction(db, async (tx) => {
-        const bSnap = await tx.get(bidRef);
-        if (!bSnap.exists()) {
-          throw new Error('Bid record not found.');
-        }
-        const bData = bSnap.data();
-        if (bData.buyerId !== userUid) {
-          throw new Error('You can only withdraw your own bid.');
-        }
-        if (bData.status !== 'pending') {
-          throw new Error('Only pending bids can be withdrawn.');
-        }
-        tx.update(bidRef, {
-          status: 'withdrawn',
-          updatedAt: serverTimestamp(),
-        });
-      });
-      const withdrawnAmount = formatMoneyFromMinor(bid.amountMinor, bid.currency, bid.currency);
-      await Promise.all([
-        emitUserNotification({
-          recipientId: userUid,
-          eventKey: `bid_withdrawn_buyer_${bid.id}`,
-          category: 'bid',
-          severity: 'info',
-          title: 'Bid Withdrawn',
-          preview: `Your ${withdrawnAmount} bid on "${listing.title}" was withdrawn.`,
-          body: `You withdrew your pending bid of ${withdrawnAmount} on "${listing.title}". It is no longer counted among active bids.`,
-          refType: 'listing',
-          refId: listing.id,
-          referenceLabel: listing.title.slice(0, 80),
-          destination: `listing:${listing.id}`,
-        }),
-        emitUserNotification({
-          recipientId: listing.sellerId,
-          eventKey: `bid_withdrawn_seller_${bid.id}`,
-          category: 'bid',
-          severity: 'info',
-          title: 'Buyer Withdrew a Pending Bid',
-          preview: `${bid.buyerName} withdrew their ${withdrawnAmount} bid on "${listing.title}".`,
-          body: `${bid.buyerName} (@${bid.buyerUsername}) withdrew their pending ${withdrawnAmount} offer on "${listing.title}". Active bid rankings have updated automatically.`,
-          refType: 'listing',
-          refId: listing.id,
-          referenceLabel: listing.title.slice(0, 80),
-          destination: `listing:${listing.id}`,
-        }),
-      ]);
-      onFlash('Your bid has been withdrawn.');
-    } catch (err) {
-      // Revert optimistic status if transaction failed
-      setBids((prev) =>
-        prev.map((item) => (item.id === bid.id ? { ...item, status: bid.status } : item))
-      );
-      onFlash(extractUserFacingFirestoreError(err, 'Could not withdraw bid.'));
-    } finally {
-      withdrawingBidRef.current = null;
-      setWithdrawingBidId(null);
-      setBusyAction(false);
-    }
-  };
-
-  const handleSellerRejectBid = async (bid: BidRecord) => {
-    if (!isSellerOwner || bid.status !== 'pending') return;
-    setBusyAction(true);
-    try {
-      await updateDoc(doc(db, 'bids', bid.id), {
-        status: 'rejected',
-        updatedAt: serverTimestamp(),
-      });
-      const rejectedAmount = formatMoneyFromMinor(bid.amountMinor, bid.currency, bid.currency);
-      await emitUserNotification({
-        recipientId: bid.buyerId,
-        eventKey: `bid_rejected_buyer_${bid.id}`,
-        category: 'bid',
-        severity: 'warning',
-        title: 'Bid Declined by Seller',
-        preview: `Your ${rejectedAmount} bid on "${listing.title}" was declined.`,
-        body: `The seller declined your ${rejectedAmount} bid on "${listing.title}". If the listing is still active, you may submit a higher offer or explore similar assets in the marketplace.`,
-        refType: 'listing',
-        refId: listing.id,
-        referenceLabel: listing.title.slice(0, 80),
-        destination: `listing:${listing.id}`,
-      });
-      onFlash('Bid rejected and recorded in history.');
-    } catch (err) {
-      onFlash(err instanceof Error ? err.message : 'Could not reject bid.');
-    } finally {
-      setBusyAction(false);
-    }
-  };
+  void activeBids;
 
   const handleSellerAcceptBid = async (bid: BidRecord) => {
     if (!isSellerOwner || bid.status !== 'pending' || !userUid) return;
@@ -825,8 +759,116 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
               <span>{isFavorited ? 'Saved in Favorites' : 'Save to Favorites'}</span>
             </button>
           )}
+          {!isSellerOwner && onReportListingOrSeller && (
+            <button
+              type="button"
+              onClick={() =>
+                onReportListingOrSeller({
+                  reportedUserId: listing.sellerId,
+                  reportedUserName: listing.sellerName || 'Seller',
+                  surface: 'listing_text',
+                  listingId: listing.id,
+                  listingTitle: listing.title,
+                  quotedContent: `${listing.title} — ${listing.description.slice(0, 240)}`,
+                  defaultCategory: 'fake_stolen_listing',
+                })
+              }
+              aria-label={`Report listing ${listing.title} or seller ${listing.sellerName}`}
+              className="bx-btn bx-btn-sm whitespace-nowrap shrink-0"
+            >
+              <Flag className="w-4 h-4 text-[var(--red)]" />
+              <span>Report</span>
+            </button>
+          )}
         </div>
       </div>
+
+      {safeGalleryImages.length > 0 && (
+        <ImageLightboxModal
+          images={safeGalleryImages.map((src, idx) => ({
+            src,
+            caption: `${listing.title} — Image ${idx + 1} of ${safeGalleryImages.length}`,
+          }))}
+          activeIndex={lightboxOpen ? Math.min(selectedImg, safeGalleryImages.length - 1) : null}
+          title={listing.title}
+          onClose={() => setLightboxOpen(false)}
+          onChangeIndex={(nextIdx) => setSelectedImg(nextIdx)}
+        />
+      )}
+
+      <DeleteListingModal
+        listing={deleteModalOpen ? listing : null}
+        userUid={userUid}
+        onClose={() => setDeleteModalOpen(false)}
+        onDeleted={(deletedId, msg) => {
+          setDeleteModalOpen(false);
+          onFlash(msg);
+          if (onListingDeleted) {
+            onListingDeleted(deletedId);
+          } else {
+            onClose();
+          }
+        }}
+      />
+
+      <BidActionConfirmModal
+        mode={bidConfirmTarget?.mode || 'withdraw'}
+        bid={bidConfirmTarget?.bid || null}
+        listingTitle={listing.title}
+        sellerId={listing.sellerId}
+        displayCurrency={displayCurrency}
+        usdToBdtRate={settings.usdToBdtRate}
+        onClose={() => setBidConfirmTarget(null)}
+        onCompleted={(bidId, nextStatus, bannerMessage) => {
+          setBids((prev) =>
+            prev.map((item) => (item.id === bidId ? { ...item, status: nextStatus } : item))
+          );
+          setBidConfirmTarget(null);
+          onFlash(bannerMessage);
+        }}
+      />
+
+      {/* Seller Owner Management Bar */}
+      {isSellerOwner && (
+        <div
+          data-testid="seller-listing-management-bar"
+          className="bx-card p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+          style={{ borderColor: 'var(--orange)' }}
+        >
+          <div className="space-y-0.5">
+            <div className="text-xs font-extrabold uppercase tracking-wide" style={{ color: 'var(--orange)' }}>
+              Seller Listing Management · Status: {listing.status.toUpperCase()}
+            </div>
+            <p className="text-xs font-semibold" style={{ color: 'var(--text-2)' }}>
+              {canSellerEdit
+                ? 'Update asset details or gallery anytime (edited listings return to Pending Review before republishing).'
+                : 'Editing and deletion are locked while an active escrow reservation or transaction is in progress.'}
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            {onEditListing && (
+              <button
+                type="button"
+                disabled={!canSellerEdit}
+                onClick={() => onEditListing(listing)}
+                className="bx-btn bx-btn-primary bx-btn-sm whitespace-nowrap"
+              >
+                <Edit3 className="w-3.5 h-3.5" />
+                <span>Edit Listing</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setDeleteModalOpen(true)}
+              className="bx-btn bx-btn-danger bx-btn-sm whitespace-nowrap"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              <span>Delete Listing</span>
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Main Full-Screen 2-Column Listing Workspace */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
@@ -865,54 +907,82 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
               </div>
             </div>
 
-            {/* Media Gallery */}
+            {/* Media Gallery (Up to 10 Images + Click to Open Full-Screen Lightbox) */}
             <div className="space-y-2.5">
-              <div
-                className="aspect-[16/9] rounded-xl overflow-hidden flex items-center justify-center border"
-                style={{
-                  background: PLATFORM_BANNER_BG[listing.platform],
-                  borderColor: 'var(--border-soft)',
-                }}
-              >
-                {listing.images && sanitizeSafeImageSrc(listing.images[selectedImg]) ? (
+              {safeGalleryImages.length > 0 ? (
+                <button
+                  type="button"
+                  onClick={() => setLightboxOpen(true)}
+                  aria-label={`Open full-screen preview of image ${selectedImg + 1} of ${safeGalleryImages.length}`}
+                  className="group relative aspect-[16/9] w-full rounded-xl overflow-hidden flex items-center justify-center border cursor-zoom-in"
+                  style={{
+                    background: PLATFORM_BANNER_BG[listing.platform],
+                    borderColor: 'var(--border-soft)',
+                  }}
+                >
                   <img
-                    src={sanitizeSafeImageSrc(listing.images[selectedImg])}
-                    alt={listing.title}
+                    src={safeGalleryImages[Math.min(selectedImg, safeGalleryImages.length - 1)]}
+                    alt={`${listing.title} (${selectedImg + 1}/${safeGalleryImages.length})`}
                     referrerPolicy="no-referrer"
-                    className="w-full h-full object-cover"
+                    className="w-full h-full object-cover transition-transform duration-200 group-hover:scale-[1.01]"
                   />
-                ) : (
+                  <span
+                    className="absolute bottom-2.5 right-2.5 inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-extrabold text-white shadow-md"
+                    style={{ background: 'rgba(15, 15, 20, 0.82)' }}
+                  >
+                    <ZoomIn className="w-3.5 h-3.5 text-[#FF6500]" />
+                    <span className="tabular-nums">
+                      {Math.min(selectedImg, safeGalleryImages.length - 1) + 1}/{safeGalleryImages.length} · Full View
+                    </span>
+                  </span>
+                </button>
+              ) : (
+                <div
+                  className="aspect-[16/9] rounded-xl overflow-hidden flex items-center justify-center border"
+                  style={{
+                    background: PLATFORM_BANNER_BG[listing.platform],
+                    borderColor: 'var(--border-soft)',
+                  }}
+                >
                   <div className="flex flex-col items-center gap-2 text-white">
                     <PlatformIcon id={listing.platform} size={56} />
                     <span className="text-xs font-extrabold uppercase">{listing.subcategory}</span>
                   </div>
-                )}
-              </div>
+                </div>
+              )}
 
-              {listing.images && listing.images.length > 1 && (
-                <div className="grid grid-cols-4 sm:flex sm:items-center gap-2 sm:overflow-x-auto pb-1">
-                  {listing.images.map((src, idx) => {
-                    const safeThumb = sanitizeSafeImageSrc(src);
-                    if (!safeThumb) return null;
-                    return (
-                      <button
-                        key={idx}
-                        type="button"
-                        onClick={() => setSelectedImg(idx)}
-                        className="w-full sm:w-20 aspect-[16/10] rounded-lg overflow-hidden border-2 shrink-0"
-                        style={{
-                          borderColor: idx === selectedImg ? 'var(--orange)' : 'var(--border-soft)',
-                        }}
+              {safeGalleryImages.length > 1 && (
+                <div className="flex items-center gap-2 overflow-x-auto pb-1">
+                  {safeGalleryImages.map((safeThumb, idx) => (
+                    <button
+                      key={idx}
+                      type="button"
+                      onClick={() => setSelectedImg(idx)}
+                      onDoubleClick={() => {
+                        setSelectedImg(idx);
+                        setLightboxOpen(true);
+                      }}
+                      aria-label={`Select gallery image ${idx + 1} of ${safeGalleryImages.length}`}
+                      className="relative w-20 aspect-[4/3] rounded-lg overflow-hidden border-2 shrink-0 transition-opacity"
+                      style={{
+                        borderColor: idx === selectedImg ? 'var(--orange)' : 'var(--border-soft)',
+                        opacity: idx === selectedImg ? 1 : 0.75,
+                      }}
+                    >
+                      <img
+                        src={safeThumb}
+                        alt={`Thumbnail ${idx + 1}`}
+                        referrerPolicy="no-referrer"
+                        className="w-full h-full object-cover"
+                      />
+                      <span
+                        className="absolute bottom-0.5 right-0.5 rounded px-1 text-[9px] font-extrabold text-white tabular-nums"
+                        style={{ background: 'rgba(15, 15, 20, 0.72)' }}
                       >
-                        <img
-                          src={safeThumb}
-                          alt={`Thumbnail ${idx + 1}`}
-                          referrerPolicy="no-referrer"
-                          className="w-full h-full object-cover"
-                        />
-                      </button>
-                    );
-                  })}
+                        {idx + 1}
+                      </span>
+                    </button>
+                  ))}
                 </div>
               )}
             </div>
@@ -1317,13 +1387,13 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
             )}
           </div>
 
-          {/* Role-Based Bidding Room & Preserved Bid History */}
+          {/* Role-Based Active Bidding Room & Separate Collapsible Bid History */}
           <div className="bx-card p-5 sm:p-6 space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <h2 className="text-base font-extrabold">
+              <h2 className="text-base font-extrabold tabular-nums">
                 {isSellerOwner
-                  ? `Seller Bid Management & History (${visibleBids.length})`
-                  : `Live Bidding Room (${visibleBids.length})`}
+                  ? `Active Offers (${activeAndAcceptedBids.length})`
+                  : `Live Bidding Room (${activeAndAcceptedBids.length})`}
               </h2>
               <span className="bx-hint">
                 {listing.status === 'reserved' && resolvedAcceptedBidMinor > 0
@@ -1375,13 +1445,12 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
               </p>
             )}
 
-            {visibleBids.length === 0 ? (
-              <p className="bx-hint">No bids recorded on this listing yet.</p>
+            {activeAndAcceptedBids.length === 0 ? (
+              <p className="bx-hint">No active bids on this listing right now.</p>
             ) : (
               <div className="space-y-2">
-                {visibleBids.map((b) => {
+                {activeAndAcceptedBids.map((b) => {
                   const isOwnBid = Boolean(userUid && b.buyerId === userUid);
-                  const isWithdrawingThis = withdrawingBidId === b.id;
                   const isAcceptedAwaitingPay = isBidAcceptedAwaitingPaymentStatus(b.status);
                   const linkedDealId =
                     b.dealId || (isAcceptedAwaitingPay ? listing.activeDealId : undefined);
@@ -1390,6 +1459,8 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
                     settings,
                     listing.priceMinor
                   );
+                  const buyerMayWithdraw = canBuyerWithdrawBid(b, userUid);
+                  const sellerMayReject = canSellerRejectBid(b, isSellerOwner, listing.status);
 
                   return (
                     <div
@@ -1446,14 +1517,15 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
 
                       {/* Context-Sensitive Role Controls */}
                       <div className="flex flex-wrap items-center gap-2">
-                        {isOwnBid && b.status === 'pending' && (
+                        {buyerMayWithdraw && (
                           <button
                             type="button"
-                            disabled={busyAction || isWithdrawingThis}
-                            onClick={() => handleWithdrawBid(b)}
+                            disabled={busyAction}
+                            onClick={() => setBidConfirmTarget({ mode: 'withdraw', bid: b })}
                             className="bx-btn bx-btn-sm bx-btn-danger"
                           >
-                            {isWithdrawingThis ? 'Withdrawing…' : 'Withdraw'}
+                            <RotateCcw className="w-3.5 h-3.5" />
+                            <span>Withdraw Bid</span>
                           </button>
                         )}
 
@@ -1506,25 +1578,26 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
                               </button>
                             )}
                             {b.status === 'pending' && listing.status === 'active' && (
-                              <>
-                                <button
-                                  type="button"
-                                  disabled={busyAction}
-                                  onClick={() => handleSellerAcceptBid(b)}
-                                  className="bx-btn bx-btn-sm bx-btn-primary"
-                                >
-                                  <Check className="w-3.5 h-3.5" />
-                                  <span>Accept Bid</span>
-                                </button>
-                                <button
-                                  type="button"
-                                  disabled={busyAction}
-                                  onClick={() => handleSellerRejectBid(b)}
-                                  className="bx-btn bx-btn-sm bx-btn-danger"
-                                >
-                                  Reject
-                                </button>
-                              </>
+                              <button
+                                type="button"
+                                disabled={busyAction}
+                                onClick={() => handleSellerAcceptBid(b)}
+                                className="bx-btn bx-btn-sm bx-btn-primary"
+                              >
+                                <Check className="w-3.5 h-3.5" />
+                                <span>Accept Bid</span>
+                              </button>
+                            )}
+                            {sellerMayReject && (
+                              <button
+                                type="button"
+                                disabled={busyAction}
+                                onClick={() => setBidConfirmTarget({ mode: 'reject', bid: b })}
+                                className="bx-btn bx-btn-sm bx-btn-danger"
+                              >
+                                <XCircle className="w-3.5 h-3.5" />
+                                <span>Reject Bid</span>
+                              </button>
                             )}
                           </>
                         )}
@@ -1532,6 +1605,74 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
                     </div>
                   );
                 })}
+              </div>
+            )}
+
+            {/* Collapsible Historical Bids (Withdrawn, Rejected, Expired, Cancelled) */}
+            {partitionedBids.historicalBids.length > 0 && (
+              <div
+                className="pt-3 border-t space-y-2"
+                style={{ borderColor: 'var(--border-soft)' }}
+              >
+                <button
+                  type="button"
+                  aria-expanded={showHistoricalBids}
+                  onClick={() => setShowHistoricalBids((v) => !v)}
+                  className="w-full flex items-center justify-between text-xs font-extrabold py-1 hover:underline"
+                  style={{ color: 'var(--text-2)' }}
+                >
+                  <span>
+                    Bid History — Withdrawn / Rejected / Closed ({partitionedBids.historicalBids.length})
+                  </span>
+                  {showHistoricalBids ? (
+                    <ChevronUp className="w-4 h-4 shrink-0" />
+                  ) : (
+                    <ChevronDown className="w-4 h-4 shrink-0" />
+                  )}
+                </button>
+
+                {showHistoricalBids && (
+                  <div className="space-y-1.5">
+                    {partitionedBids.historicalBids.map((hb) => {
+                      const isOwn = Boolean(userUid && hb.buyerId === userUid);
+                      return (
+                        <div
+                          key={hb.id}
+                          className="px-3 py-2 rounded-lg border flex flex-wrap items-center justify-between gap-2 text-xs opacity-80"
+                          style={{
+                            background: 'var(--surface)',
+                            borderColor: 'var(--border-soft)',
+                          }}
+                        >
+                          <div className="flex items-center gap-1.5 min-w-0">
+                            <span className="font-bold truncate">{hb.buyerName}</span>
+                            <span style={{ color: 'var(--text-3)' }}>@{hb.buyerUsername}</span>
+                            {isOwn && <span style={{ color: 'var(--orange)' }}>(You)</span>}
+                          </div>
+                          <div className="flex items-center gap-2 font-bold tabular-nums">
+                            <span>
+                              {formatMoneyFromMinor(
+                                hb.amountMinor,
+                                displayCurrency,
+                                hb.currency,
+                                settings.usdToBdtRate
+                              )}
+                            </span>
+                            <span
+                              className="uppercase text-[10.5px] px-1.5 py-0.5 rounded border"
+                              style={{
+                                borderColor: 'var(--border-soft)',
+                                color: hb.status === 'rejected' ? 'var(--red)' : 'var(--text-2)',
+                              }}
+                            >
+                              {hb.status.toUpperCase()}
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             )}
           </div>

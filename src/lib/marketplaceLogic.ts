@@ -8,6 +8,7 @@ import {
   PublicSettings,
   TokenServiceStatus,
 } from '../types';
+import { validateAndNormalizePhone } from './phoneValidation';
 
 export interface PlatformDefinition {
   id: PlatformId;
@@ -1064,6 +1065,7 @@ export interface RegistrationValidationInput {
   fullName: string;
   username: string;
   phone: string;
+  phoneCountry?: string;
   email: string;
   password: string;
   confirmPassword: string;
@@ -1074,6 +1076,7 @@ export interface RegistrationValidationResult {
   cleanName: string;
   normalizedUsername: string;
   normalizedPhone: string;
+  phoneCountryCode: string;
   cleanEmail: string;
   error?: string;
 }
@@ -1083,7 +1086,13 @@ export function validateRegistrationInput(
 ): RegistrationValidationResult {
   const cleanName = String(input.fullName || '').trim();
   const unameCheck = validateUsername(input.username || '');
-  const normalizedPhone = String(input.phone || '').trim().replace(/[\s-]/g, '');
+  const selectedCountry = (String(input.phoneCountry || 'BD').trim().toUpperCase() || 'BD') as Parameters<
+    typeof validateAndNormalizePhone
+  >[1];
+  const phoneCheck = validateAndNormalizePhone(input.phone || '', selectedCountry);
+  const normalizedPhone = phoneCheck.valid
+    ? phoneCheck.e164
+    : String(input.phone || '').trim().replace(/[\s-]/g, '');
   const cleanEmail = String(input.email || '').trim().toLowerCase();
 
   if (cleanName.length < 2 || cleanName.length > 80) {
@@ -1092,6 +1101,7 @@ export function validateRegistrationInput(
       cleanName,
       normalizedUsername: unameCheck.normalized,
       normalizedPhone,
+      phoneCountryCode: phoneCheck.dialCode,
       cleanEmail,
       error: 'Full name must be between 2 and 80 characters.',
     };
@@ -1103,19 +1113,21 @@ export function validateRegistrationInput(
       cleanName,
       normalizedUsername: unameCheck.normalized,
       normalizedPhone,
+      phoneCountryCode: phoneCheck.dialCode,
       cleanEmail,
       error: unameCheck.error || 'Invalid username.',
     };
   }
 
-  if (!/^\+?[0-9]{8,16}$/.test(normalizedPhone) || normalizedPhone.length > 32) {
+  if (!phoneCheck.valid) {
     return {
       valid: false,
       cleanName,
       normalizedUsername: unameCheck.normalized,
       normalizedPhone,
+      phoneCountryCode: phoneCheck.dialCode,
       cleanEmail,
-      error: 'Enter a valid phone number (8–16 digits, optional country code +880).',
+      error: phoneCheck.error || 'Please enter a valid mobile number.',
     };
   }
 
@@ -1125,6 +1137,7 @@ export function validateRegistrationInput(
       cleanName,
       normalizedUsername: unameCheck.normalized,
       normalizedPhone,
+      phoneCountryCode: phoneCheck.dialCode,
       cleanEmail,
       error: 'Enter a valid email address.',
     };
@@ -1137,6 +1150,7 @@ export function validateRegistrationInput(
       cleanName,
       normalizedUsername: unameCheck.normalized,
       normalizedPhone,
+      phoneCountryCode: phoneCheck.dialCode,
       cleanEmail,
       error:
         pwdCheck.error ||
@@ -1150,6 +1164,7 @@ export function validateRegistrationInput(
       cleanName,
       normalizedUsername: unameCheck.normalized,
       normalizedPhone,
+      phoneCountryCode: phoneCheck.dialCode,
       cleanEmail,
       error: 'Password and Confirm Password do not match.',
     };
@@ -1159,7 +1174,8 @@ export function validateRegistrationInput(
     valid: true,
     cleanName,
     normalizedUsername: unameCheck.normalized,
-    normalizedPhone,
+    normalizedPhone: phoneCheck.e164,
+    phoneCountryCode: phoneCheck.dialCode,
     cleanEmail,
   };
 }
@@ -1669,9 +1685,9 @@ export function getListingStatusBadgeMeta(status: ListingStatus): {
     case 'draft':
       return { label: 'Draft (Saved Privately)', canSellerEdit: true, isPubliclyVisible: false };
     case 'pending':
-      return { label: 'Pending Admin Review', canSellerEdit: false, isPubliclyVisible: false };
+      return { label: 'Pending Admin Review', canSellerEdit: true, isPubliclyVisible: false };
     case 'active':
-      return { label: 'Approved & Live', canSellerEdit: false, isPubliclyVisible: true };
+      return { label: 'Approved & Live', canSellerEdit: true, isPubliclyVisible: true };
     case 'reserved':
       return { label: 'Reserved — Pending Buyer Payment', canSellerEdit: false, isPubliclyVisible: true };
     case 'sold':

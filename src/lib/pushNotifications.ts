@@ -630,8 +630,72 @@ export async function enableWebPushForCurrentUser(
 }
 
 /**
- * Silently refreshes and synchronizes an opted-in browser's FCM token across sessions,
- * cleaning up any superseded token ID on this browser. Never prompts for permission.
+ * Triggered ONLY inside a direct user click handler ("Allow Notifications" in onboarding banner).
+ * Requests native browser notification permission, registers `/firebase-messaging-sw.js`,
+ * and if the user is signed in, immediately obtains and stores the FCM Web Push token.
+ * If the user is currently a guest, `syncActiveWebPushTokenForSession` automatically links the token upon sign-in.
+ */
+export async function requestNotificationPermissionFromOnboarding(
+  fallbackVapidKey?: string | null
+): Promise<{
+  permission: NotificationPermission | 'unsupported';
+  tokenSynced: boolean;
+  message: string;
+}> {
+  const envInfo = detectBrowserPushEnvironment();
+  if (
+    !envInfo.isSecureContext ||
+    envInfo.iosRequiresHomeScreenInstall ||
+    !envInfo.supportsNotificationApi ||
+    !envInfo.supportsServiceWorker
+  ) {
+    return {
+      permission: 'unsupported',
+      tokenSynced: false,
+      message: 'Browser push notifications are not available in this context.',
+    };
+  }
+
+  const permission = await Notification.requestPermission();
+  if (permission !== 'granted') {
+    return {
+      permission,
+      tokenSynced: false,
+      message:
+        permission === 'denied'
+          ? 'Browser notifications were blocked. You can still view all updates in your BEXORA Inbox.'
+          : 'Notification permission was dismissed.',
+    };
+  }
+
+  // Register FCM service worker immediately so background push scope is warm
+  await getOrRegisterFcmServiceWorker().catch(() => undefined);
+
+  const currentUser = auth.currentUser;
+  if (currentUser?.uid) {
+    try {
+      localStorage.setItem(`${LOCAL_PUSH_OPTIN_KEY}${currentUser.uid}`, '1');
+    } catch {
+      // Ignore storage limits
+    }
+    await syncActiveWebPushTokenForSession(currentUser.uid, fallbackVapidKey);
+    return {
+      permission: 'granted',
+      tokenSynced: true,
+      message: 'Notifications enabled! You will receive instant BEXORA alerts even in the background.',
+    };
+  }
+
+  return {
+    permission: 'granted',
+    tokenSynced: false,
+    message: 'Notifications allowed! Your browser will automatically link push alerts when you sign in.',
+  };
+}
+
+/**
+ * Automatically initializes, refreshes, and synchronizes a signed-in user's FCM Web Push token
+ * whenever browser `Notification.permission === 'granted'`. Never prompts for permission.
  */
 export async function syncActiveWebPushTokenForSession(
   uid: string,
@@ -641,17 +705,11 @@ export async function syncActiveWebPushTokenForSession(
   const envInfo = detectBrowserPushEnvironment();
   if (
     !envInfo.isSecureContext ||
+    envInfo.iosRequiresHomeScreenInstall ||
     !envInfo.supportsNotificationApi ||
     Notification.permission !== 'granted' ||
     !envInfo.supportsServiceWorker
   ) {
-    return;
-  }
-  try {
-    if (localStorage.getItem(`${LOCAL_PUSH_OPTIN_KEY}${uid}`) !== '1') {
-      return;
-    }
-  } catch {
     return;
   }
 
@@ -670,9 +728,13 @@ export async function syncActiveWebPushTokenForSession(
     if (!fcmToken || auth.currentUser?.uid !== uid) return;
 
     const tokenId = `fcm_${deterministicHashHex(fcmToken)}`;
-    const prevDeviceTokenId = localStorage.getItem(`${LOCAL_DEVICE_TOKEN_ID_KEY}${uid}`);
-    if (prevDeviceTokenId && prevDeviceTokenId !== tokenId) {
-      await deleteDoc(doc(db, 'privateUsers', uid, 'pushTokens', prevDeviceTokenId)).catch(() => {});
+    try {
+      const prevDeviceTokenId = localStorage.getItem(`${LOCAL_DEVICE_TOKEN_ID_KEY}${uid}`);
+      if (prevDeviceTokenId && prevDeviceTokenId !== tokenId) {
+        await deleteDoc(doc(db, 'privateUsers', uid, 'pushTokens', prevDeviceTokenId)).catch(() => {});
+      }
+    } catch {
+      // Ignore storage errors
     }
 
     await upsertUserPushTokenDoc({
@@ -683,7 +745,13 @@ export async function syncActiveWebPushTokenForSession(
       platform: envInfo.isIOS ? 'ios_pwa' : 'web',
       deviceLabel: envInfo.deviceLabel.slice(0, 80),
     });
-    localStorage.setItem(`${LOCAL_DEVICE_TOKEN_ID_KEY}${uid}`, tokenId);
+
+    try {
+      localStorage.setItem(`${LOCAL_DEVICE_TOKEN_ID_KEY}${uid}`, tokenId);
+      localStorage.setItem(`${LOCAL_PUSH_OPTIN_KEY}${uid}`, '1');
+    } catch {
+      // Ignore storage errors
+    }
   } catch {
     // Non-fatal silent refresh skip
   }
@@ -766,6 +834,7 @@ export interface ServerPushDispatchRequest {
   referenceLabel?: string;
   dealId?: string;
   listingId?: string;
+  conversationId?: string;
 }
 
 /**
@@ -794,7 +863,7 @@ export async function dispatchBackgroundWebPush(
       },
       body: JSON.stringify({
         ...reqPayload,
-        privacyMode: callerPrefs.lockScreenPrivacyMode,
+        privacyMode: 'standard',
         vibrationEnabled: callerPrefs.vibrationEnabled,
         vibrationStrength: callerPrefs.vibrationStrength || 'strong',
       }),

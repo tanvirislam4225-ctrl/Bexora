@@ -84,10 +84,14 @@ export interface PublicProfile {
   updatedAt?: unknown;
 }
 
+export type UserProfile = PublicProfile;
+
 export interface PrivateUser {
   uid: string;
   email: string;
   phone: string;
+  phoneCountryCode?: string;
+  phoneFormatValidated?: boolean;
   emailVerified: boolean;
   phoneVerified: boolean;
   nidStatus: NidVerificationStatus;
@@ -201,6 +205,8 @@ export interface ConversationRecord {
   lastMessage: string;
   safetyAcceptedByBuyer: boolean;
   safetyAcceptedBySeller: boolean;
+  moderationPaused?: boolean;
+  moderationPauseReason?: string;
   updatedAtMs: number;
 }
 
@@ -252,6 +258,8 @@ export interface DealRecord {
   settledAtMs?: number;
   refundedAtMs?: number;
   publicActivityId?: string;
+  moderationPaused?: boolean;
+  moderationPauseReason?: string;
   status: DealStatus;
   createdAtMs: number;
 }
@@ -439,7 +447,8 @@ export type NotificationRefType =
   | 'deal'
   | 'wallet'
   | 'profile'
-  | 'announcement';
+  | 'announcement'
+  | 'conversation';
 
 export type NotificationSoundId =
   | '01_soft_normal'
@@ -585,3 +594,6 @@ export type InfoTopicId =
   | 'dispute-policy'
   | 'acceptable-use'
   | 'user-responsibilities';
+
+export * from './types/moderation';
+

@@ -10,6 +10,7 @@ import {
   filterNotificationsForRecipient,
   formatUnreadBadgeCount,
   isValidFirestoreDocId,
+  resolveNotificationOnboardingState,
   sanitizeNotificationDestination,
   sortNotificationsNewestFirst,
   truncateNotificationField,
@@ -237,3 +238,91 @@ test('classifyAuthFailureCause never misattributes unrelated auth or Firestore e
   assert.equal(classifyAuthFailureCause('Missing or insufficient permissions.'), 'firestore_permission_denied');
   assert.equal(truncateNotificationField('A'.repeat(200), 140).length <= 140, true);
 });
+
+test('resolveNotificationOnboardingState handles Case A (default), Case B (granted), Case C (denied), dismissal, iOS, and chat:<convId> routing', () => {
+  // Case A: default permission -> show onboarding when not dismissed
+  assert.equal(
+    resolveNotificationOnboardingState({
+      permission: 'default',
+      dismissedInStorage: false,
+      isSecureContext: true,
+      supportsNotificationApi: true,
+      supportsServiceWorker: true,
+      iosRequiresHomeScreenInstall: false,
+    }),
+    'show_onboarding'
+  );
+
+  // Case A dismissed ("Not Now") -> never nag
+  assert.equal(
+    resolveNotificationOnboardingState({
+      permission: 'default',
+      dismissedInStorage: true,
+      isSecureContext: true,
+      supportsNotificationApi: true,
+      supportsServiceWorker: true,
+      iosRequiresHomeScreenInstall: false,
+    }),
+    'dismissed_or_unsupported'
+  );
+
+  // Case B: granted -> silent auto-sync without showing onboarding again
+  assert.equal(
+    resolveNotificationOnboardingState({
+      permission: 'granted',
+      dismissedInStorage: false,
+      isSecureContext: true,
+      supportsNotificationApi: true,
+      supportsServiceWorker: true,
+      iosRequiresHomeScreenInstall: false,
+    }),
+    'silent_auto_sync'
+  );
+
+  // Case C: denied -> discreet inbox hint only (never page-nag)
+  assert.equal(
+    resolveNotificationOnboardingState({
+      permission: 'denied',
+      dismissedInStorage: false,
+      isSecureContext: true,
+      supportsNotificationApi: true,
+      supportsServiceWorker: true,
+      iosRequiresHomeScreenInstall: false,
+    }),
+    'denied_discreet_inbox_hint'
+  );
+
+  // iOS Safari non-standalone -> discreet Home Screen install hint inside Inbox
+  assert.equal(
+    resolveNotificationOnboardingState({
+      permission: 'default',
+      dismissedInStorage: false,
+      isSecureContext: true,
+      supportsNotificationApi: true,
+      supportsServiceWorker: true,
+      iosRequiresHomeScreenInstall: true,
+    }),
+    'ios_install_inbox_hint'
+  );
+
+  // Insecure context -> unsupported
+  assert.equal(
+    resolveNotificationOnboardingState({
+      permission: 'default',
+      dismissedInStorage: false,
+      isSecureContext: false,
+      supportsNotificationApi: true,
+      supportsServiceWorker: true,
+      iosRequiresHomeScreenInstall: false,
+    }),
+    'dismissed_or_unsupported'
+  );
+
+  // Pre-deal Messenger chat:<convId> deep link routing
+  const chatDest = sanitizeNotificationDestination('chat:conv_987_xyz');
+  assert.ok(chatDest);
+  assert.equal(chatDest.kind, 'chat');
+  assert.equal(chatDest.view, 'chat');
+  assert.equal(chatDest.targetId, 'conv_987_xyz');
+});
+

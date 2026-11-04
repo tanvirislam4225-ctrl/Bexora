@@ -34,11 +34,21 @@ import {
 import { validateImageMagicBytes } from './src/lib/marketplaceLogic';
 import { verifyWordPressWebhookRequest } from './src/lib/serverWebhookSecurity';
 import { createAiAdminEngine } from './src/server/aiAdminEngine';
+import { createTrustSafetyEngine } from './src/server/trustSafetyEngine';
+import { registerMarketplaceManagementRoutes } from './src/server/marketplaceManagementRoutes';
 import {
   mergeAndSortTickerItems,
   parseRawPublicActivityItem,
 } from './src/lib/activityTickerLogic';
 import { computeVerifiedMarketplaceStats } from './src/lib/reviewsAndStatsLogic';
+import {
+  BEXORA_BRAND_AUTH_DOMAIN_PRIORITY,
+  type CustomAuthDomainReadinessResult,
+  evaluateCustomAuthDomainReadiness,
+  isSafeFirebaseAuthProxyPath,
+  PRIMARY_VERIFIED_BEXORA_AUTH_DOMAIN,
+  resolveEffectiveFirebaseAuthDomain,
+} from './src/lib/authDomainAndPersistenceLogic';
 import type { PublicActivityItem, ReviewRecord } from './src/types';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -171,6 +181,7 @@ async function startServer() {
   const paymentSessionLimiter = new SlidingWindowRateLimiter(20, 60_000);
   const webhookLimiter = new SlidingWindowRateLimiter(120, 60_000);
   const telemetryLimiter = new SlidingWindowRateLimiter(20, 60_000, 4000);
+  const moderationLimiter = new SlidingWindowRateLimiter(60, 60_000);
 
   // Global HTTP Security Headers (CSP, HSTS on HTTPS, X-Content-Type-Options, Referrer-Policy, Permissions-Policy)
   app.use((req, res, next) => {
@@ -179,6 +190,18 @@ async function startServer() {
       .trim()
       .toLowerCase();
     const isHttps = req.secure || forwardedProto === 'https';
+
+    if (req.path.startsWith('/__/auth/') || req.path.startsWith('/__/firebase/')) {
+      // Match Firebase Hosting's official `/__/auth/*` headers: never emit `frame-ancestors` or `X-Frame-Options`
+      // on `/__/auth/iframe` because `AuthRelay` validates framing origins cryptographically against `authorizedDomains`.
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+      if (isHttps) {
+        res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+      }
+      return next();
+    }
+
     const secHeaders = buildSecurityHeaders({ isHttps, isDev: !isProdRuntime });
     for (const [hdrKey, hdrVal] of Object.entries(secHeaders)) {
       res.setHeader(hdrKey, hdrVal);
@@ -192,6 +215,116 @@ async function startServer() {
       return res.status(404).type('text/plain').send('Not Found');
     }
     next();
+  });
+
+  // First-Party BEXORA Firebase Authentication Reverse Proxy (`/__/auth/*` & `/__/firebase/init.*`)
+  // Eliminates `responsive-dragon-tmn89.firebaseapp.com` exposure during OAuth sign-in on verified BEXORA HTTPS domains.
+  const authProxyBodyParser = express.raw({ type: '*/*', limit: '64kb' });
+  app.use('/__', authProxyBodyParser, async (req, res) => {
+    const fullProxyPath = `/__${req.path}`;
+    if (!isSafeFirebaseAuthProxyPath(fullProxyPath)) {
+      return res.status(404).type('text/plain').send('Not Found');
+    }
+
+    const method = req.method.toUpperCase();
+    if (method !== 'GET' && method !== 'HEAD' && method !== 'POST' && method !== 'OPTIONS') {
+      return res.status(405).type('text/plain').send('Method Not Allowed');
+    }
+    if (method === 'OPTIONS') {
+      return res.status(204).end();
+    }
+
+    const cfg = loadVerifiedFirebaseConfig();
+    if (!cfg.configValid) {
+      return res.status(503).type('text/plain').send('Firebase configuration unavailable');
+    }
+
+    const forwardedProto = String(req.headers['x-forwarded-proto'] || '')
+      .split(',')[0]!
+      .trim()
+      .toLowerCase();
+    const proto = req.secure || forwardedProto === 'https' ? 'https:' : 'http:';
+    const reqHostname = String(req.get('host') || '')
+      .split(':')[0]!
+      .trim()
+      .toLowerCase();
+    const effectiveAuthDomain = resolveEffectiveFirebaseAuthDomain({
+      configuredAuthDomain: cfg.authDomain,
+      windowHostname: reqHostname,
+      windowProtocol: proto,
+      envCustomAuthDomain: process.env.VITE_FIREBASE_CUSTOM_AUTH_DOMAIN,
+    });
+
+    if (fullProxyPath === '/__/firebase/init.json' || fullProxyPath === '/__/firebase/init.js') {
+      const publicInitPayload = {
+        apiKey: cfg.apiKey,
+        authDomain: effectiveAuthDomain,
+        projectId: cfg.projectId,
+        storageBucket: cfg.storageBucket,
+        messagingSenderId: cfg.projectNumber,
+        appId: cfg.appId,
+      };
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Cache-Control', 'public, max-age=300');
+      if (fullProxyPath.endsWith('.js')) {
+        return res
+          .status(200)
+          .type('application/javascript; charset=utf-8')
+          .send(
+            `if (typeof firebase === 'object') { firebase.initializeApp(${JSON.stringify(
+              publicInitPayload
+            )}); }\n`
+          );
+      }
+      return res.status(200).json(publicInitPayload);
+    }
+
+    try {
+      const rawUrl = req.originalUrl || fullProxyPath;
+      const qIdx = rawUrl.indexOf('?');
+      const querySuffix = qIdx >= 0 ? rawUrl.slice(qIdx) : '';
+      const upstreamUrl = `https://${cfg.projectId}.firebaseapp.com${fullProxyPath}${querySuffix}`;
+
+      const upstreamHeaders: Record<string, string> = {
+        Accept: String(req.headers.accept || '*/*'),
+      };
+      if (typeof req.headers['user-agent'] === 'string') {
+        upstreamHeaders['User-Agent'] = req.headers['user-agent'];
+      }
+      if (method === 'POST' && typeof req.headers['content-type'] === 'string') {
+        upstreamHeaders['Content-Type'] = req.headers['content-type'];
+      }
+
+      const bodyBuffer =
+        method === 'POST' && Buffer.isBuffer(req.body) && req.body.length > 0
+          ? new Uint8Array(req.body)
+          : undefined;
+
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 8000);
+      const upstreamResp = await fetch(upstreamUrl, {
+        method,
+        headers: upstreamHeaders,
+        body: bodyBuffer,
+        redirect: 'manual',
+        signal: controller.signal,
+      }).finally(() => clearTimeout(timer));
+
+      const ct = upstreamResp.headers.get('content-type');
+      if (ct) res.setHeader('Content-Type', ct);
+      const cc = upstreamResp.headers.get('cache-control');
+      if (cc) res.setHeader('Cache-Control', cc);
+      const loc = upstreamResp.headers.get('location');
+      if (loc) res.setHeader('Location', loc);
+
+      if (method === 'HEAD') {
+        return res.status(upstreamResp.status).end();
+      }
+      const arrBuf = await upstreamResp.arrayBuffer();
+      return res.status(upstreamResp.status).send(Buffer.from(arrBuf));
+    } catch {
+      return res.status(502).type('text/plain').send('Authentication relay temporarily unavailable');
+    }
   });
 
   // Restrictive API CORS + Cross-Origin State-Changing CSRF Protection
@@ -258,7 +391,13 @@ async function startServer() {
 
   app.use((req, res, next) => {
     const cleanPath = req.originalUrl.split('?')[0] || req.path;
-    if (cleanPath === '/api/ai/verify-evidence') {
+    if (
+      cleanPath === '/api/ai/verify-evidence' ||
+      cleanPath === '/api/moderation/inspect' ||
+      cleanPath === '/api/moderation/inspect-media' ||
+      cleanPath === '/api/moderation/reports' ||
+      cleanPath.startsWith('/api/listings/')
+    ) {
       return verifyEvidenceJsonParser(req, res, next);
     }
     return defaultJsonParser(req, res, next);
@@ -510,6 +649,104 @@ async function startServer() {
 
   const authCapabilitiesCache = new Map<string, { expiresAtMs: number; payload: Record<string, unknown> }>();
 
+  const DEFAULT_GOOGLE_OAUTH_WEB_CLIENT_ID =
+    '448578956301-804b7ckehcuraasdn6ji54i850iu4bk4.apps.googleusercontent.com';
+
+  let brandDomainReadinessCache: {
+    expiresAtMs: number;
+    oauthClientId: string;
+    domains: CustomAuthDomainReadinessResult[];
+    activeSameOriginBrandAuthDomain: string;
+    preferredCrossOriginBrandAuthDomain: string;
+  } | null = null;
+
+  async function fetchTextWithTimeout(
+    url: string,
+    init: RequestInit = {},
+    timeoutMs = 3500
+  ): Promise<{ status: number; headers: Headers; text: string } | null> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const resp = await fetch(url, {
+        ...init,
+        signal: controller.signal,
+      });
+      const text = await resp.text().catch(() => '');
+      return { status: resp.status, headers: resp.headers, text };
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function probeBrandAuthDomains(
+    cfg: ReturnType<typeof loadVerifiedFirebaseConfig>,
+    authorizedDomains: string[],
+    oauthClientIdHint = '',
+    forceRefresh = false
+  ) {
+    if (!forceRefresh && brandDomainReadinessCache && Date.now() < brandDomainReadinessCache.expiresAtMs) {
+      return brandDomainReadinessCache;
+    }
+
+    const oauthClientId = oauthClientIdHint || DEFAULT_GOOGLE_OAUTH_WEB_CLIENT_ID;
+    const normalizedAuthSet = new Set(authorizedDomains.map((d) => d.trim().toLowerCase()));
+
+    const domains = await Promise.all(
+      BEXORA_BRAND_AUTH_DOMAIN_PRIORITY.map(async (domain) => {
+        const redirectUri = `https://${domain}/__/auth/handler`;
+        const oauthProbeUrl =
+          `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(oauthClientId)}` +
+          `&redirect_uri=${encodeURIComponent(redirectUri)}` +
+          '&response_type=code&scope=openid%20email%20profile&state=bexora_domain_probe';
+
+        const [handlerResp, iframeResp, oauthResp] = await Promise.all([
+          fetchTextWithTimeout(`https://${domain}/__/auth/handler`, { redirect: 'manual' }),
+          fetchTextWithTimeout(`https://${domain}/__/auth/iframe`, { redirect: 'manual' }),
+          fetchTextWithTimeout(oauthProbeUrl, {
+            headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BexoraAuthVerifier/1.0)' },
+          }),
+        ]);
+
+        return evaluateCustomAuthDomainReadiness({
+          domain,
+          handlerStatus: handlerResp?.status ?? 0,
+          handlerHasFireauthWidget: Boolean(
+            handlerResp?.text.includes('fireauth.oauthhelper.widget.initialize')
+          ),
+          iframeStatus: iframeResp?.status ?? 0,
+          iframeHasAuthRelay: Boolean(iframeResp?.text.includes('AuthRelay')),
+          iframeCspHeader: iframeResp?.headers.get('content-security-policy') ?? null,
+          iframeXFrameOptionsHeader: iframeResp?.headers.get('x-frame-options') ?? null,
+          inFirebaseAuthorizedDomains: normalizedAuthSet.has(domain),
+          googleOAuthStatus: oauthResp?.status ?? 0,
+          googleOAuthRedirectMismatch: Boolean(
+            oauthResp?.text.includes('redirect_uri_mismatch') ||
+              oauthResp?.text.includes('Error 400')
+          ),
+          oauthClientId,
+          firebaseProjectId: cfg.projectId,
+        });
+      })
+    );
+
+    const activeSameOriginBrandAuthDomain =
+      domains.find((d) => d.readyForSameOriginAuth)?.domain || PRIMARY_VERIFIED_BEXORA_AUTH_DOMAIN;
+    const preferredCrossOriginBrandAuthDomain =
+      domains.find((d) => d.readyForCrossOriginCentralizedAuth)?.domain || '';
+
+    brandDomainReadinessCache = {
+      expiresAtMs: Date.now() + 60_000,
+      oauthClientId,
+      domains,
+      activeSameOriginBrandAuthDomain,
+      preferredCrossOriginBrandAuthDomain,
+    };
+    return brandDomainReadinessCache;
+  }
+
   app.get(
     '/api/auth/capabilities',
     makeRateLimitMiddleware('auth_capabilities', diagnosticProbeLimiter),
@@ -591,8 +828,13 @@ async function startServer() {
 
         let googleProviderStatus: 'enabled' | 'disabled' | 'unable_to_verify' = 'unable_to_verify';
         let currentDomainAuthorized: boolean | null = null;
+        let discoveredOAuthClientId = DEFAULT_GOOGLE_OAUTH_WEB_CLIENT_ID;
         if (googleRes) {
           const gText = await googleRes.text().catch(() => '');
+          const clientMatch = gText.match(/client_id=([0-9]+-[a-z0-9]+\.apps\.googleusercontent\.com)/i);
+          if (clientMatch?.[1]) {
+            discoveredOAuthClientId = clientMatch[1];
+          }
           if (googleRes.status >= 500 || googleRes.status === 429) {
             googleProviderStatus = 'unable_to_verify';
           } else if (gText.includes('OPERATION_NOT_ALLOWED')) {
@@ -651,9 +893,35 @@ async function startServer() {
           }
         }
 
+        const brandReadiness = await probeBrandAuthDomains(
+          cfg,
+          authorizedDomains,
+          discoveredOAuthClientId,
+          forceRefresh
+        );
+
+        const reqProto =
+          req.secure ||
+          String(req.headers['x-forwarded-proto'] || '')
+            .split(',')[0]!
+            .trim()
+            .toLowerCase() === 'https'
+            ? 'https:'
+            : 'http:';
+        const effectiveAuthDomain = resolveEffectiveFirebaseAuthDomain({
+          configuredAuthDomain: cfg.authDomain,
+          windowHostname: hostname,
+          windowProtocol: reqProto,
+          envCustomAuthDomain: process.env.VITE_FIREBASE_CUSTOM_AUTH_DOMAIN,
+          verifiedBrandAuthDomain: brandReadiness.preferredCrossOriginBrandAuthDomain || null,
+        });
+
         const basePayload: Record<string, unknown> = {
           projectId: cfg.projectId,
           projectNumber: cfg.projectNumber,
+          effectiveAuthDomain,
+          preferredBrandAuthDomain: brandReadiness.preferredCrossOriginBrandAuthDomain || undefined,
+          customAuthProxyEnabled: true,
           googleEnabled: googleProviderStatus !== 'disabled',
           googleProviderStatus,
           emailPasswordEnabled: emailPasswordStatus !== 'disabled',
@@ -696,6 +964,68 @@ async function startServer() {
           sandboxServiceAccountEmail: '',
           iamConsoleUrl: '',
           checkedAtMs: Date.now(),
+        });
+      }
+    }
+  );
+
+  app.get(
+    '/api/auth/custom-domain-readiness',
+    makeRateLimitMiddleware('auth_custom_domain_readiness', diagnosticProbeLimiter),
+    async (req, res) => {
+      res.setHeader('Cache-Control', 'no-store');
+      try {
+        const cfg = loadVerifiedFirebaseConfig();
+        if (!cfg.configValid) {
+          return res.status(503).json({ ok: false, error: 'Firebase configuration unavailable.' });
+        }
+        const forceRefresh = req.query.refresh === '1';
+        const projRes = await fetch(
+          `https://identitytoolkit.googleapis.com/v1/projects?key=${cfg.apiKey}`
+        ).catch(() => null);
+        let authorizedDomains: string[] = [];
+        if (projRes && projRes.ok) {
+          const projJson = (await projRes.json().catch(() => ({}))) as {
+            authorizedDomains?: unknown;
+          };
+          if (Array.isArray(projJson.authorizedDomains)) {
+            authorizedDomains = projJson.authorizedDomains.filter(
+              (d): d is string => typeof d === 'string'
+            );
+          }
+        }
+
+        const readiness = await probeBrandAuthDomains(
+          cfg,
+          authorizedDomains,
+          DEFAULT_GOOGLE_OAUTH_WEB_CLIENT_ID,
+          forceRefresh
+        );
+        const canonicalBrandBase = `https://${readiness.activeSameOriginBrandAuthDomain}`;
+
+        return res.json({
+          ok: true,
+          projectId: cfg.projectId,
+          projectNumber: cfg.projectNumber,
+          oauthClientId: readiness.oauthClientId,
+          authorizedDomains,
+          activeSameOriginBrandAuthDomain: readiness.activeSameOriginBrandAuthDomain,
+          preferredCrossOriginBrandAuthDomain:
+            readiness.preferredCrossOriginBrandAuthDomain || null,
+          domains: readiness.domains,
+          oauthConsentBranding: {
+            appName: 'BEXORA',
+            homepageUrl: canonicalBrandBase,
+            logoUrl: `${canonicalBrandBase}/icon-512.png`,
+            privacyPolicyUrl: `${canonicalBrandBase}/privacy`,
+            termsOfServiceUrl: `${canonicalBrandBase}/terms`,
+          },
+          checkedAtMs: Date.now(),
+        });
+      } catch {
+        return res.status(502).json({
+          ok: false,
+          error: 'Could not verify custom authentication domain readiness at this moment.',
         });
       }
     }
@@ -1823,8 +2153,8 @@ async function startServer() {
       const notificationId = String(body.notificationId || '').trim();
       const dealId = String(body.dealId || '').trim();
       const listingId = String(body.listingId || '').trim();
+      const conversationId = String(body.conversationId || '').trim();
       const alertKind = body.alertKind === 'deal_room_created' ? 'deal_room_created' : 'normal';
-      const privacyMode = body.privacyMode === 'standard' ? 'standard' : 'minimal';
       const destination = sanitizeServerPushDestination(body.destination);
 
       if (!/^[a-zA-Z0-9_-]{1,128}$/.test(recipientId) || !/^[a-zA-Z0-9_-]{1,128}$/.test(notificationId)) {
@@ -1896,6 +2226,31 @@ async function startServer() {
         }
       }
 
+      if (
+        !authorized &&
+        conversationId &&
+        /^[a-zA-Z0-9_-]{1,128}$/.test(conversationId) &&
+        alertKind !== 'deal_room_created'
+      ) {
+        const convCheck = await fetch(
+          `${firestoreBaseUrl}/conversations/${encodeURIComponent(conversationId)}`,
+          {
+            headers: { Authorization: `Bearer ${idToken}` },
+          }
+        ).catch(() => null);
+        if (convCheck && convCheck.ok) {
+          const convDoc = (await convCheck.json()) as Record<string, unknown>;
+          const buyerId = readFirestoreStringField(convDoc, 'buyerId');
+          const sellerId = readFirestoreStringField(convDoc, 'sellerId');
+          if (
+            (callerUid === buyerId && recipientId === sellerId) ||
+            (callerUid === sellerId && recipientId === buyerId)
+          ) {
+            authorized = true;
+          }
+        }
+      }
+
       if (!authorized) {
         return res.status(403).json({ ok: false, deliveryStatus: 'unauthorized_recipient' });
       }
@@ -1953,8 +2308,7 @@ async function startServer() {
         });
       }
 
-      // 4. Read recipient's saved notification preferences if accessible (falls back safely to minimal privacy + Strong vibration)
-      let effectivePrivacyMode: 'minimal' | 'standard' = privacyMode;
+      // 4. Read recipient's saved vibration preferences if accessible
       let recipientVibrationEnabled = body.vibrationEnabled !== false;
       let recipientVibrationStrength: 'standard' | 'strong' =
         body.vibrationStrength === 'standard' ? 'standard' : 'strong';
@@ -1974,11 +2328,6 @@ async function startServer() {
           };
           const prefFields = recipientDoc.fields?.notificationPrefs?.mapValue?.fields;
           if (prefFields) {
-            if (prefFields.lockScreenPrivacyMode?.stringValue === 'standard') {
-              effectivePrivacyMode = 'standard';
-            } else if (prefFields.lockScreenPrivacyMode?.stringValue === 'minimal') {
-              effectivePrivacyMode = 'minimal';
-            }
             if (typeof prefFields.vibrationEnabled?.booleanValue === 'boolean') {
               recipientVibrationEnabled = prefFields.vibrationEnabled.booleanValue;
             }
@@ -1987,51 +2336,25 @@ async function startServer() {
             } else if (prefFields.vibrationStrength?.stringValue === 'strong') {
               recipientVibrationStrength = 'strong';
             }
-            if (
-              body.category === 'bid' &&
-              alertKind !== 'deal_room_created' &&
-              prefFields.bidUpdatesEnabled?.booleanValue === false
-            ) {
-              return res.json({
-                ok: true,
-                deliveryStatus: 'skipped_by_user_preference',
-                deliveredCount: 0,
-              });
-            }
-            if (
-              body.category === 'listing' &&
-              String(notificationId).includes('seller_new_listing') &&
-              prefFields.followedSellerListingsEnabled?.booleanValue === false
-            ) {
-              return res.json({
-                ok: true,
-                deliveryStatus: 'skipped_by_user_preference',
-                deliveredCount: 0,
-              });
-            }
           }
         }
       } catch {
         // Fallback to defaults if recipient doc lookup is unavailable
       }
 
-      // 5. Construct minimal, privacy-safe DATA-ONLY FCM HTTP v1 payload via Firebase Admin SDK.
+      // 5. Construct clear, privacy-redacted DATA-ONLY FCM HTTP v1 payload via Firebase Admin SDK.
       // Omitting top-level `notification` and `webpush.notification` guarantees:
       // - Zero duplicate notifications when foreground `onMessage` and Firestore `onSnapshot` are active.
       // - Deterministic single-notification rendering + `data.destination` click routing in `firebase-messaging-sw.js`.
       const safeTitle =
         alertKind === 'deal_room_created'
           ? 'New Deal Room Created'
-          : effectivePrivacyMode === 'minimal'
-          ? 'BEXORA Notification'
           : redactSensitivePreviewServer(body.title || 'BEXORA Notification').slice(0, 110);
 
       const safeBody =
         alertKind === 'deal_room_created'
           ? 'Payment confirmed in BEXORA Escrow. Tap to open your private 3-party Deal Room.'
-          : effectivePrivacyMode === 'minimal'
-          ? 'You have a new update on BEXORA. Tap to view safely.'
-          : redactSensitivePreviewServer(body.preview || 'Open BEXORA to view your update.').slice(0, 160);
+          : redactSensitivePreviewServer(body.preview || 'Open BEXORA to view your latest update.').slice(0, 160);
 
       const adminMessaging = getAdminMessaging(adminApp);
 
@@ -2195,34 +2518,6 @@ async function startServer() {
           continue;
         }
 
-        // Check follower privacy mode + followedSellerListingsEnabled preference
-        let privacyMode: 'minimal' | 'standard' = 'minimal';
-        try {
-          const userRes = await fetch(
-            `${firestoreBaseUrl}/privateUsers/${encodeURIComponent(recipientId)}`,
-            { headers: { Authorization: `Bearer ${cloudToken}` } }
-          );
-          if (userRes.ok) {
-            const userDoc = (await userRes.json()) as {
-              fields?: {
-                notificationPrefs?: {
-                  mapValue?: { fields?: Record<string, { booleanValue?: boolean; stringValue?: string }> };
-                };
-              };
-            };
-            const prefs = userDoc.fields?.notificationPrefs?.mapValue?.fields;
-            if (prefs?.followedSellerListingsEnabled?.booleanValue === false) {
-              skippedCount += 1;
-              continue;
-            }
-            if (prefs?.lockScreenPrivacyMode?.stringValue === 'standard') {
-              privacyMode = 'standard';
-            }
-          }
-        } catch {
-          // Proceed with safe minimal defaults
-        }
-
         const tokensRes = await fetch(
           `${firestoreBaseUrl}/privateUsers/${encodeURIComponent(recipientId)}/pushTokens`,
           { headers: { Authorization: `Bearer ${cloudToken}` } }
@@ -2234,11 +2529,8 @@ async function startServer() {
         };
         const docs = Array.isArray(tokensJson.documents) ? tokensJson.documents : [];
 
-        const pushTitle = privacyMode === 'minimal' ? 'BEXORA Followed Seller Alert' : rawTitle;
-        const pushBody =
-          privacyMode === 'minimal'
-            ? 'A seller you follow published a new listing on BEXORA. Tap to view.'
-            : rawPreview;
+        const pushTitle = rawTitle;
+        const pushBody = rawPreview;
 
         for (const tDoc of docs) {
           const enabled = readFirestoreBooleanField(tDoc as Record<string, unknown>, 'enabled');
@@ -2853,6 +3145,365 @@ Current system snapshot: ${typeof systemContext === 'string' ? systemContext.sli
     res.setHeader('Content-Type', 'application/zip');
     res.setHeader('Content-Disposition', 'attachment; filename="BEXORA_INFINITYFREE_PRODUCTION.zip"');
     return res.sendFile(zipPath);
+  });
+
+  // 4E. 24/7 Autonomous AI Trust & Safety Monitor, Multilingual Moderation, Strike Ledger, User Reporting & Account Appeals
+  const trustSafetyEngine = createTrustSafetyEngine({
+    workspaceRoot: __dirname,
+    getFirebaseConfig: () => loadVerifiedFirebaseConfig(),
+    getFirebaseAdminApp: (projectId: string) => getOrInitFirebaseAdminApp(projectId),
+    isEmergencyStopActive: async () => isAiEmergencyStopActive(loadVerifiedFirebaseConfig()),
+  });
+
+  trustSafetyEngine.startBackgroundMonitor();
+
+  app.post(
+    '/api/moderation/inspect',
+    makeRateLimitMiddleware('moderation_inspect', moderationLimiter),
+    async (req, res) => {
+      res.setHeader('Cache-Control', 'no-store');
+      const cfg = loadVerifiedFirebaseConfig();
+      const caller = await verifyCallerFirebaseToken(req, cfg);
+      if (!caller) {
+        return res.status(401).json({ ok: false, error: 'Authentication is required for content moderation inspection.' });
+      }
+      if (!consumeAuthenticatedUidLimit(req, res, 'moderation_inspect', caller.uid, moderationLimiter)) {
+        return;
+      }
+      const body = (req.body || {}) as Record<string, unknown>;
+      const surfaceRaw = String(body.surface || 'pre_deal_chat');
+      const validSurfaces = new Set([
+        'public_profile',
+        'username_display_name',
+        'listing_text',
+        'listing_media',
+        'pre_deal_chat',
+        'deal_room_chat',
+        'review',
+        'user_report',
+        'account_appeal',
+      ]);
+      const surface = (validSurfaces.has(surfaceRaw) ? surfaceRaw : 'pre_deal_chat') as
+        | 'public_profile'
+        | 'username_display_name'
+        | 'listing_text'
+        | 'listing_media'
+        | 'pre_deal_chat'
+        | 'deal_room_chat'
+        | 'review'
+        | 'user_report'
+        | 'account_appeal';
+
+      const result = await trustSafetyEngine.inspectTextSubmission({
+        callerUid: caller.uid,
+        callerEmail: caller.email,
+        callerName: typeof body.callerName === 'string' ? body.callerName.slice(0, 100) : undefined,
+        callerIdToken: caller.idToken,
+        request: {
+          eventKey: typeof body.eventKey === 'string' ? body.eventKey.slice(0, 120) : undefined,
+          surface,
+          text: typeof body.text === 'string' ? body.text.slice(0, 8000) : '',
+          secondaryText: typeof body.secondaryText === 'string' ? body.secondaryText.slice(0, 8000) : '',
+          listingId: typeof body.listingId === 'string' ? body.listingId.slice(0, 128) : undefined,
+          dealId: typeof body.dealId === 'string' ? body.dealId.slice(0, 128) : undefined,
+          conversationId: typeof body.conversationId === 'string' ? body.conversationId.slice(0, 128) : undefined,
+          messageId: typeof body.messageId === 'string' ? body.messageId.slice(0, 128) : undefined,
+          reviewId: typeof body.reviewId === 'string' ? body.reviewId.slice(0, 128) : undefined,
+          counterpartyId: typeof body.counterpartyId === 'string' ? body.counterpartyId.slice(0, 128) : undefined,
+          counterpartyName: typeof body.counterpartyName === 'string' ? body.counterpartyName.slice(0, 100) : undefined,
+          isQuotedReportOrAppeal: Boolean(body.isQuotedReportOrAppeal),
+        },
+      });
+      return res.json({ ok: true, result });
+    }
+  );
+
+  app.post(
+    '/api/moderation/inspect-media',
+    makeRateLimitMiddleware('moderation_inspect_media', aiComputeLimiter),
+    async (req, res) => {
+      res.setHeader('Cache-Control', 'no-store');
+      const cfg = loadVerifiedFirebaseConfig();
+      const caller = await verifyCallerFirebaseToken(req, cfg);
+      if (!caller) {
+        return res.status(401).json({ ok: false, error: 'Authentication is required for media safety inspection.' });
+      }
+      if (!consumeAuthenticatedUidLimit(req, res, 'moderation_inspect_media', caller.uid, aiComputeLimiter)) {
+        return;
+      }
+      const body = (req.body || {}) as Record<string, unknown>;
+      const rawItems = Array.isArray(body.items) ? body.items.slice(0, 6) : [];
+      const items = rawItems.map((it, idx) => {
+        const obj = (it && typeof it === 'object' ? it : {}) as Record<string, unknown>;
+        const kindRaw = String(obj.kind || 'image');
+        return {
+          id: typeof obj.id === 'string' ? obj.id.slice(0, 64) : `item_${idx}`,
+          kind: (kindRaw === 'video_frame' || kindRaw === 'audio' ? kindRaw : 'image') as
+            | 'image'
+            | 'video_frame'
+            | 'audio',
+          mimeType: typeof obj.mimeType === 'string' ? obj.mimeType.slice(0, 64) : 'image/jpeg',
+          base64Data: typeof obj.base64Data === 'string' ? obj.base64Data : '',
+          fileName: typeof obj.fileName === 'string' ? obj.fileName.slice(0, 80) : undefined,
+          frameTimestampSec: typeof obj.frameTimestampSec === 'number' ? obj.frameTimestampSec : undefined,
+        };
+      });
+
+      const surfaceRaw = String(body.surface || 'listing_media');
+      const surface = (
+        surfaceRaw === 'pre_deal_chat' ||
+        surfaceRaw === 'deal_room_chat' ||
+        surfaceRaw === 'public_profile'
+          ? surfaceRaw
+          : 'listing_media'
+      ) as 'listing_media' | 'pre_deal_chat' | 'deal_room_chat' | 'public_profile';
+
+      const result = await trustSafetyEngine.inspectMediaSubmission({
+        callerUid: caller.uid,
+        callerEmail: caller.email,
+        callerName: typeof body.callerName === 'string' ? body.callerName.slice(0, 100) : undefined,
+        callerIdToken: caller.idToken,
+        eventKey: typeof body.eventKey === 'string' ? body.eventKey.slice(0, 120) : undefined,
+        surface,
+        items,
+        listingId: typeof body.listingId === 'string' ? body.listingId.slice(0, 128) : undefined,
+        dealId: typeof body.dealId === 'string' ? body.dealId.slice(0, 128) : undefined,
+        conversationId: typeof body.conversationId === 'string' ? body.conversationId.slice(0, 128) : undefined,
+      });
+      return res.json({ ok: true, result });
+    }
+  );
+
+  app.get('/api/moderation/my-status', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const cfg = loadVerifiedFirebaseConfig();
+    const caller = await verifyCallerFirebaseToken(req, cfg);
+    if (!caller) {
+      return res.status(401).json({ ok: false, error: 'Authentication required.' });
+    }
+    return res.json({ ok: true, ...trustSafetyEngine.getUserSafetyStatus(caller.uid) });
+  });
+
+  app.post('/api/moderation/acknowledge-warning', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const cfg = loadVerifiedFirebaseConfig();
+    const caller = await verifyCallerFirebaseToken(req, cfg);
+    if (!caller) {
+      return res.status(401).json({ ok: false, error: 'Authentication required.' });
+    }
+    const updated = trustSafetyEngine.acknowledgeUserWarning(caller.uid);
+    return res.json({ ok: true, restriction: updated });
+  });
+
+  app.post(
+    '/api/moderation/reports',
+    makeRateLimitMiddleware('moderation_reports', moderationLimiter),
+    async (req, res) => {
+      res.setHeader('Cache-Control', 'no-store');
+      const cfg = loadVerifiedFirebaseConfig();
+      const caller = await verifyCallerFirebaseToken(req, cfg);
+      if (!caller) {
+        return res.status(401).json({ ok: false, error: 'Please sign in to submit a user report.' });
+      }
+      if (!consumeAuthenticatedUidLimit(req, res, 'moderation_reports', caller.uid, moderationLimiter)) {
+        return;
+      }
+      const body = (req.body || {}) as Record<string, unknown>;
+      const rawEvidence = Array.isArray(body.evidenceAttachments) ? body.evidenceAttachments.slice(0, 3) : [];
+      const evidenceAttachments = rawEvidence.map((item) => {
+        const obj = (item && typeof item === 'object' ? item : {}) as Record<string, unknown>;
+        return {
+          mimeType: typeof obj.mimeType === 'string' ? obj.mimeType.slice(0, 64) : 'image/png',
+          base64Data: typeof obj.base64Data === 'string' ? obj.base64Data : '',
+          fileName: typeof obj.fileName === 'string' ? obj.fileName.slice(0, 80) : undefined,
+        };
+      });
+
+      const outcome = await trustSafetyEngine.submitUserReport({
+        reporterUid: caller.uid,
+        reporterEmail: caller.email,
+        reporterName: typeof body.reporterName === 'string' ? body.reporterName.slice(0, 100) : 'Verified Member',
+        callerIdToken: caller.idToken,
+        reportedUserId: typeof body.reportedUserId === 'string' ? body.reportedUserId.slice(0, 128) : '',
+        reportedUserName:
+          typeof body.reportedUserName === 'string' ? body.reportedUserName.slice(0, 100) : 'Marketplace User',
+        category: String(body.category || '') as Parameters<typeof trustSafetyEngine.submitUserReport>[0]['category'],
+        surface: (typeof body.surface === 'string' ? body.surface : 'public_profile') as Parameters<
+          typeof trustSafetyEngine.submitUserReport
+        >[0]['surface'],
+        description: typeof body.description === 'string' ? body.description : '',
+        listingId: typeof body.listingId === 'string' ? body.listingId.slice(0, 128) : undefined,
+        dealId: typeof body.dealId === 'string' ? body.dealId.slice(0, 128) : undefined,
+        conversationId: typeof body.conversationId === 'string' ? body.conversationId.slice(0, 128) : undefined,
+        messageId: typeof body.messageId === 'string' ? body.messageId.slice(0, 128) : undefined,
+        reviewId: typeof body.reviewId === 'string' ? body.reviewId.slice(0, 128) : undefined,
+        quotedContent: typeof body.quotedContent === 'string' ? body.quotedContent.slice(0, 1200) : undefined,
+        evidenceAttachments,
+      });
+
+      return res.status(outcome.status).json(outcome);
+    }
+  );
+
+  app.post(
+    '/api/moderation/appeals',
+    makeRateLimitMiddleware('moderation_appeals', moderationLimiter),
+    async (req, res) => {
+      res.setHeader('Cache-Control', 'no-store');
+      const cfg = loadVerifiedFirebaseConfig();
+      const caller = await verifyCallerFirebaseToken(req, cfg);
+      if (!caller) {
+        return res.status(401).json({ ok: false, error: 'Authentication is required to submit an appeal.' });
+      }
+      const body = (req.body || {}) as Record<string, unknown>;
+      const outcome = await trustSafetyEngine.submitAccountAppeal({
+        callerUid: caller.uid,
+        callerEmail: caller.email,
+        callerName: typeof body.callerName === 'string' ? body.callerName.slice(0, 100) : 'Marketplace User',
+        callerIdToken: caller.idToken,
+        explanation: typeof body.explanation === 'string' ? body.explanation : '',
+        supportingContext: typeof body.supportingContext === 'string' ? body.supportingContext : undefined,
+      });
+      return res.status(outcome.status).json(outcome);
+    }
+  );
+
+  app.get('/api/admin/moderation/overview', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const cfg = loadVerifiedFirebaseConfig();
+    const adminCaller = await verifyAdminCaller(req, cfg);
+    if (!adminCaller) {
+      return res.status(403).json({ error: 'Administrator authentication is required.' });
+    }
+    return res.json({
+      ok: true,
+      adminRole: adminCaller.role,
+      ...trustSafetyEngine.getAdminOverview(),
+    });
+  });
+
+  app.post('/api/admin/moderation/alert-action', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const cfg = loadVerifiedFirebaseConfig();
+    const adminCaller = await verifyAdminCaller(req, cfg);
+    if (!adminCaller) {
+      return res.status(403).json({ error: 'Administrator authentication is required.' });
+    }
+    const body = (req.body || {}) as Record<string, unknown>;
+    const outcome = await trustSafetyEngine.handleAdminAlertAction({
+      adminUid: adminCaller.uid,
+      adminEmail: adminCaller.email,
+      adminRole: adminCaller.role,
+      adminIdToken: adminCaller.idToken,
+      alertId: String(body.alertId || ''),
+      action: String(body.action || '') as Parameters<typeof trustSafetyEngine.handleAdminAlertAction>[0]['action'],
+      reason: String(body.reason || ''),
+    });
+    return res.status(outcome.status).json(outcome);
+  });
+
+  app.post('/api/admin/moderation/report-action', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const cfg = loadVerifiedFirebaseConfig();
+    const adminCaller = await verifyAdminCaller(req, cfg);
+    if (!adminCaller) {
+      return res.status(403).json({ error: 'Administrator authentication is required.' });
+    }
+    const body = (req.body || {}) as Record<string, unknown>;
+    const outcome = await trustSafetyEngine.handleAdminReportAction({
+      adminUid: adminCaller.uid,
+      adminEmail: adminCaller.email,
+      adminRole: adminCaller.role,
+      reportId: String(body.reportId || ''),
+      action: String(body.action || '') as Parameters<typeof trustSafetyEngine.handleAdminReportAction>[0]['action'],
+      noteOrReason: String(body.noteOrReason || ''),
+    });
+    return res.status(outcome.status).json(outcome);
+  });
+
+  app.post('/api/admin/moderation/enforce', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const cfg = loadVerifiedFirebaseConfig();
+    const adminCaller = await verifyAdminCaller(req, cfg);
+    if (!adminCaller) {
+      return res.status(403).json({ error: 'Administrator authentication is required.' });
+    }
+    const body = (req.body || {}) as Record<string, unknown>;
+    const outcome = await trustSafetyEngine.enforceAdminUserAction({
+      adminUid: adminCaller.uid,
+      adminEmail: adminCaller.email,
+      adminRole: adminCaller.role,
+      adminIdToken: adminCaller.idToken,
+      targetUserId: String(body.targetUserId || ''),
+      targetUserName: typeof body.targetUserName === 'string' ? body.targetUserName.slice(0, 100) : undefined,
+      targetUserEmail: typeof body.targetUserEmail === 'string' ? body.targetUserEmail.slice(0, 140) : undefined,
+      action: String(body.action || '') as Parameters<typeof trustSafetyEngine.enforceAdminUserAction>[0]['action'],
+      reason: String(body.reason || ''),
+      durationHours: typeof body.durationHours === 'number' ? body.durationHours : undefined,
+      strikeIdToReverse: typeof body.strikeIdToReverse === 'string' ? body.strikeIdToReverse : undefined,
+      granularFlags:
+        body.granularFlags && typeof body.granularFlags === 'object'
+          ? (body.granularFlags as Parameters<typeof trustSafetyEngine.enforceAdminUserAction>[0]['granularFlags'])
+          : undefined,
+    });
+    return res.status(outcome.status).json(outcome);
+  });
+
+  app.post('/api/admin/moderation/appeal-decision', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const cfg = loadVerifiedFirebaseConfig();
+    const adminCaller = await verifyAdminCaller(req, cfg);
+    if (!adminCaller) {
+      return res.status(403).json({ error: 'Administrator authentication is required.' });
+    }
+    const body = (req.body || {}) as Record<string, unknown>;
+    const outcome = await trustSafetyEngine.decideAccountAppeal({
+      adminUid: adminCaller.uid,
+      adminEmail: adminCaller.email,
+      adminRole: adminCaller.role,
+      adminIdToken: adminCaller.idToken,
+      appealId: String(body.appealId || ''),
+      decision: String(body.decision || '') as Parameters<typeof trustSafetyEngine.decideAccountAppeal>[0]['decision'],
+      decisionNote: String(body.decisionNote || ''),
+    });
+    return res.status(outcome.status).json(outcome);
+  });
+
+  app.put('/api/admin/moderation/settings', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const cfg = loadVerifiedFirebaseConfig();
+    const adminCaller = await verifyAdminCaller(req, cfg);
+    if (!adminCaller) {
+      return res.status(403).json({ error: 'Administrator authentication is required.' });
+    }
+    const policy = trustSafetyEngine.updatePolicySettings({
+      adminUid: adminCaller.uid,
+      adminEmail: adminCaller.email,
+      adminRole: adminCaller.role,
+      updates: (req.body || {}) as Record<string, unknown>,
+    });
+    return res.json({ ok: true, policy });
+  });
+
+  app.post('/api/admin/moderation/sweep-now', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const cfg = loadVerifiedFirebaseConfig();
+    const adminCaller = await verifyAdminCaller(req, cfg);
+    if (!adminCaller) {
+      return res.status(403).json({ error: 'Administrator authentication is required.' });
+    }
+    await trustSafetyEngine.runBackgroundSweep();
+    return res.json({ ok: true, health: trustSafetyEngine.getHealthSnapshot() });
+  });
+
+  app.post('/api/admin/moderation/self-test', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const cfg = loadVerifiedFirebaseConfig();
+    const adminCaller = await verifyAdminCaller(req, cfg);
+    if (!adminCaller) {
+      return res.status(403).json({ error: 'Administrator authentication is required.' });
+    }
+    return res.json({ ok: true, ...trustSafetyEngine.runIsolatedSelfTest() });
   });
 
   // 5. WordPress Multi-Gateway Live Payment Bridge (Zero-Fake-Payment Architecture + DNS-Verified SSRF Guard)
@@ -3472,6 +4123,16 @@ Current system snapshot: ${typeof systemContext === 'string' ? systemContext.sli
       return res.json({ ok: true, acknowledged: true, action: 'verified_paid_webhook_received' });
     }
   );
+
+  // 6. Seller Listing Management, Atomic Bid Withdraw/Reject, & Admin ALL USERS Management Routes
+  registerMarketplaceManagementRoutes({
+    app,
+    loadVerifiedFirebaseConfig,
+    getOrInitFirebaseAdminApp,
+    verifyCallerFirebaseToken,
+    verifyAdminCaller,
+    getCallerClientKey,
+  });
 
   // Safe API Error Handler (prevents stack trace leakage on malformed JSON or oversized bodies)
   app.use(

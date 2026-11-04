@@ -34,6 +34,8 @@
         "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "email": { "type": "string", "maxLength": 160 },
         "phone": { "type": "string", "maxLength": 32 },
+        "phoneCountryCode": { "type": "string", "maxLength": 8 },
+        "phoneFormatValidated": { "type": "boolean" },
         "emailVerified": { "type": "boolean" },
         "phoneVerified": { "type": "boolean" },
         "nidStatus": { "type": "string", "enum": ["not_verified", "pending_review", "verified", "rejected"] },
@@ -144,7 +146,7 @@
         "gameName": { "type": "string", "maxLength": 60 },
         "gameUid": { "type": "string", "maxLength": 64 },
         "gameLevel": { "type": "integer" },
-        "images": { "type": "array", "maxLength": 5 },
+        "images": { "type": "array", "maxLength": 10 },
         "activeDealId": { "type": "string", "maxLength": 128 },
         "acceptedBidAmountMinor": { "type": "integer" },
         "reservedBuyerId": { "type": "string", "maxLength": 128 },
@@ -207,6 +209,9 @@
         "lastMessage": { "type": "string", "maxLength": 300 },
         "safetyAcceptedByBuyer": { "type": "boolean" },
         "safetyAcceptedBySeller": { "type": "boolean" },
+        "moderationPaused": { "type": "boolean" },
+        "moderationPauseReason": { "type": "string", "maxLength": 500 },
+        "moderationAlertId": { "type": "string", "maxLength": 128 },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -267,6 +272,9 @@
         "settledAtMs": { "type": "integer" },
         "refundedAtMs": { "type": "integer" },
         "publicActivityId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "moderationPaused": { "type": "boolean" },
+        "moderationPauseReason": { "type": "string", "maxLength": 500 },
+        "moderationAlertId": { "type": "string", "maxLength": 128 },
         "status": {
           "type": "string",
           "enum": [
@@ -561,7 +569,7 @@
         "title": { "type": "string", "minLength": 1, "maxLength": 140 },
         "preview": { "type": "string", "minLength": 1, "maxLength": 240 },
         "body": { "type": "string", "minLength": 1, "maxLength": 2000 },
-        "refType": { "type": "string", "enum": ["none", "listing", "deal", "wallet", "profile", "announcement"] },
+        "refType": { "type": "string", "enum": ["none", "listing", "deal", "wallet", "profile", "announcement", "conversation"] },
         "refId": { "type": "string", "maxLength": 128 },
         "referenceLabel": { "type": "string", "maxLength": 140 },
         "destination": { "type": "string", "maxLength": 160 },
@@ -828,6 +836,209 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["reviewId", "dealId", "reporterId", "reporterName", "reason", "status", "createdAt", "updatedAt"]
+    },
+    "UserRestriction": {
+      "title": "UserRestriction",
+      "description": "Server and Admin-controlled account strike count, protective suspension, permanent ban, and granular capability restrictions.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "accountStatus": {
+          "type": "string",
+          "enum": ["active", "warned", "restricted", "temporary_suspension", "protective_suspension", "permanent_ban"]
+        },
+        "activeStrikes": { "type": "integer" },
+        "totalHistoricalStrikes": { "type": "integer" },
+        "latestWarningTitle": { "type": "string", "maxLength": 200 },
+        "latestWarningMessage": { "type": "string", "maxLength": 1200 },
+        "latestCategory": { "type": "string", "maxLength": 64 },
+        "restrictListings": { "type": "boolean" },
+        "restrictBidding": { "type": "boolean" },
+        "restrictPurchasing": { "type": "boolean" },
+        "restrictPreDealChat": { "type": "boolean" },
+        "restrictDealChat": { "type": "boolean" },
+        "restrictReviews": { "type": "boolean" },
+        "restrictProfileEdits": { "type": "boolean" },
+        "restrictWithdrawals": { "type": "boolean" },
+        "financialHoldActive": { "type": "boolean" },
+        "requiresHumanPermanentBanReview": { "type": "boolean" },
+        "reason": { "type": "string", "maxLength": 600 },
+        "enforcedBy": { "type": "string", "enum": ["ai_protective_system", "human_admin"] },
+        "expiresAtMs": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "userId",
+        "accountStatus",
+        "activeStrikes",
+        "totalHistoricalStrikes",
+        "restrictListings",
+        "restrictBidding",
+        "restrictPurchasing",
+        "restrictPreDealChat",
+        "restrictDealChat",
+        "restrictReviews",
+        "restrictProfileEdits",
+        "restrictWithdrawals",
+        "financialHoldActive",
+        "requiresHumanPermanentBanReview",
+        "reason",
+        "enforcedBy",
+        "expiresAtMs",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "UserReport": {
+      "title": "UserReport",
+      "description": "Reporter-and-Admin private abuse/fraud report against a user, listing, conversation, or review.",
+      "type": "object",
+      "properties": {
+        "trackingRef": { "type": "string", "maxLength": 32 },
+        "reporterId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "reporterName": { "type": "string", "maxLength": 100 },
+        "reportedUserId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "reportedUserName": { "type": "string", "maxLength": 100 },
+        "category": { "type": "string", "maxLength": 64 },
+        "surface": { "type": "string", "maxLength": 64 },
+        "description": { "type": "string", "minLength": 15, "maxLength": 3000 },
+        "status": {
+          "type": "string",
+          "enum": ["submitted", "under_review", "action_taken", "dismissed", "needs_info"]
+        },
+        "assignedAdminId": { "type": "string", "maxLength": 128 },
+        "resolutionSummaryForReporter": { "type": "string", "maxLength": 600 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "trackingRef",
+        "reporterId",
+        "reporterName",
+        "reportedUserId",
+        "reportedUserName",
+        "category",
+        "surface",
+        "description",
+        "status",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "AccountAppeal": {
+      "title": "AccountAppeal",
+      "description": "User-submitted appeal against a moderation warning, restriction, protective suspension, or permanent ban.",
+      "type": "object",
+      "properties": {
+        "trackingRef": { "type": "string", "maxLength": 32 },
+        "userId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userName": { "type": "string", "maxLength": 100 },
+        "explanation": { "type": "string", "minLength": 20, "maxLength": 3500 },
+        "supportingContext": { "type": "string", "maxLength": 1500 },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "under_review", "accepted", "rejected", "info_requested"]
+        },
+        "adminDecisionNote": { "type": "string", "maxLength": 1000 },
+        "reviewedByAdminId": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["trackingRef", "userId", "userName", "explanation", "status", "createdAt", "updatedAt"]
+    },
+    "ModerationAlert": {
+      "title": "ModerationAlert",
+      "description": "Admin-only real-time AI Trust & Safety alert with evidence and human decision tracking.",
+      "type": "object",
+      "properties": {
+        "eventKey": { "type": "string", "maxLength": 128 },
+        "priority": { "type": "string", "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW"] },
+        "decisionLevel": { "type": "string", "enum": ["LEVEL_A", "LEVEL_B", "LEVEL_C", "CLEAN"] },
+        "status": { "type": "string", "enum": ["open", "investigating", "resolved", "false_positive", "escalated"] },
+        "surface": { "type": "string", "maxLength": 64 },
+        "category": { "type": "string", "maxLength": 64 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "rawContent": { "type": "string", "maxLength": 3000 },
+        "aiReasoning": { "type": "string", "maxLength": 600 },
+        "protectiveActionTaken": { "type": "string", "maxLength": 500 },
+        "humanFinalDecision": { "type": "string", "maxLength": 600 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "eventKey",
+        "priority",
+        "decisionLevel",
+        "status",
+        "surface",
+        "category",
+        "userId",
+        "rawContent",
+        "aiReasoning",
+        "protectiveActionTaken",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ModerationAuditLog": {
+      "title": "ModerationAuditLog",
+      "description": "Immutable append-only audit log of AI protective actions and Human Admin enforcement decisions.",
+      "type": "object",
+      "properties": {
+        "actorType": { "type": "string", "enum": ["ai_protective_system", "human_admin", "human_superadmin"] },
+        "actorId": { "type": "string", "maxLength": 128 },
+        "targetUserId": { "type": "string", "maxLength": 128 },
+        "actionType": { "type": "string", "maxLength": 64 },
+        "reason": { "type": "string", "minLength": 4, "maxLength": 1000 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["actorType", "actorId", "targetUserId", "actionType", "reason", "createdAt"]
+    },
+    "ListingRevision": {
+      "title": "ListingRevision",
+      "description": "Immutable seller edit revision snapshot stored prior to listing update for moderation review.",
+      "type": "object",
+      "properties": {
+        "listingId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "sellerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "previousTitle": { "type": "string", "maxLength": 140 },
+        "previousDescription": { "type": "string", "maxLength": 4000 },
+        "previousPriceMinor": { "type": "integer" },
+        "previousCurrency": { "type": "string", "enum": ["BDT", "USD"] },
+        "previousStatus": { "type": "string", "maxLength": 32 },
+        "previousImagesCount": { "type": "integer" },
+        "changeSummary": { "type": "string", "maxLength": 600 },
+        "createdAtMs": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "listingId",
+        "sellerId",
+        "previousTitle",
+        "previousDescription",
+        "previousPriceMinor",
+        "previousCurrency",
+        "previousStatus",
+        "previousImagesCount",
+        "changeSummary",
+        "createdAtMs",
+        "createdAt"
+      ]
+    },
+    "BannedIdentity": {
+      "title": "BannedIdentity",
+      "description": "Superadmin-only optional fraud/security blocklist entry preventing re-registration of permanently banned identities.",
+      "type": "object",
+      "properties": {
+        "identityHash": { "type": "string", "minLength": 16, "maxLength": 128, "pattern": "^[a-f0-9]+$" },
+        "kind": { "type": "string", "enum": ["email", "phone"] },
+        "reason": { "type": "string", "minLength": 4, "maxLength": 600 },
+        "enforcedBy": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAtMs": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["identityHash", "kind", "reason", "enforcedBy", "createdAtMs", "createdAt"]
     }
   },
   "firestore": {
@@ -966,6 +1177,34 @@
     "/reviewReports/{reportId}": {
       "schema": "ReviewReport",
       "description": "Authenticated abuse reports on marketplace reviews with admin moderation."
+    },
+    "/userRestrictions/{userId}": {
+      "schema": "UserRestriction",
+      "description": "Admin-writable, owner/admin-readable account strike count and granular enforcement restrictions."
+    },
+    "/userReports/{reportId}": {
+      "schema": "UserReport",
+      "description": "Reporter-and-Admin private abuse/scam reports with reporter identity hidden from reported users."
+    },
+    "/accountAppeals/{appealId}": {
+      "schema": "AccountAppeal",
+      "description": "Owner-and-Admin private moderation appeals."
+    },
+    "/moderationAlerts/{alertId}": {
+      "schema": "ModerationAlert",
+      "description": "Admin-only 24/7 AI Trust & Safety live monitoring alerts."
+    },
+    "/moderationAuditLogs/{logId}": {
+      "schema": "ModerationAuditLog",
+      "description": "Admin-only append-only immutable moderation enforcement audit trail."
+    },
+    "/listings/{listingId}/revisions/{revisionId}": {
+      "schema": "ListingRevision",
+      "description": "Immutable seller listing revision snapshots readable by seller owner and admins."
+    },
+    "/bannedIdentities/{banId}": {
+      "schema": "BannedIdentity",
+      "description": "Superadmin-only fraud/security identity blocklist."
     }
   }
 }

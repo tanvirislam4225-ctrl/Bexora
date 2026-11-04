@@ -39,6 +39,23 @@ service cloud.firestore {
       );
     }
 
+    function isRestrictionUnexpired(r) {
+      return !('expiresAtMs' in r) || r.expiresAtMs == 0 || r.expiresAtMs > request.time.toMillis();
+    }
+    function isUserModerationSuspended(uid) {
+      return exists(/databases/$(database)/documents/userRestrictions/$(uid))
+        && isRestrictionUnexpired(get(/databases/$(database)/documents/userRestrictions/$(uid)).data)
+        && get(/databases/$(database)/documents/userRestrictions/$(uid)).data.accountStatus in [
+          'protective_suspension', 'temporary_suspension', 'permanent_ban'
+        ];
+    }
+    function hasActiveRestrictionFlag(uid, flagKey) {
+      return exists(/databases/$(database)/documents/userRestrictions/$(uid))
+        && isRestrictionUnexpired(get(/databases/$(database)/documents/userRestrictions/$(uid)).data)
+        && flagKey in get(/databases/$(database)/documents/userRestrictions/$(uid)).data
+        && get(/databases/$(database)/documents/userRestrictions/$(uid)).data[flagKey] == true;
+    }
+
     function isSafeHttpsOrEmptyUrl(u, maxLen) {
       return u is string && u.size() <= maxLen
         && u.matches('^$|^https://[A-Za-z0-9.\\-/:_?=&%#@~+!,;()]+$');
@@ -128,13 +145,15 @@ service cloud.firestore {
           'nidStatus', 'walletBalanceMinor', 'reservedBalanceMinor', 'createdAt', 'updatedAt'
         ])
         && data.keys().hasOnly([
-          'uid', 'email', 'phone', 'emailVerified', 'phoneVerified',
+          'uid', 'email', 'phone', 'phoneCountryCode', 'phoneFormatValidated', 'emailVerified', 'phoneVerified',
           'nidStatus', 'nidRejectionReason', 'walletBalanceMinor', 'reservedBalanceMinor',
           'preferredLanguage', 'preferredCurrency', 'notificationPrefs', 'createdAt', 'updatedAt'
         ])
         && data.uid == uid
         && data.email is string && data.email.size() <= 160
         && data.phone is string && data.phone.size() <= 32
+        && (!('phoneCountryCode' in data) || (data.phoneCountryCode is string && data.phoneCountryCode.size() <= 8))
+        && (!('phoneFormatValidated' in data) || data.phoneFormatValidated is bool)
         && data.emailVerified is bool
         && data.phoneVerified is bool
         && data.nidStatus in ['not_verified', 'pending_review', 'verified', 'rejected']
@@ -224,12 +243,17 @@ service cloud.firestore {
         && (!('gameName' in data) || (data.gameName is string && data.gameName.size() <= 60))
         && (!('gameUid' in data) || (data.gameUid is string && data.gameUid.size() <= 64))
         && (!('gameLevel' in data) || (data.gameLevel is int && data.gameLevel >= 0 && data.gameLevel <= 10000))
-        && data.images is list && data.images.size() <= 5
+        && data.images is list && data.images.size() <= 10
         && (data.images.size() < 1 || isSafeImageOrHttpsNonEmpty(data.images[0], 12, 250000))
         && (data.images.size() < 2 || isSafeImageOrHttpsNonEmpty(data.images[1], 12, 250000))
         && (data.images.size() < 3 || isSafeImageOrHttpsNonEmpty(data.images[2], 12, 250000))
         && (data.images.size() < 4 || isSafeImageOrHttpsNonEmpty(data.images[3], 12, 250000))
         && (data.images.size() < 5 || isSafeImageOrHttpsNonEmpty(data.images[4], 12, 250000))
+        && (data.images.size() < 6 || isSafeImageOrHttpsNonEmpty(data.images[5], 12, 250000))
+        && (data.images.size() < 7 || isSafeImageOrHttpsNonEmpty(data.images[6], 12, 250000))
+        && (data.images.size() < 8 || isSafeImageOrHttpsNonEmpty(data.images[7], 12, 250000))
+        && (data.images.size() < 9 || isSafeImageOrHttpsNonEmpty(data.images[8], 12, 250000))
+        && (data.images.size() < 10 || isSafeImageOrHttpsNonEmpty(data.images[9], 12, 250000))
         && (!('activeDealId' in data) || (data.activeDealId is string && isValidId(data.activeDealId)))
         && (!('acceptedBidAmountMinor' in data) || (data.acceptedBidAmountMinor is int && data.acceptedBidAmountMinor > 0))
         && (!('reservedBuyerId' in data) || (data.reservedBuyerId is string && isValidId(data.reservedBuyerId)))
@@ -291,7 +315,9 @@ service cloud.firestore {
         && data.keys().hasOnly([
           'buyerId', 'sellerId', 'buyerName', 'sellerName',
           'listingId', 'listingTitle', 'lastMessage',
-          'safetyAcceptedByBuyer', 'safetyAcceptedBySeller', 'createdAt', 'updatedAt'
+          'safetyAcceptedByBuyer', 'safetyAcceptedBySeller',
+          'moderationPaused', 'moderationPauseReason', 'moderationAlertId',
+          'createdAt', 'updatedAt'
         ])
         && data.buyerId is string && data.buyerId.size() <= 128
         && data.sellerId is string && data.sellerId.size() <= 128
@@ -303,6 +329,9 @@ service cloud.firestore {
         && data.lastMessage is string && data.lastMessage.size() <= 300
         && data.safetyAcceptedByBuyer is bool
         && data.safetyAcceptedBySeller is bool
+        && (!('moderationPaused' in data) || data.moderationPaused is bool)
+        && (!('moderationPauseReason' in data) || (data.moderationPauseReason is string && data.moderationPauseReason.size() <= 500))
+        && (!('moderationAlertId' in data) || (data.moderationAlertId is string && data.moderationAlertId.size() <= 128))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -340,6 +369,7 @@ service cloud.firestore {
           'latestTransferSubmissionId', 'latestRejectionReason',
           'refundLedgerId', 'settlementLedgerId', 'adminHoldNote',
           'settledAtMs', 'refundedAtMs', 'publicActivityId',
+          'moderationPaused', 'moderationPauseReason', 'moderationAlertId',
           'status', 'createdAt', 'updatedAt'
         ])
         && data.listingId is string && data.listingId.size() <= 128
@@ -381,6 +411,9 @@ service cloud.firestore {
         && (!('settledAtMs' in data) || (data.settledAtMs is int && data.settledAtMs >= 0))
         && (!('refundedAtMs' in data) || (data.refundedAtMs is int && data.refundedAtMs >= 0))
         && (!('publicActivityId' in data) || isValidId(data.publicActivityId))
+        && (!('moderationPaused' in data) || data.moderationPaused is bool)
+        && (!('moderationPauseReason' in data) || (data.moderationPauseReason is string && data.moderationPauseReason.size() <= 500))
+        && (!('moderationAlertId' in data) || (data.moderationAlertId is string && data.moderationAlertId.size() <= 128))
         && data.status in [
           'accepted_pending_payment', 'awaiting_payment', 'payment_pending_verification',
           'paid_deal_room_active', 'paid', 'transfer_in_progress', 'transfer_submitted',
@@ -722,7 +755,7 @@ service cloud.firestore {
         && data.title is string && data.title.size() >= 1 && data.title.size() <= 140
         && data.preview is string && data.preview.size() >= 1 && data.preview.size() <= 240
         && data.body is string && data.body.size() >= 1 && data.body.size() <= 2000
-        && data.refType in ['none', 'listing', 'deal', 'wallet', 'profile', 'announcement']
+        && data.refType in ['none', 'listing', 'deal', 'wallet', 'profile', 'announcement', 'conversation']
         && data.refId is string && data.refId.size() <= 128
         && data.referenceLabel is string && data.referenceLabel.size() <= 140
         && data.destination is string && data.destination.size() <= 160
@@ -955,6 +988,177 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function isValidUserRestriction(data, uid) {
+      return data.keys().hasAll([
+          'userId', 'accountStatus', 'activeStrikes', 'totalHistoricalStrikes',
+          'restrictListings', 'restrictBidding', 'restrictPurchasing',
+          'restrictPreDealChat', 'restrictDealChat', 'restrictReviews',
+          'restrictProfileEdits', 'restrictWithdrawals', 'financialHoldActive',
+          'requiresHumanPermanentBanReview', 'reason', 'enforcedBy', 'expiresAtMs',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'userId', 'accountStatus', 'activeStrikes', 'totalHistoricalStrikes',
+          'latestWarningTitle', 'latestWarningMessage', 'latestCategory',
+          'restrictListings', 'restrictBidding', 'restrictPurchasing',
+          'restrictPreDealChat', 'restrictDealChat', 'restrictReviews',
+          'restrictProfileEdits', 'restrictWithdrawals', 'financialHoldActive',
+          'requiresHumanPermanentBanReview', 'reason', 'enforcedBy', 'expiresAtMs',
+          'createdAt', 'updatedAt'
+        ])
+        && data.userId == uid
+        && data.accountStatus in [
+          'active', 'warned', 'restricted', 'temporary_suspension', 'protective_suspension', 'permanent_ban'
+        ]
+        && data.activeStrikes is int && data.activeStrikes >= 0 && data.activeStrikes <= 3
+        && data.totalHistoricalStrikes is int && data.totalHistoricalStrikes >= 0
+        && (!('latestWarningTitle' in data) || (data.latestWarningTitle is string && data.latestWarningTitle.size() <= 200))
+        && (!('latestWarningMessage' in data) || (data.latestWarningMessage is string && data.latestWarningMessage.size() <= 1200))
+        && (!('latestCategory' in data) || (data.latestCategory is string && data.latestCategory.size() <= 64))
+        && data.restrictListings is bool
+        && data.restrictBidding is bool
+        && data.restrictPurchasing is bool
+        && data.restrictPreDealChat is bool
+        && data.restrictDealChat is bool
+        && data.restrictReviews is bool
+        && data.restrictProfileEdits is bool
+        && data.restrictWithdrawals is bool
+        && data.financialHoldActive is bool
+        && data.requiresHumanPermanentBanReview is bool
+        && data.reason is string && data.reason.size() >= 1 && data.reason.size() <= 600
+        && data.enforcedBy in ['ai_protective_system', 'human_admin']
+        && data.expiresAtMs is int && data.expiresAtMs >= 0
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidUserReport(data) {
+      return data.keys().hasAll([
+          'trackingRef', 'reporterId', 'reporterName', 'reportedUserId',
+          'reportedUserName', 'category', 'surface', 'description',
+          'status', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'trackingRef', 'reporterId', 'reporterName', 'reportedUserId',
+          'reportedUserName', 'category', 'surface', 'description',
+          'status', 'assignedAdminId', 'resolutionSummaryForReporter',
+          'createdAt', 'updatedAt'
+        ])
+        && data.trackingRef is string && data.trackingRef.size() >= 6 && data.trackingRef.size() <= 32
+        && isValidId(data.reporterId)
+        && data.reporterName is string && data.reporterName.size() >= 1 && data.reporterName.size() <= 100
+        && isValidId(data.reportedUserId)
+        && data.reportedUserName is string && data.reportedUserName.size() >= 1 && data.reportedUserName.size() <= 100
+        && data.category is string && data.category.size() >= 3 && data.category.size() <= 64
+        && data.surface is string && data.surface.size() >= 3 && data.surface.size() <= 64
+        && data.description is string && data.description.size() >= 15 && data.description.size() <= 3000
+        && data.status in ['submitted', 'under_review', 'action_taken', 'dismissed', 'needs_info']
+        && (!('assignedAdminId' in data) || isValidId(data.assignedAdminId))
+        && (!('resolutionSummaryForReporter' in data) || (data.resolutionSummaryForReporter is string && data.resolutionSummaryForReporter.size() <= 600))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidAccountAppeal(data) {
+      return data.keys().hasAll([
+          'trackingRef', 'userId', 'userName', 'explanation', 'status', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'trackingRef', 'userId', 'userName', 'explanation', 'supportingContext',
+          'status', 'adminDecisionNote', 'reviewedByAdminId', 'createdAt', 'updatedAt'
+        ])
+        && data.trackingRef is string && data.trackingRef.size() >= 6 && data.trackingRef.size() <= 32
+        && isValidId(data.userId)
+        && data.userName is string && data.userName.size() >= 1 && data.userName.size() <= 100
+        && data.explanation is string && data.explanation.size() >= 20 && data.explanation.size() <= 3500
+        && (!('supportingContext' in data) || (data.supportingContext is string && data.supportingContext.size() <= 1500))
+        && data.status in ['pending', 'under_review', 'accepted', 'rejected', 'info_requested']
+        && (!('adminDecisionNote' in data) || (data.adminDecisionNote is string && data.adminDecisionNote.size() <= 1000))
+        && (!('reviewedByAdminId' in data) || isValidId(data.reviewedByAdminId))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidModerationAlert(data) {
+      return data.keys().hasAll([
+          'eventKey', 'priority', 'decisionLevel', 'status', 'surface',
+          'category', 'userId', 'rawContent', 'aiReasoning', 'protectiveActionTaken',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'eventKey', 'priority', 'decisionLevel', 'status', 'surface',
+          'category', 'userId', 'rawContent', 'aiReasoning', 'protectiveActionTaken',
+          'humanFinalDecision', 'createdAt', 'updatedAt'
+        ])
+        && data.eventKey is string && data.eventKey.size() >= 1 && data.eventKey.size() <= 128
+        && data.priority in ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW']
+        && data.decisionLevel in ['LEVEL_A', 'LEVEL_B', 'LEVEL_C', 'CLEAN']
+        && data.status in ['open', 'investigating', 'resolved', 'false_positive', 'escalated']
+        && data.surface is string && data.surface.size() <= 64
+        && data.category is string && data.category.size() <= 64
+        && isValidId(data.userId)
+        && data.rawContent is string && data.rawContent.size() <= 3000
+        && data.aiReasoning is string && data.aiReasoning.size() <= 600
+        && data.protectiveActionTaken is string && data.protectiveActionTaken.size() <= 500
+        && (!('humanFinalDecision' in data) || (data.humanFinalDecision is string && data.humanFinalDecision.size() <= 600))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidModerationAuditLog(data) {
+      return data.keys().hasAll([
+          'actorType', 'actorId', 'targetUserId', 'actionType', 'reason', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'actorType', 'actorId', 'targetUserId', 'actionType', 'reason', 'createdAt'
+        ])
+        && data.actorType in ['ai_protective_system', 'human_admin', 'human_superadmin']
+        && isValidId(data.actorId)
+        && isValidId(data.targetUserId)
+        && data.actionType is string && data.actionType.size() >= 3 && data.actionType.size() <= 64
+        && data.reason is string && data.reason.size() >= 4 && data.reason.size() <= 1000
+        && data.createdAt is timestamp;
+    }
+
+    function isValidListingRevision(data, listingId) {
+      return data.keys().hasAll([
+          'listingId', 'sellerId', 'previousTitle', 'previousDescription',
+          'previousPriceMinor', 'previousCurrency', 'previousStatus',
+          'previousImagesCount', 'changeSummary', 'createdAtMs', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'listingId', 'sellerId', 'previousTitle', 'previousDescription',
+          'previousPriceMinor', 'previousCurrency', 'previousStatus',
+          'previousImagesCount', 'changeSummary', 'createdAtMs', 'createdAt'
+        ])
+        && data.listingId == listingId
+        && isValidId(data.sellerId)
+        && data.previousTitle is string && data.previousTitle.size() <= 140
+        && data.previousDescription is string && data.previousDescription.size() <= 4000
+        && data.previousPriceMinor is int && data.previousPriceMinor >= 0
+        && data.previousCurrency in ['BDT', 'USD']
+        && data.previousStatus is string && data.previousStatus.size() <= 32
+        && data.previousImagesCount is int && data.previousImagesCount >= 0 && data.previousImagesCount <= 10
+        && data.changeSummary is string && data.changeSummary.size() >= 1 && data.changeSummary.size() <= 600
+        && data.createdAtMs is int && data.createdAtMs >= 0
+        && data.createdAt is timestamp;
+    }
+
+    function isValidBannedIdentity(data) {
+      return data.keys().hasAll([
+          'identityHash', 'kind', 'reason', 'enforcedBy', 'createdAtMs', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'identityHash', 'kind', 'reason', 'enforcedBy', 'createdAtMs', 'createdAt'
+        ])
+        && data.identityHash is string && data.identityHash.size() >= 16 && data.identityHash.size() <= 128 && data.identityHash.matches('^[a-f0-9]+$')
+        && data.kind in ['email', 'phone']
+        && data.reason is string && data.reason.size() >= 4 && data.reason.size() <= 600
+        && isValidId(data.enforcedBy)
+        && data.createdAtMs is int && data.createdAtMs >= 0
+        && data.createdAt is timestamp;
+    }
+
     // 0. Health Connection Test Path (Read-only doc lookup)
     match /test/{docId} {
       allow get: if docId == 'connection';
@@ -988,6 +1192,8 @@ service cloud.firestore {
           isAdmin()
           || (
             request.auth.uid == userId
+            && !isUserModerationSuspended(request.auth.uid)
+            && !hasActiveRestrictionFlag(request.auth.uid, 'restrictProfileEdits')
             && incoming().diff(existing()).affectedKeys().hasOnly([
               'displayName', 'username', 'bio', 'avatarUrl', 'coverUrl',
               'location', 'hidePublicActivityName', 'updatedAt'
@@ -1023,7 +1229,7 @@ service cloud.firestore {
             && incoming().followerCount == (('followerCount' in existing() && existing().followerCount > 0) ? existing().followerCount - 1 : 0)
           )
         );
-      allow delete: if false;
+      allow delete: if isSuperAdmin() && isValidId(userId) && request.auth.uid != userId;
     }
 
     // 2. Private Users (Strictly owner or admin read/write; wallet balance protected)
@@ -1051,7 +1257,7 @@ service cloud.firestore {
           || (
             request.auth.uid == userId
             && incoming().diff(existing()).affectedKeys().hasOnly([
-              'email', 'phone', 'emailVerified', 'phoneVerified', 'nidStatus', 'nidRejectionReason',
+              'email', 'phone', 'phoneCountryCode', 'phoneFormatValidated', 'emailVerified', 'phoneVerified', 'nidStatus', 'nidRejectionReason',
               'preferredLanguage', 'preferredCurrency', 'notificationPrefs', 'updatedAt'
             ])
             && (incoming().nidStatus == existing().nidStatus || incoming().nidStatus == 'pending_review')
@@ -1060,7 +1266,11 @@ service cloud.firestore {
               || ('nidRejectionReason' in existing() && incoming().nidRejectionReason == existing().nidRejectionReason)
             )
             && (incoming().emailVerified == existing().emailVerified || (incoming().emailVerified == true && request.auth.token.email_verified == true))
-            && (incoming().phoneVerified == existing().phoneVerified || (incoming().phoneVerified == true && ('phone_number' in request.auth.token && request.auth.token.phone_number is string)))
+            && (
+              incoming().phoneVerified == false
+              || (incoming().phoneVerified == existing().phoneVerified && incoming().phone == existing().phone)
+              || (incoming().phoneVerified == true && ('phone_number' in request.auth.token && request.auth.token.phone_number is string && request.auth.token.phone_number == incoming().phone))
+            )
           )
           || (
             // Atomic wallet debit when purchasing an active listing or reserving a withdrawal
@@ -1078,7 +1288,11 @@ service cloud.firestore {
             )
           )
         );
-      allow delete: if false;
+      allow delete: if isSuperAdmin()
+        && isValidId(userId)
+        && request.auth.uid != userId
+        && existing().walletBalanceMinor == 0
+        && existing().reservedBalanceMinor == 0;
 
       // 2b. Strictly Owner-Private FCM Web Push Registration Tokens
       match /pushTokens/{tokenId} {
@@ -1221,7 +1435,7 @@ service cloud.firestore {
             ])
           )
         );
-      allow delete: if false;
+      allow delete: if isSuperAdmin() && isValidId(userId) && request.auth.uid != userId;
     }
 
     // 6. Marketplace Listings
@@ -1237,6 +1451,8 @@ service cloud.firestore {
         && isValidId(listingId)
         && isValidListing(incoming())
         && incoming().sellerId == request.auth.uid
+        && !isUserModerationSuspended(request.auth.uid)
+        && !hasActiveRestrictionFlag(request.auth.uid, 'restrictListings')
         && incoming().status in ['draft', 'pending']
         && incoming().verifiedOptions.size() == 0
         && incoming().views == 0
@@ -1256,6 +1472,8 @@ service cloud.firestore {
           || (
             // Seller editing own draft/pending/active/rejected/archived listing (never sold/reserved/suspended) resets verifiedOptions to []
             existing().sellerId == request.auth.uid
+            && !isUserModerationSuspended(request.auth.uid)
+            && !hasActiveRestrictionFlag(request.auth.uid, 'restrictListings')
             && existing().status in ['draft', 'pending', 'active', 'rejected', 'archived']
             && incoming().status in ['draft', 'pending', 'archived']
             && incoming().verifiedOptions.size() == 0
@@ -1326,7 +1544,46 @@ service cloud.firestore {
             && incoming().diff(existing()).affectedKeys().hasOnly(['views'])
           )
         );
-      allow delete: if isAdmin() && isValidId(listingId);
+      allow delete: if isSignedIn() && isValidId(listingId) && (
+        isAdmin()
+        || (
+          existing().sellerId == request.auth.uid
+          && !isUserModerationSuspended(request.auth.uid)
+          && existing().status in ['draft', 'pending', 'active', 'rejected', 'archived']
+          && !('activeDealId' in existing() && existing().activeDealId is string && existing().activeDealId.size() > 0)
+        )
+      );
+
+      // 6b. Immutable Listing Edit Revisions (Master Gate checks parent listing ownership; 0-lookup list rule)
+      match /revisions/{revisionId} {
+        allow get: if isSignedIn()
+          && isValidId(listingId)
+          && isValidId(revisionId)
+          && exists(/databases/$(database)/documents/listings/$(listingId))
+          && (
+            isAdmin()
+            || get(/databases/$(database)/documents/listings/$(listingId)).data.sellerId == request.auth.uid
+          );
+        allow list: if isSignedIn()
+          && (
+            resource.data.sellerId == request.auth.uid
+            || isAdmin()
+          );
+        allow create: if isSignedIn()
+          && isValidId(listingId)
+          && isValidId(revisionId)
+          && isValidListingRevision(incoming(), listingId)
+          && exists(/databases/$(database)/documents/listings/$(listingId))
+          && (
+            isAdmin()
+            || (
+              incoming().sellerId == request.auth.uid
+              && get(/databases/$(database)/documents/listings/$(listingId)).data.sellerId == request.auth.uid
+            )
+          )
+          && incoming().createdAt == request.time;
+        allow update, delete: if false;
+      }
     }
 
     // 7. Private Listing Evidence
@@ -1354,7 +1611,10 @@ service cloud.firestore {
             && incoming().diff(existing()).affectedKeys().hasOnly(['evidenceImages', 'updatedAt'])
           )
         );
-      allow delete: if false;
+      allow delete: if isSignedIn()
+        && isValidId(listingId)
+        && (isAdmin() || existing().sellerId == request.auth.uid)
+        && !existsAfter(/databases/$(database)/documents/listings/$(listingId));
     }
 
     // 8. Role-Based Bids (Never deleted; preserves accepted_pending_payment & paid lifecycle)
@@ -1367,6 +1627,8 @@ service cloud.firestore {
         && isValidBid(incoming())
         && incoming().buyerId == request.auth.uid
         && incoming().buyerId != incoming().sellerId
+        && !isUserModerationSuspended(request.auth.uid)
+        && !hasActiveRestrictionFlag(request.auth.uid, 'restrictBidding')
         && incoming().status == 'pending'
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time
@@ -1452,6 +1714,9 @@ service cloud.firestore {
         && isValidId(convId)
         && isValidConversation(incoming())
         && (incoming().buyerId == request.auth.uid || incoming().sellerId == request.auth.uid)
+        && !isUserModerationSuspended(request.auth.uid)
+        && !hasActiveRestrictionFlag(request.auth.uid, 'restrictPreDealChat')
+        && (!('moderationPaused' in incoming()) || incoming().moderationPaused == false || isAdmin())
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time;
       allow update: if isSignedIn()
@@ -1463,13 +1728,32 @@ service cloud.firestore {
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
         && (
-          existing().buyerId == request.auth.uid
-          || existing().sellerId == request.auth.uid
-          || isAdmin()
-        )
-        && incoming().diff(existing()).affectedKeys().hasOnly([
-          'lastMessage', 'safetyAcceptedByBuyer', 'safetyAcceptedBySeller', 'updatedAt'
-        ]);
+          (
+            // Standard conversation metadata update when conversation is NOT paused
+            (existing().buyerId == request.auth.uid || existing().sellerId == request.auth.uid || isAdmin())
+            && (!('moderationPaused' in existing()) || existing().moderationPaused != true || isAdmin())
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'lastMessage', 'safetyAcceptedByBuyer', 'safetyAcceptedBySeller', 'updatedAt'
+            ])
+          )
+          || (
+            // One-way Protective Safety Pause Lock (participant or admin can flip -> paused; only admin can resume!)
+            (existing().buyerId == request.auth.uid || existing().sellerId == request.auth.uid || isAdmin())
+            && 'moderationPaused' in incoming()
+            && incoming().moderationPaused == true
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'moderationPaused', 'moderationPauseReason', 'moderationAlertId', 'updatedAt'
+            ])
+          )
+          || (
+            // Administrator-only conversation resume / moderation update
+            isAdmin()
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'lastMessage', 'safetyAcceptedByBuyer', 'safetyAcceptedBySeller',
+              'moderationPaused', 'moderationPauseReason', 'moderationAlertId', 'updatedAt'
+            ])
+          )
+        );
       allow delete: if false;
 
       match /messages/{msgId} {
@@ -1487,6 +1771,17 @@ service cloud.firestore {
           && (incoming().kind != 'system' || isAdmin())
           && incoming().createdAt == request.time
           && isConvParticipant()
+          && (
+            isAdmin()
+            || (
+              !isUserModerationSuspended(request.auth.uid)
+              && !hasActiveRestrictionFlag(request.auth.uid, 'restrictPreDealChat')
+              && (
+                !('moderationPaused' in get(/databases/$(database)/documents/conversations/$(convId)).data)
+                || get(/databases/$(database)/documents/conversations/$(convId)).data.moderationPaused != true
+              )
+            )
+          )
           && (
             !('senderRole' in incoming())
             || (incoming().senderRole == 'buyer' && request.auth.uid == get(/databases/$(database)/documents/conversations/$(convId)).data.buyerId)
@@ -1539,6 +1834,8 @@ service cloud.firestore {
           || (
             // Buyer creating funded deal upon atomic Buy Now payment (verifies listing price, fee, ledger & exact wallet debit)
             incoming().buyerId == request.auth.uid
+            && !isUserModerationSuspended(request.auth.uid)
+            && !hasActiveRestrictionFlag(request.auth.uid, 'restrictPurchasing')
             && incoming().status in ['paid_deal_room_active', 'awaiting_buyer_confirmation']
             && exists(/databases/$(database)/documents/listings/$(incoming().listingId))
             && get(/databases/$(database)/documents/listings/$(incoming().listingId)).data.status == 'active'
@@ -1682,6 +1979,18 @@ service cloud.firestore {
             && incoming().unresolvedReportCount == existing().unresolvedReportCount + 1
             && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'unresolvedReportCount', 'updatedAt'])
           )
+          || (
+            // One-way Protective Safety Pause Lock on Deal Room Chat (only isAdmin() can flip back to false)
+            (request.auth.uid == existing().buyerId || request.auth.uid == existing().sellerId || isAdmin())
+            && incoming().status == existing().status
+            && incoming().confirmedAtMs == existing().confirmedAtMs
+            && incoming().originalDeadlineMs == existing().originalDeadlineMs
+            && 'moderationPaused' in incoming()
+            && incoming().moderationPaused == true
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'moderationPaused', 'moderationPauseReason', 'moderationAlertId', 'updatedAt'
+            ])
+          )
         );
       allow delete: if false;
 
@@ -1700,6 +2009,17 @@ service cloud.firestore {
           && (incoming().kind != 'system' || isAdmin())
           && incoming().createdAt == request.time
           && isDealParticipant()
+          && (
+            isAdmin()
+            || (
+              !isUserModerationSuspended(request.auth.uid)
+              && !hasActiveRestrictionFlag(request.auth.uid, 'restrictDealChat')
+              && (
+                !('moderationPaused' in get(/databases/$(database)/documents/deals/$(dealId)).data)
+                || get(/databases/$(database)/documents/deals/$(dealId)).data.moderationPaused != true
+              )
+            )
+          )
           && (
             !('senderRole' in incoming())
             || (incoming().senderRole == 'buyer' && request.auth.uid == get(/databases/$(database)/documents/deals/$(dealId)).data.buyerId)
@@ -1848,6 +2168,9 @@ service cloud.firestore {
         && isValidId(withdrawalId)
         && isValidWithdrawalRequest(incoming())
         && incoming().userId == request.auth.uid
+        && !isUserModerationSuspended(request.auth.uid)
+        && !hasActiveRestrictionFlag(request.auth.uid, 'restrictWithdrawals')
+        && !hasActiveRestrictionFlag(request.auth.uid, 'financialHoldActive')
         && incoming().status == 'pending'
         && incoming().currency == 'BDT'
         && incoming().createdAt == request.time
@@ -1924,6 +2247,8 @@ service cloud.firestore {
         && reviewId == ('rev_' + incoming().dealId)
         && isValidReview(incoming())
         && incoming().reviewerId == request.auth.uid
+        && !isUserModerationSuspended(request.auth.uid)
+        && !hasActiveRestrictionFlag(request.auth.uid, 'restrictReviews')
         && (!('moderationStatus' in incoming()) || incoming().moderationStatus == 'published')
         && incoming().createdAt == request.time
         && exists(/databases/$(database)/documents/deals/$(incoming().dealId))
@@ -2077,6 +2402,25 @@ service cloud.firestore {
               || (
                 get(/databases/$(database)/documents/deals/$(incoming().refId)).data.sellerId == request.auth.uid
                 && get(/databases/$(database)/documents/deals/$(incoming().refId)).data.buyerId == incoming().recipientId
+              )
+            )
+          )
+          || (
+            // Verified pre-deal conversation counterparty notification (buyer <-> seller on real conversation)
+            incoming().recipientId != request.auth.uid
+            && incoming().actorRole == 'user'
+            && incoming().category in ['deal', 'bid', 'listing']
+            && incoming().refType == 'conversation'
+            && isValidId(incoming().refId)
+            && exists(/databases/$(database)/documents/conversations/$(incoming().refId))
+            && (
+              (
+                get(/databases/$(database)/documents/conversations/$(incoming().refId)).data.buyerId == request.auth.uid
+                && get(/databases/$(database)/documents/conversations/$(incoming().refId)).data.sellerId == incoming().recipientId
+              )
+              || (
+                get(/databases/$(database)/documents/conversations/$(incoming().refId)).data.sellerId == request.auth.uid
+                && get(/databases/$(database)/documents/conversations/$(incoming().refId)).data.buyerId == incoming().recipientId
               )
             )
           )
@@ -2314,6 +2658,148 @@ service cloud.firestore {
         && incoming().updatedAt == request.time
         && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']);
       allow delete: if false;
+    }
+
+    // 27. Account Strike & Restriction Ledger (Owner/Admin read; strictly Admin-only write — prevents self-unban)
+    match /userRestrictions/{userId} {
+      allow get: if isSignedIn() && isValidId(userId) && (
+        request.auth.uid == userId
+        || isAdmin()
+      );
+      allow list: if isAdmin() && resource.data.userId is string;
+      allow create: if isAdmin()
+        && isValidId(userId)
+        && isValidUserRestriction(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isAdmin()
+        && isValidId(userId)
+        && isValidUserRestriction(incoming(), userId)
+        && incoming().userId == existing().userId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'accountStatus', 'activeStrikes', 'totalHistoricalStrikes',
+          'latestWarningTitle', 'latestWarningMessage', 'latestCategory',
+          'restrictListings', 'restrictBidding', 'restrictPurchasing',
+          'restrictPreDealChat', 'restrictDealChat', 'restrictReviews',
+          'restrictProfileEdits', 'restrictWithdrawals', 'financialHoldActive',
+          'requiresHumanPermanentBanReview', 'reason', 'enforcedBy', 'expiresAtMs',
+          'updatedAt'
+        ]);
+      allow delete: if false;
+    }
+
+    // 28. User-to-User / Listing / Chat / Review Safety Reports (Reporter & Admin read only — hides reporter identity)
+    match /userReports/{reportId} {
+      allow get: if isSignedIn() && isValidId(reportId) && (
+        resource == null
+        || existing().reporterId == request.auth.uid
+        || isAdmin()
+      );
+      allow list: if isSignedIn() && (
+        resource.data.reporterId == request.auth.uid
+        || isAdmin()
+      );
+      allow create: if isSignedIn()
+        && request.auth.token.email_verified == true
+        && isValidId(reportId)
+        && isValidUserReport(incoming())
+        && incoming().reporterId == request.auth.uid
+        && incoming().reporterId != incoming().reportedUserId
+        && incoming().status == 'submitted'
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isAdmin()
+        && isValidId(reportId)
+        && isValidUserReport(incoming())
+        && incoming().reporterId == existing().reporterId
+        && incoming().reportedUserId == existing().reportedUserId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'status', 'assignedAdminId', 'resolutionSummaryForReporter', 'updatedAt'
+        ]);
+      allow delete: if false;
+    }
+
+    // 29. Account Moderation Appeals (Appellant & Admin read; Admin-only decision updates)
+    match /accountAppeals/{appealId} {
+      allow get: if isSignedIn() && isValidId(appealId) && (
+        resource == null
+        || existing().userId == request.auth.uid
+        || isAdmin()
+      );
+      allow list: if isSignedIn() && (
+        resource.data.userId == request.auth.uid
+        || isAdmin()
+      );
+      allow create: if isSignedIn()
+        && isValidId(appealId)
+        && isValidAccountAppeal(incoming())
+        && incoming().userId == request.auth.uid
+        && incoming().status == 'pending'
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isAdmin()
+        && isValidId(appealId)
+        && isValidAccountAppeal(incoming())
+        && incoming().userId == existing().userId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'status', 'adminDecisionNote', 'reviewedByAdminId', 'updatedAt'
+        ]);
+      allow delete: if false;
+    }
+
+    // 30. Admin-Only 24/7 AI Security Monitor Live Alerts
+    match /moderationAlerts/{alertId} {
+      allow get: if isAdmin() && isValidId(alertId);
+      allow list: if isAdmin() && resource.data.userId is string;
+      allow create: if isAdmin()
+        && isValidId(alertId)
+        && isValidModerationAlert(incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isAdmin()
+        && isValidId(alertId)
+        && isValidModerationAlert(incoming())
+        && incoming().userId == existing().userId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'status', 'protectiveActionTaken', 'humanFinalDecision', 'updatedAt'
+        ]);
+      allow delete: if false;
+    }
+
+    // 31. Admin-Only Append-Only Immutable Moderation Audit Logs
+    match /moderationAuditLogs/{logId} {
+      allow get: if isAdmin() && isValidId(logId);
+      allow list: if isAdmin() && resource.data.targetUserId is string;
+      allow create: if isAdmin()
+        && isValidId(logId)
+        && isValidModerationAuditLog(incoming())
+        && incoming().createdAt == request.time;
+      allow update, delete: if false;
+    }
+
+    // 32. SuperAdmin-Only Fraud/Security Identity Blocklist
+    match /bannedIdentities/{banId} {
+      allow get: if isSuperAdmin() && isValidId(banId);
+      allow list: if isSuperAdmin() && resource.data.kind is string;
+      allow create: if isSuperAdmin()
+        && isValidId(banId)
+        && isValidBannedIdentity(incoming())
+        && incoming().createdAt == request.time;
+      allow update: if isSuperAdmin()
+        && isValidId(banId)
+        && isValidBannedIdentity(incoming())
+        && incoming().identityHash == existing().identityHash
+        && incoming().createdAt == existing().createdAt
+        && incoming().diff(existing()).affectedKeys().hasOnly(['reason', 'enforcedBy']);
+      allow delete: if isSuperAdmin() && isValidId(banId);
     }
   }
 }

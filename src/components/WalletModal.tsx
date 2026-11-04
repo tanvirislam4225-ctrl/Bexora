@@ -12,6 +12,7 @@ import {
 import { db, validateAndProcessImageFile } from '../lib/firebase';
 import { formatMoneyFromMinor } from '../lib/marketplaceLogic';
 import { emitUserNotification } from '../lib/notificationService';
+import type { UserRestrictionRecord } from '../types/moderation';
 
 interface WalletModalProps {
   onClose: () => void;
@@ -25,6 +26,9 @@ interface WalletModalProps {
   withdrawals: WithdrawalRequestRecord[];
   displayCurrency: CurrencyCode;
   onFlash: (msg: string) => void;
+  moderationRestriction?: UserRestrictionRecord | null;
+  onOpenSafetyAppeals?: () => void;
+  initialMode?: 'deposit' | 'withdraw' | 'history';
 }
 
 export const WalletModal: React.FC<WalletModalProps> = ({
@@ -39,8 +43,15 @@ export const WalletModal: React.FC<WalletModalProps> = ({
   withdrawals,
   displayCurrency,
   onFlash,
+  moderationRestriction = null,
+  onOpenSafetyAppeals,
+  initialMode = 'deposit',
 }) => {
-  const [mode, setMode] = useState<'deposit' | 'withdraw' | 'history'>('deposit');
+  const [mode, setMode] = useState<'deposit' | 'withdraw' | 'history'>(initialMode);
+
+  useEffect(() => {
+    setMode(initialMode);
+  }, [initialMode]);
   const [method, setMethod] = useState<'bkash' | 'nagad' | 'rocket'>('bkash');
   const [envPayments, setEnvPayments] = useState({
     bkashNumber: '',
@@ -507,6 +518,44 @@ export const WalletModal: React.FC<WalletModalProps> = ({
 
         {mode === 'withdraw' && (
           <form onSubmit={handleSubmitWithdrawal} className="space-y-3.5">
+            {(moderationRestriction?.restrictWithdrawals ||
+              moderationRestriction?.financialHoldActive) && (
+              <div
+                role="alert"
+                className="p-3.5 rounded-xl border text-xs space-y-2"
+                style={{
+                  background: 'var(--yellow-soft)',
+                  borderColor: 'var(--orange)',
+                  color: '#5C4700',
+                }}
+              >
+                <p className="font-extrabold">
+                  Withdrawal Requests Temporarily Paused — Balance 100% Preserved
+                </p>
+                <p className="leading-relaxed">
+                  Your available wallet balance (
+                  <strong>
+                    {formatMoneyFromMinor(
+                      privateUser.walletBalanceMinor,
+                      displayCurrency,
+                      'BDT',
+                      settings.usdToBdtRate
+                    )}
+                  </strong>
+                  ) and escrow reserves remain completely intact. New withdrawal payouts are paused
+                  pending human Trust &amp; Safety review.
+                </p>
+                {onOpenSafetyAppeals && (
+                  <button
+                    type="button"
+                    onClick={onOpenSafetyAppeals}
+                    className="bx-btn bx-btn-sm font-extrabold"
+                  >
+                    Open Safety Center &amp; Submit Appeal
+                  </button>
+                )}
+              </div>
+            )}
             <div>
               <label htmlFor="wd-method" className="bx-label">
                 Withdrawal Method

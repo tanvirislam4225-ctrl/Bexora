@@ -6,6 +6,7 @@ import {
   deleteField,
   doc,
   getDoc,
+  getDocs,
   limit,
   onSnapshot,
   orderBy,
@@ -110,18 +111,11 @@ import {
 } from '../lib/checkoutAndIntentLogic';
 import { shouldTriggerFollowerPublicationAlert } from '../lib/engagementLogic';
 import { fanoutNewListingToFollowers } from '../lib/engagementService';
-import {
-  enableFcmCloudApisViaServer,
-  fetchServerFcmStatus,
-  type ServerFcmDiagnosticStatus,
-} from '../lib/pushNotifications';
-import {
-  isValidVapidPublicKey,
-  NOTIFICATION_SOUND_CATALOG,
-  playNotificationSoundById,
-} from '../lib/soundAndPushConfig';
+import { enableFcmCloudApisViaServer } from '../lib/pushNotifications';
 import { SUPPORTED_LANGUAGES } from '../lib/i18n';
 import { AdminAiAssistantWorkspace } from './AdminAiAssistantWorkspace';
+import { AdminTrustSafetyCenter } from './AdminTrustSafetyCenter';
+import { AdminUsersDirectory } from './AdminUsersDirectory';
 import { ImageLightboxModal } from './ImageLightboxModal';
 
 interface AdminDashboardProps {
@@ -135,6 +129,8 @@ interface AdminDashboardProps {
 
 type AdminSection =
   | 'overview'
+  | 'users'
+  | 'trust_safety'
   | 'moderation'
   | 'nid'
   | 'deposits'
@@ -259,10 +255,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [notifDestination, setNotifDestination] = useState('');
   const [notifPersistBanner, setNotifPersistBanner] = useState(true);
   const [sendingAdminNotif, setSendingAdminNotif] = useState(false);
-  const [vapidPublicKeyInput, setVapidPublicKeyInput] = useState(settings.fcmVapidPublicKey || '');
-  const [savingVapidKey, setSavingVapidKey] = useState(false);
-  const [fcmServerDiag, setFcmServerDiag] = useState<ServerFcmDiagnosticStatus | null>(null);
-  const [loadingFcmDiag, setLoadingFcmDiag] = useState(false);
 
   // Moderation Workbench State
   const [selectedListingId, setSelectedListingId] = useState<string | null>(null);
@@ -271,6 +263,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     aiSummary?: string;
     aiMethod?: string;
   } | null>(null);
+  const [listingRevisions, setListingRevisions] = useState<
+    Array<{
+      id: string;
+      previousTitle: string;
+      previousPriceMinor: number;
+      previousCurrency: string;
+      previousStatus: string;
+      changeSummary: string;
+      createdAtMs: number;
+    }>
+  >([]);
   const [verifiedSelections, setVerifiedSelections] = useState<string[]>([]);
   const [rejectReason, setRejectReason] = useState('');
   const [runningAiOcr, setRunningAiOcr] = useState(false);
@@ -388,56 +391,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     setWpEnabled(Boolean(settings.wordpressPaymentEnabled));
     setWpSiteUrl(settings.wordpressSiteUrl || '');
     setWpBridgeEndpoint(settings.wordpressBridgeEndpoint || '/wp-json/bexora/v1');
-    setVapidPublicKeyInput(settings.fcmVapidPublicKey || '');
   }, [settings]);
-
-  useEffect(() => {
-    if (section !== 'notifications') {
-      return;
-    }
-    let cancelled = false;
-    setLoadingFcmDiag(true);
-    fetchServerFcmStatus()
-      .then((diag) => {
-        if (!cancelled) setFcmServerDiag(diag);
-      })
-      .finally(() => {
-        if (!cancelled) setLoadingFcmDiag(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [section]);
-
-  const handleSavePublicVapidKey = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const cleaned = vapidPublicKeyInput.trim();
-    if (cleaned !== '' && !isValidVapidPublicKey(cleaned)) {
-      onFlash(
-        'Invalid Web Push VAPID public key. Paste ONLY the 87-88 character base64url P-256 public certificate from Firebase Console > Project Settings > Cloud Messaging (never a private key).'
-      );
-      return;
-    }
-    setSavingVapidKey(true);
-    try {
-      await savePublicSettingsSafe(
-        adminUid,
-        { fcmVapidPublicKey: cleaned },
-        cleaned
-          ? 'Configured public FCM Web Push VAPID certificate key'
-          : 'Cleared fallback public FCM Web Push VAPID certificate key'
-      );
-      onFlash(
-        cleaned
-          ? 'Public Web Push VAPID key verified and saved.'
-          : 'Public Web Push VAPID fallback key cleared.'
-      );
-    } catch (err) {
-      onFlash(err instanceof Error ? err.message : 'Failed to save public VAPID key.');
-    } finally {
-      setSavingVapidKey(false);
-    }
-  };
 
   // Real-time Admin Subscriptions
   useEffect(() => {
@@ -726,10 +680,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     return () => unsubs.forEach((u) => u());
   }, []);
 
-  // Load private monetization evidence when inspecting a listing
+  // Load private monetization evidence and seller edit revision history when inspecting a listing
   useEffect(() => {
     if (!selectedListingId) {
       setEvidenceDoc(null);
+      setListingRevisions([]);
       return;
     }
     const target = allListings.find((l) => l.id === selectedListingId);
@@ -749,6 +704,26 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         }
       })
       .catch(() => setEvidenceDoc({ evidenceImages: [] }));
+
+    getDocs(query(collection(db, 'listings', selectedListingId, 'revisions'), limit(15)))
+      .then((snap) => {
+        const revs = snap.docs
+          .map((d) => {
+            const rv = d.data();
+            return {
+              id: d.id,
+              previousTitle: String(rv.previousTitle || ''),
+              previousPriceMinor: Number(rv.previousPriceMinor || 0),
+              previousCurrency: String(rv.previousCurrency || 'BDT'),
+              previousStatus: String(rv.previousStatus || ''),
+              changeSummary: String(rv.changeSummary || ''),
+              createdAtMs: Number(rv.createdAtMs || rv.createdAt?.toMillis?.() || 0),
+            };
+          })
+          .sort((a, b) => b.createdAtMs - a.createdAtMs);
+        setListingRevisions(revs);
+      })
+      .catch(() => setListingRevisions([]));
   }, [selectedListingId, allListings]);
 
   // One-time idempotent backfill: project any historical settled deals or paid withdrawals
@@ -2762,6 +2737,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             {(
               [
                 { id: 'overview', label: 'Overview', icon: Activity },
+                { id: 'users', label: 'ALL USERS', icon: Users },
+                { id: 'trust_safety', label: 'Trust & Safety (24/7 AI)', icon: ShieldAlert },
                 { id: 'moderation', label: `Listings (${pendingListingsCount})`, icon: ShieldCheck },
                 { id: 'nid', label: `NID Review (${pendingNidsCount})`, icon: FileCheck2 },
                 { id: 'deposits', label: `Deposits (${pendingDepositsCount})`, icon: Wallet },
@@ -2862,6 +2839,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </div>
           )}
 
+          {/* 1B. ALL USERS MANAGEMENT DIRECTORY */}
+          {section === 'users' && (
+            <AdminUsersDirectory
+              adminUid={adminUid}
+              isSuperAdmin={isSuperAdmin}
+              displayCurrency={displayCurrency}
+              usdToBdtRate={settings.usdToBdtRate}
+              onOpenModerationTab={() => setSection('trust_safety')}
+              onFlash={onFlash}
+            />
+          )}
+
           {/* 2. LISTING MODERATION & VERIFICATION WORKBENCH */}
           {section === 'moderation' && (
             <div className="space-y-5">
@@ -2912,6 +2901,61 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       )}
                     </div>
                   </div>
+
+                  {selectedModerationListing.images && selectedModerationListing.images.length > 0 && (
+                    <div className="space-y-2">
+                      <div className="text-xs font-black uppercase">
+                        Public Showcase Gallery ({selectedModerationListing.images.length}/10 screenshots)
+                      </div>
+                      <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+                        {selectedModerationListing.images.map((imgUrl, idx) => (
+                          <button
+                            key={idx}
+                            type="button"
+                            onClick={() =>
+                              setLightboxState({
+                                images: selectedModerationListing.images,
+                                index: idx,
+                                caption: `${selectedModerationListing.title} — Image ${idx + 1}/${selectedModerationListing.images.length}`,
+                              })
+                            }
+                            className="relative aspect-[4/3] border border-[var(--bx-border)] overflow-hidden bg-black/5 group"
+                          >
+                            <img
+                              src={imgUrl}
+                              alt={`Showcase ${idx + 1}`}
+                              className="w-full h-full object-cover"
+                            />
+                            {idx === 0 && (
+                              <span className="absolute top-1 left-1 px-1.5 py-0.5 bg-[#191919]/85 text-white text-[10px] font-bold">
+                                Cover
+                              </span>
+                            )}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {listingRevisions.length > 0 && (
+                    <div className="p-4 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)] space-y-2">
+                      <div className="text-xs font-black flex items-center gap-1.5">
+                        <History className="w-3.5 h-3.5 text-[#FF6500]" />
+                        Seller Edit Revision History ({listingRevisions.length})
+                      </div>
+                      <div className="divide-y divide-[var(--bx-border)] text-xs">
+                        {listingRevisions.map((rev) => (
+                          <div key={rev.id} className="py-2 space-y-0.5">
+                            <div className="font-bold">{rev.changeSummary}</div>
+                            <div className="text-[11px] opacity-75">
+                              Previous: &ldquo;{rev.previousTitle}&rdquo; · Prior Status: {rev.previousStatus} ·{' '}
+                              {rev.createdAtMs ? new Date(rev.createdAtMs).toLocaleString() : ''}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
 
                   {selectedModerationListing.monetizationStatus === 'monetized' && (
                     <div className="p-4 border-2 border-[var(--bx-border)] bg-[var(--bx-surface-alt)] space-y-4">
@@ -4556,177 +4600,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           {/* ANNOUNCEMENTS & USER ALERTS COMPOSER */}
           {section === 'notifications' && (
             <div className="space-y-6">
-              {/* Firebase Cloud Messaging, VAPID & Sound Library Card */}
-              <div className="bx-card p-6 space-y-5">
-                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--bx-border)] pb-3">
-                  <div>
-                    <h2 className="text-lg font-black flex items-center gap-2">
-                      <Volume2 className="w-5 h-5 text-[#FF6500]" />
-                      Web Push (FCM), Public VAPID Key & Sound Library
-                    </h2>
-                    <p className="text-xs opacity-75 mt-1">
-                      Project <span className="font-mono">responsive-dragon-tmn89</span> · Web App <span className="font-mono">1:448578956301:web:091629c6e19eafa50ef944</span>
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    disabled={loadingFcmDiag}
-                    onClick={() => {
-                      setLoadingFcmDiag(true);
-                      void fetchServerFcmStatus()
-                        .then((diag) => setFcmServerDiag(diag))
-                        .finally(() => setLoadingFcmDiag(false));
-                    }}
-                    className="bx-btn bx-btn-ghost px-3 py-1.5 text-xs font-bold inline-flex items-center gap-1.5"
-                  >
-                    <RefreshCw className={`w-3.5 h-3.5 ${loadingFcmDiag ? 'animate-spin' : ''}`} />
-                    <span>Recheck Cloud Status</span>
-                  </button>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
-                  <div className="p-3 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)] space-y-1">
-                    <div className="opacity-70 font-semibold">Web Push VAPID &amp; Admin SDK</div>
-                    <div className="font-extrabold text-emerald-600">
-                      {isValidVapidPublicKey(settings.fcmVapidPublicKey)
-                        ? 'Custom Public Key + Managed ADC'
-                        : fcmServerDiag?.vapidMode === 'custom_env'
-                        ? 'Custom Env Key + Managed ADC'
-                        : 'FCM Official Default + Managed ADC'}
-                    </div>
-                  </div>
-                  <div className="p-3 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)] space-y-1">
-                    <div className="opacity-70 font-semibold">FCM HTTP v1 &amp; Installations</div>
-                    <div className="font-extrabold">
-                      {fcmServerDiag?.fcmV1ApiStatus === 'enabled_verified' &&
-                      fcmServerDiag?.firebaseInstallationsApiStatus === 'enabled_verified'
-                        ? 'Both Enabled in GCP'
-                        : fcmServerDiag
-                        ? `v1: ${fcmServerDiag.fcmV1ApiStatus} · FID: ${fcmServerDiag.firebaseInstallationsApiStatus}`
-                        : 'Pending Check'}
-                    </div>
-                  </div>
-                  <div className="p-3 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)] space-y-1">
-                    <div className="opacity-70 font-semibold">FCM Registrations API</div>
-                    <div className="font-extrabold">
-                      {fcmServerDiag?.fcmRegistrationsApiStatus === 'enabled_verified'
-                        ? 'Enabled'
-                        : fcmServerDiag?.fcmRegistrationsApiStatus === 'disabled'
-                        ? 'Disabled (fcmregistrations.googleapis.com)'
-                        : 'Pending Check'}
-                    </div>
-                  </div>
-                  <div className="p-3 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)] space-y-1">
-                    <div className="opacity-70 font-semibold">Firebase Admin Send IAM</div>
-                    <div className="font-extrabold">
-                      {fcmServerDiag?.fcmSendApiStatus === 'enabled_verified'
-                        ? 'Authorized & Ready'
-                        : fcmServerDiag?.fcmSendApiStatus === 'permission_denied'
-                        ? 'Needs roles/firebasecloudmessaging.admin'
-                        : fcmServerDiag?.fcmSendApiStatus === 'disabled'
-                        ? 'Disabled in GCP (fcm.googleapis.com)'
-                        : 'Pending Check'}
-                    </div>
-                  </div>
-                </div>
-
-                {fcmServerDiag?.vapidConsoleErrorDiagnosis && (
-                  <div className="p-3.5 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)] text-xs space-y-2">
-                    <div className="font-black text-[#FF6500]">
-                      Cloud Messaging &amp; IAM Readiness (`responsive-dragon-tmn89`)
-                    </div>
-                    <p className="leading-relaxed opacity-90">
-                      {fcmServerDiag.vapidConsoleErrorDiagnosis}
-                    </p>
-                    {fcmServerDiag.fcmRegistrationsApiStatus === 'disabled' && (
-                      <div className="flex flex-wrap items-center gap-2 pt-1">
-                        <button
-                          type="button"
-                          disabled={loadingFcmDiag}
-                          onClick={() => {
-                            setLoadingFcmDiag(true);
-                            void enableFcmCloudApisViaServer()
-                              .then(async (res) => {
-                                onFlash(res.message);
-                                const diag = await fetchServerFcmStatus();
-                                setFcmServerDiag(diag);
-                              })
-                              .finally(() => setLoadingFcmDiag(false));
-                          }}
-                          className="bx-btn bx-btn-primary px-3 py-1.5 text-xs font-extrabold"
-                        >
-                          Auto-Enable FCM Registration API
-                        </button>
-                        <a
-                          href={fcmServerDiag.fcmRegistrationsActivationUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="bx-btn bx-btn-ghost px-3 py-1.5 text-xs font-bold inline-flex items-center gap-1"
-                        >
-                          <span>Open Cloud Console API Library</span>
-                          <ExternalLink className="w-3 h-3" />
-                        </a>
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                <form onSubmit={handleSavePublicVapidKey} className="space-y-2.5">
-                  <label className="block space-y-1 text-xs font-bold">
-                    <span>
-                      Optional Custom Web Push Public Certificate Override (Leave blank to use FCM Official Managed Default)
-                    </span>
-                    <div className="flex flex-col sm:flex-row gap-2">
-                      <input
-                        type="text"
-                        value={vapidPublicKeyInput}
-                        onChange={(e) => setVapidPublicKeyInput(e.target.value)}
-                        placeholder="Paste 87-88 char base64url P-256 public key from Firebase Console > Cloud Messaging > Web Push certificates"
-                        className="bx-input flex-1 px-3 py-2 text-xs font-mono"
-                      />
-                      <button
-                        type="submit"
-                        disabled={savingVapidKey}
-                        className="bx-btn bx-btn-primary px-4 py-2 text-xs font-extrabold whitespace-nowrap shrink-0"
-                      >
-                        {savingVapidKey ? 'Saving…' : 'Verify & Save Public Key'}
-                      </button>
-                    </div>
-                  </label>
-                  <p className="text-[11px] opacity-75">
-                    Security rule: Only the <strong>public</strong> Web Push certificate key (65-byte uncompressed P-256 point) is accepted. Private keys are mathematically rejected.
-                  </p>
-                </form>
-
-                <div className="pt-2 border-t border-[var(--bx-border)] space-y-2">
-                  <div className="text-xs font-bold">Bundled Notification Sound Assets (`public/sounds/*.wav`)</div>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
-                    {NOTIFICATION_SOUND_CATALOG.map((snd) => (
-                      <div
-                        key={snd.id}
-                        className="p-2.5 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)] flex items-center justify-between gap-2"
-                      >
-                        <div className="min-w-0">
-                          <div className="text-xs font-extrabold truncate">{snd.label}</div>
-                          <div className="text-[11px] font-mono opacity-70 truncate">{snd.id}.wav</div>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            void playNotificationSoundById(snd.id, { isManualPreview: true });
-                          }}
-                          className="bx-btn bx-btn-ghost px-2.5 py-1 text-[11px] font-bold inline-flex items-center gap-1 whitespace-nowrap shrink-0"
-                          aria-label={`Preview ${snd.label}`}
-                        >
-                          <Play className="w-3 h-3" />
-                          <span>Preview</span>
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </div>
-
               <div className="bx-card p-6 space-y-5">
                 <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--bx-border)] pb-3">
                   <div>
@@ -4919,6 +4792,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 )}
               </div>
             </div>
+          )}
+
+          {section === 'trust_safety' && (
+            <AdminTrustSafetyCenter
+              isSuperAdmin={isSuperAdmin}
+              onFlash={(_type, text) => onFlash(text)}
+            />
           )}
         </div>
       </div>

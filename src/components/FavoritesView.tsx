@@ -254,7 +254,7 @@ export const FavoritesView: React.FC<FavoritesViewProps> = ({
         </div>
       ) : (
         <>
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 min-[1400px]:grid-cols-4 gap-5">
+          <div className="bx-listing-grid">
             {filteredItems.slice(0, visibleLimit).map((item) => {
               const platformDef = PLATFORM_CATALOG[item.platform];
               const hasImg = Boolean(item.thumbnailUrl && !failedImages[item.favoriteId]);
@@ -263,12 +263,12 @@ export const FavoritesView: React.FC<FavoritesViewProps> = ({
               return (
                 <article
                   key={item.favoriteId}
-                  className="bx-card overflow-hidden flex flex-col justify-between min-w-0"
+                  className="bx-card w-full sm:max-w-[320px] overflow-hidden flex flex-col justify-between min-w-0"
                 >
                   <div>
                     {/* Media Banner */}
                     <div
-                      className="relative aspect-[16/10] w-full overflow-hidden flex items-center justify-center"
+                      className="relative aspect-[4/3] w-full overflow-hidden flex items-center justify-center"
                       style={{ background: PLATFORM_BANNER_BG[item.platform] }}
                     >
                       {hasImg ? (

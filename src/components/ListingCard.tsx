@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Heart, ShieldCheck } from 'lucide-react';
+import { Heart, Images, ShieldCheck } from 'lucide-react';
 import { CurrencyCode, MarketplaceListing } from '../types';
 import {
   formatAccountAge,
@@ -18,6 +18,7 @@ interface ListingCardProps {
   onOpenSellerProfile?: (sellerId: string) => void;
   isFavorited?: boolean;
   onToggleFavorite?: (l: MarketplaceListing) => void;
+  className?: string;
 }
 
 export const ListingCard: React.FC<ListingCardProps> = ({
@@ -28,11 +29,13 @@ export const ListingCard: React.FC<ListingCardProps> = ({
   onOpenSellerProfile,
   isFavorited = false,
   onToggleFavorite,
+  className,
 }) => {
   const [imgFailed, setImgFailed] = useState(false);
   const platformDef = PLATFORM_CATALOG[listing.platform];
   const metricLabel = getCategoryMetricLabel(listing.platform, listing.subcategory);
-  const safeCoverSrc = listing.images && listing.images.length > 0 ? sanitizeSafeImageSrc(listing.images[0]) : '';
+  const imageCount = Array.isArray(listing.images) ? listing.images.length : 0;
+  const safeCoverSrc = imageCount > 0 ? sanitizeSafeImageSrc(listing.images[0]) : '';
   const hasImage = Boolean(safeCoverSrc) && !imgFailed;
 
   const isVerifiedMonetization = listing.verifiedOptions.length > 0;
@@ -57,9 +60,12 @@ export const ListingCard: React.FC<ListingCardProps> = ({
   const isReserved = listing.status === 'reserved';
 
   return (
-    <article className="bx-card overflow-hidden flex flex-col min-w-0 hover:-translate-y-0.5">
-      {/* 16:10 Media Showcase with Zero-Broken-Image Resilient Fallback + Save to Favorites Heart */}
-      <div className="relative aspect-[16/10] w-full overflow-hidden">
+    <article
+      data-testid={`listing-card-${listing.id}`}
+      className={`bx-card w-full sm:max-w-[320px] overflow-hidden flex flex-col min-w-0 hover:-translate-y-0.5${className ? ` ${className}` : ''}`}
+    >
+      {/* Compact 4:3 Media Showcase with Zero-Broken-Image Fallback + Save to Favorites Heart */}
+      <div className="relative aspect-[4/3] w-full overflow-hidden">
         <button
           type="button"
           onClick={() => onOpen(listing)}
@@ -76,16 +82,25 @@ export const ListingCard: React.FC<ListingCardProps> = ({
               className="w-full h-full object-cover"
             />
           ) : (
-            <div className="flex flex-col items-center justify-center gap-2 text-white">
-              <PlatformIcon id={listing.platform} size={44} />
-              <span className="text-xs font-extrabold tracking-wide uppercase opacity-90">
+            <div className="flex flex-col items-center justify-center gap-1.5 px-2 text-center text-white">
+              <PlatformIcon id={listing.platform} size={36} />
+              <span className="text-[10.5px] sm:text-xs font-extrabold tracking-wide uppercase opacity-90 truncate max-w-full">
                 {listing.subcategory || platformDef.name}
               </span>
             </div>
           )}
+          {imageCount > 1 && (
+            <span
+              className="absolute bottom-2 left-2 inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-extrabold text-white tabular-nums"
+              style={{ background: 'rgba(15, 15, 20, 0.78)' }}
+            >
+              <Images className="w-3 h-3" />
+              <span>{imageCount}</span>
+            </span>
+          )}
           {isReserved && (
-            <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/85 via-black/65 to-transparent px-3 py-2 text-[11px] font-bold text-amber-300">
-              Reserved — Pending Buyer Payment
+            <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/85 via-black/65 to-transparent px-2.5 py-1.5 text-[10.5px] sm:text-[11px] font-bold text-amber-300 truncate">
+              Reserved — Pending Payment
             </div>
           )}
         </button>
@@ -104,28 +119,28 @@ export const ListingCard: React.FC<ListingCardProps> = ({
             }
             aria-pressed={isFavorited}
             title={isFavorited ? 'Saved in Favorites — click to remove' : 'Save to Favorites'}
-            className="absolute top-2.5 right-2.5 z-10 w-10 h-10 rounded-full grid place-items-center border transition-transform hover:scale-105 active:scale-95"
+            className="absolute top-2 right-2 z-10 w-8 h-8 sm:w-9 sm:h-9 rounded-full grid place-items-center border transition-transform hover:scale-105 active:scale-95"
             style={{
               background: isFavorited ? '#FFE4E6' : 'rgba(18, 18, 22, 0.72)',
               borderColor: isFavorited ? '#E11D48' : 'rgba(255, 255, 255, 0.28)',
               color: isFavorited ? '#E11D48' : '#FFFFFF',
             }}
           >
-            <Heart className={`w-4 h-4 ${isFavorited ? 'fill-current' : ''}`} />
+            <Heart className={`w-3.5 h-3.5 sm:w-4 sm:h-4 ${isFavorited ? 'fill-current' : ''}`} />
           </button>
         )}
       </div>
 
-      {/* Card Body — Clean Unboxed Metadata Discipline */}
-      <div className="p-3.5 flex flex-col gap-2 flex-1 min-w-0">
+      {/* Compact Responsive Card Body */}
+      <div className="p-2.5 sm:p-3.5 flex flex-col gap-1.5 sm:gap-2 flex-1 min-w-0">
         <div
-          className="flex items-center gap-1.5 text-[11.5px] font-semibold min-w-0"
+          className="flex items-center gap-1 text-[10.5px] sm:text-[11.5px] font-semibold min-w-0"
           style={{ color: 'var(--text-2)' }}
         >
           {!listing.subcategory.toLowerCase().startsWith(platformDef.name.toLowerCase()) && (
             <>
-              <span className="shrink-0">{platformDef.name}</span>
-              <span aria-hidden="true" className="shrink-0">
+              <span className="shrink-0 hidden sm:inline">{platformDef.name}</span>
+              <span aria-hidden="true" className="shrink-0 hidden sm:inline">
                 ·
               </span>
             </>
@@ -140,24 +155,27 @@ export const ListingCard: React.FC<ListingCardProps> = ({
         <button
           type="button"
           onClick={() => onOpen(listing)}
-          className="text-left font-extrabold text-[14.5px] leading-snug line-clamp-2 min-h-[2.5rem] hover:underline"
+          className="text-left font-extrabold text-[13px] sm:text-[14.5px] leading-snug line-clamp-2 min-h-[2.2rem] sm:min-h-[2.5rem] hover:underline break-words"
           style={{ color: 'var(--text)' }}
         >
           {listing.title}
         </button>
 
-        <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs tabular-nums" style={{ color: 'var(--text-2)' }}>
+        <div
+          className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] sm:text-xs tabular-nums min-w-0"
+          style={{ color: 'var(--text-2)' }}
+        >
           {listing.platform === 'gaming' ? (
-            <span>Level {listing.gameLevel ?? listing.metricValue}</span>
+            <span className="truncate">Level {listing.gameLevel ?? listing.metricValue}</span>
           ) : (
-            <span>
+            <span className="truncate">
               {listing.metricValue.toLocaleString('en-US')} {metricLabel.toLowerCase()}
             </span>
           )}
           {listing.monthlyRevenueMinor > 0 && (
             <>
               <span aria-hidden="true">·</span>
-              <span>
+              <span className="truncate">
                 {formatMoneyFromMinor(listing.monthlyRevenueMinor, displayCurrency, listing.currency, usdToBdtRate)}/mo
               </span>
             </>
@@ -165,7 +183,7 @@ export const ListingCard: React.FC<ListingCardProps> = ({
         </div>
 
         <div
-          className="text-[11.5px] font-bold truncate"
+          className="text-[10.5px] sm:text-[11.5px] font-bold truncate"
           style={{
             color: isReserved
               ? 'var(--orange)'
@@ -176,12 +194,12 @@ export const ListingCard: React.FC<ListingCardProps> = ({
               : 'var(--text-3)',
           }}
         >
-          {isReserved ? 'Bid Accepted · Reserved Pending Payment' : monetizationSummary}
+          {isReserved ? 'Reserved Pending Payment' : monetizationSummary}
         </div>
 
         {/* Footer Baseline */}
         <div
-          className="mt-auto pt-2.5 border-t flex items-center justify-between gap-2"
+          className="mt-auto pt-2 sm:pt-2.5 border-t flex items-center justify-between gap-1.5 min-w-0"
           style={{ borderColor: 'var(--border-soft)' }}
         >
           <button
@@ -191,35 +209,39 @@ export const ListingCard: React.FC<ListingCardProps> = ({
               if (onOpenSellerProfile) onOpenSellerProfile(listing.sellerId);
               else onOpen(listing);
             }}
-            className="inline-flex items-center gap-1.5 min-w-0 text-left hover:underline"
+            className="inline-flex items-center gap-1 sm:gap-1.5 min-w-0 text-left hover:underline"
             aria-label={`View seller ${listing.sellerName}`}
           >
             <span
-              className="w-6 h-6 rounded-full grid place-items-center text-[10px] font-extrabold text-white shrink-0"
+              className="w-5 h-5 sm:w-6 sm:h-6 rounded-full grid place-items-center text-[9.5px] sm:text-[10px] font-extrabold text-white shrink-0"
               style={{ background: 'var(--purple)' }}
             >
               {initials}
             </span>
-            <span className="text-xs font-bold truncate" style={{ color: 'var(--text)' }}>
+            <span className="text-[11px] sm:text-xs font-bold truncate" style={{ color: 'var(--text)' }}>
               {listing.sellerName}
             </span>
             {listing.sellerVerified && (
-              <ShieldCheck className="w-3.5 h-3.5 shrink-0" style={{ color: 'var(--green)' }} aria-label="Verified Seller" />
+              <ShieldCheck
+                className="w-3 h-3 sm:w-3.5 sm:h-3.5 shrink-0"
+                style={{ color: 'var(--green)' }}
+                aria-label="Verified Seller"
+              />
             )}
           </button>
 
           <div className="text-right shrink-0 tabular-nums">
             {isReserved && listing.acceptedBidAmountMinor ? (
               <div className="flex flex-col items-end leading-tight">
-                <span className="text-[10px] line-through opacity-60" style={{ color: 'var(--text-2)' }}>
+                <span className="text-[9.5px] sm:text-[10px] line-through opacity-60" style={{ color: 'var(--text-2)' }}>
                   {formatMoneyFromMinor(listing.priceMinor, displayCurrency, listing.currency, usdToBdtRate)}
                 </span>
-                <span className="font-extrabold text-sm" style={{ color: 'var(--orange)' }}>
+                <span className="font-extrabold text-[12.5px] sm:text-sm" style={{ color: 'var(--orange)' }}>
                   {formatMoneyFromMinor(listing.acceptedBidAmountMinor, displayCurrency, listing.currency, usdToBdtRate)}
                 </span>
               </div>
             ) : (
-              <span className="font-extrabold text-[15px]" style={{ color: 'var(--text)' }}>
+              <span className="font-extrabold text-[13px] sm:text-[15px]" style={{ color: 'var(--text)' }}>
                 {formatMoneyFromMinor(listing.priceMinor, displayCurrency, listing.currency, usdToBdtRate)}
               </span>
             )}

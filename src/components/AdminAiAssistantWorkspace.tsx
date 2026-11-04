@@ -34,7 +34,7 @@ import {
   X,
   XCircle,
 } from 'lucide-react';
-import { auth, db } from '../lib/firebase';
+import { auth, db, getValidFirebaseIdToken } from '../lib/firebase';
 import { evaluateProposalGovernanceGate } from '../lib/aiAuditLogic';
 import {
   AiProposalRecord,
@@ -260,7 +260,7 @@ export const AdminAiAssistantWorkspace: React.FC<AdminAiAssistantWorkspaceProps>
   const syncedServerPropIdsRef = useRef<Set<string>>(new Set());
 
   const getAdminBearerHeaders = useCallback(async (): Promise<Record<string, string>> => {
-    const token = auth.currentUser ? await auth.currentUser.getIdToken() : '';
+    const token = auth.currentUser ? await getValidFirebaseIdToken(false) : '';
     return {
       'Content-Type': 'application/json',
       ...(token ? { Authorization: `Bearer ${token}` } : {}),

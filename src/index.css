@@ -340,6 +340,12 @@ button {
   box-shadow: none;
 }
 
+.bx-drawer-scroll {
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+}
+
 /* ============================= PLATFORM CATEGORY CARDS (REF A + B) ============================= */
 .bx-cat-grid {
   display: grid;
@@ -420,6 +426,37 @@ button {
 .bx-ticker-row:hover .bx-ticker-track,
 .bx-ticker-row:focus-within .bx-ticker-track {
   animation-play-state: paused;
+}
+
+/* ============================= COMPACT BOUNDED LISTING GRIDS ============================= */
+.bx-listing-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+  align-items: stretch;
+}
+
+@media (min-width: 350px) {
+  .bx-listing-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+}
+
+@media (min-width: 640px) {
+  .bx-listing-grid {
+    grid-template-columns: repeat(auto-fill, minmax(250px, 300px));
+    gap: 16px;
+    justify-content: start;
+  }
+}
+
+@media (min-width: 1024px) {
+  .bx-listing-grid {
+    grid-template-columns: repeat(auto-fill, minmax(280px, 320px));
+    gap: 20px;
+    justify-content: start;
+  }
 }
 }
 

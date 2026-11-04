@@ -218,3 +218,69 @@ test('Firestore Rules: enforces PII-free admin-only publicActivity projections, 
   );
   assert.match(rules, /moderationStatus/);
 });
+
+test('Firestore Rules: enforces Trust & Safety restrictions, blocks self-unban, locks paused conversations until Admin resume, hides reporter identity, and protects moderationAuditLogs', () => {
+  // 1. userRestrictions cannot be created/updated/deleted by users (no self-unban or strike tampering)
+  assert.match(rules, /match\s+\/userRestrictions\/\{userId\}[\s\S]*?allow\s+create:\s*if\s+isAdmin\(\)/);
+  assert.match(rules, /match\s+\/userRestrictions\/\{userId\}[\s\S]*?allow\s+update:\s*if\s+isAdmin\(\)/);
+  assert.match(rules, /match\s+\/userRestrictions\/\{userId\}[\s\S]*?allow\s+delete:\s*if\s+false;/);
+
+  // 2. Suspended or restricted users are blocked at Firestore rules layer across listings, bids, deals, chats, reviews, and withdrawals
+  assert.match(rules, /function\s+isUserModerationSuspended\(uid\)/);
+  assert.match(rules, /function\s+hasActiveRestrictionFlag\(uid,\s*flagKey\)/);
+  assert.match(rules, /!hasActiveRestrictionFlag\(request\.auth\.uid,\s*'restrictListings'\)/);
+  assert.match(rules, /!hasActiveRestrictionFlag\(request\.auth\.uid,\s*'restrictWithdrawals'\)/);
+  assert.match(rules, /!hasActiveRestrictionFlag\(request\.auth\.uid,\s*'financialHoldActive'\)/);
+
+  // 3. One-way conversation & deal room moderationPaused lock: participants can pause -> true, only isAdmin() can resume -> false
+  assert.match(rules, /incoming\(\)\.moderationPaused\s*==\s*true/);
+  assert.match(
+    rules,
+    /!\('moderationPaused'\s+in\s+get\(\/databases\/\$\(database\)\/documents\/conversations\/\$\(convId\)\)\.data\)\s*\|\|\s*get\(\/databases\/\$\(database\)\/documents\/conversations\/\$\(convId\)\)\.data\.moderationPaused\s*!=\s*true/
+  );
+
+  // 4. Reporter identity privacy & immutable moderationAuditLogs
+  assert.match(
+    rules,
+    /match\s+\/userReports\/\{reportId\}[\s\S]*?resource\.data\.reporterId\s*==\s*request\.auth\.uid\s*\|\|\s*isAdmin\(\)/
+  );
+  assert.match(rules, /match\s+\/moderationAuditLogs\/\{logId\}[\s\S]*?allow\s+update,\s*delete:\s*if\s+false;/);
+});
+
+test('Firestore Rules: enforces 10-image gallery validation, OTP phoneVerified reset on unverified phone edit, safe seller listing delete, immutable revisions, and SuperAdmin bannedIdentities', () => {
+  // 1. 10-image gallery size cap & element validation up to index 9
+  assert.match(rules, /data\.images\s+is\s+list\s*&&\s*data\.images\.size\(\)\s*<=\s*10/);
+  assert.match(rules, /isSafeImageOrHttpsNonEmpty\(data\.images\[9\],\s*12,\s*250000\)/);
+
+  // 2. Phone verification anti-bypass: changing phone requires phoneVerified == false unless Auth token phone_number matches incoming().phone
+  assert.match(rules, /phoneCountryCode/);
+  assert.match(
+    rules,
+    /incoming\(\)\.phoneVerified\s*==\s*existing\(\)\.phoneVerified\s*&&\s*incoming\(\)\.phone\s*==\s*existing\(\)\.phone/
+  );
+  assert.match(rules, /request\.auth\.token\.phone_number\s*==\s*incoming\(\)\.phone/);
+
+  // 3. Seller safe listing delete blocks reserved/sold/suspended and activeDealId
+  assert.match(
+    rules,
+    /allow\s+delete:\s*if\s+isSignedIn\(\)\s*&&\s*isValidId\(listingId\)[\s\S]*?existing\(\)\.sellerId\s*==\s*request\.auth\.uid[\s\S]*?existing\(\)\.status\s+in\s+\['draft',\s*'pending',\s*'active',\s*'rejected',\s*'archived'\][\s\S]*?!\('activeDealId'\s+in\s+existing\(\)/
+  );
+
+  // 4. Immutable listing revisions subcollection with Master Gate & 0-lookup list rule
+  assert.match(rules, /function\s+isValidListingRevision\(data,\s*listingId\)/);
+  assert.match(rules, /match\s+\/revisions\/\{revisionId\}[\s\S]*?allow\s+update,\s*delete:\s*if\s+false;/);
+
+  // 5. SuperAdmin-only bannedIdentities
+  assert.match(rules, /match\s+\/bannedIdentities\/\{banId\}[\s\S]*?allow\s+get:\s*if\s+isSuperAdmin\(\)/);
+
+  // 6. OTP-free phoneFormatValidated boolean allowed on privateUsers while keeping phoneVerified strictly gated, plus verified conversation counterparty notifications
+  assert.match(rules, /!\('phoneFormatValidated'\s+in\s+data\)\s*\|\|\s*data\.phoneFormatValidated\s+is\s+bool/);
+  assert.match(rules, /incoming\(\)\.refType\s*==\s*'conversation'/);
+  assert.match(
+    rules,
+    /exists\(\/databases\/\$\(database\)\/documents\/conversations\/\$\(incoming\(\)\.refId\)\)/
+  );
+});
+
+
+

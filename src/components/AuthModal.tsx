@@ -2,7 +2,6 @@ import React, { useCallback, useEffect, useState } from 'react';
 import {
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
-  signInWithPopup,
   updateProfile,
   User,
 } from 'firebase/auth';
@@ -34,6 +33,8 @@ import {
   registerPendingSignupProfile,
   safeSendEmailVerification,
   safeSendPasswordResetEmail,
+  signInWithGoogleResilient,
+  signInWithRedirect,
   syncProactiveRefreshWithCapabilities,
 } from '../lib/firebase';
 import { BexoraLogo } from './Icons';
@@ -48,6 +49,8 @@ import {
   describePendingAuthIntent,
   PendingAuthIntent,
 } from '../lib/checkoutAndIntentLogic';
+import type { CountryCode } from 'libphonenumber-js';
+import { PhoneCountryInput } from './PhoneCountryInput';
 
 interface AuthModalProps {
   initialMode?: 'login' | 'register' | 'forgot';
@@ -75,6 +78,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   // Independent Registration state
   const [fullName, setFullName] = useState('');
   const [username, setUsername] = useState('');
+  const [phoneCountry, setPhoneCountry] = useState<CountryCode>('BD');
   const [phone, setPhone] = useState('');
   const [regEmail, setRegEmail] = useState('');
   const [regPassword, setRegPassword] = useState('');
@@ -215,7 +219,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       const cred = await signInWithEmailAndPassword(auth, validation.cleanEmail, loginPassword);
       const updatedCaps = recordLiveEmailPasswordOutcome('enabled');
       if (updatedCaps) setCapabilities(updatedCaps);
-      syncProactiveRefreshWithCapabilities(cred.user, Boolean(capabilities?.tokenServiceEnabled));
+      syncProactiveRefreshWithCapabilities(cred.user, capabilities?.tokenServiceStatus);
       await ensureUserProfileInitialized(cred.user);
       onSuccess('Signed in successfully.');
       onClose();
@@ -245,6 +249,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       fullName,
       username,
       phone,
+      phoneCountry,
       email: regEmail,
       password: existingMatchingUser && !regPassword ? 'RecoveryPass1' : regPassword,
       confirmPassword:
@@ -259,6 +264,29 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     setRegisterBusy(true);
     let createdOrMatchedUser: User | null = existingMatchingUser;
     try {
+      // Pre-check fraud-ban security blocklist (if backend endpoint is available)
+      try {
+        const eligResp = await fetch(
+          `/api/auth/registration-eligibility?email=${encodeURIComponent(
+            validation.cleanEmail
+          )}&phone=${encodeURIComponent(validation.normalizedPhone)}`,
+          { headers: { Accept: 'application/json' } }
+        );
+        const ct = eligResp.headers.get('content-type') || '';
+        if (eligResp.ok && ct.includes('application/json')) {
+          const eligData = (await eligResp.json()) as { eligible?: boolean; reason?: string };
+          if (eligData.eligible === false) {
+            setError(
+              eligData.reason ||
+                'This email or phone number has been restricted from registration due to a prior security violation.'
+            );
+            return;
+          }
+        }
+      } catch {
+        // Non-blocking on static hosting
+      }
+
       // Pre-check username availability before creating or completing Auth profile
       const unameSnap = await getDoc(doc(db, 'usernames', validation.normalizedUsername));
       if (
@@ -275,6 +303,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         displayName: validation.cleanName,
         username: validation.normalizedUsername,
         phone: validation.normalizedPhone,
+        phoneCountryCode: validation.phoneCountryCode,
       });
 
       if (!createdOrMatchedUser) {
@@ -288,7 +317,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         if (updatedCaps) setCapabilities(updatedCaps);
         syncProactiveRefreshWithCapabilities(
           cred.user,
-          Boolean(capabilities?.tokenServiceEnabled)
+          capabilities?.tokenServiceStatus
         );
       }
 
@@ -300,6 +329,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         displayName: validation.cleanName,
         username: validation.normalizedUsername,
         phone: validation.normalizedPhone,
+        phoneCountryCode: validation.phoneCountryCode,
       });
 
       setPartialSignupUid(null);
@@ -349,12 +379,25 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     setInfo('');
     setGoogleBusy(true);
     try {
-      const cred = await signInWithPopup(auth, googleProvider);
-      syncProactiveRefreshWithCapabilities(cred.user, Boolean(capabilities?.tokenServiceEnabled));
+      const cred = await signInWithGoogleResilient(googleProvider);
+      syncProactiveRefreshWithCapabilities(cred.user, capabilities?.tokenServiceStatus);
       await ensureUserProfileInitialized(cred.user);
       onSuccess('Signed in with Google.');
       onClose();
     } catch (err) {
+      const code =
+        err && typeof err === 'object' && 'code' in err
+          ? String((err as { code?: unknown }).code || '')
+          : '';
+      if (code === 'auth/popup-blocked') {
+        try {
+          await signInWithRedirect(auth, googleProvider);
+          return;
+        } catch (redirectErr) {
+          setError(formatFirebaseAuthError(redirectErr));
+          return;
+        }
+      }
       setError(formatFirebaseAuthError(err));
     } finally {
       setGoogleBusy(false);
@@ -795,46 +838,42 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               />
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div>
-                <label htmlFor="reg-username" className="bx-label">
-                  Unique Username
-                </label>
-                <input
-                  id="reg-username"
-                  type="text"
-                  autoComplete="username"
-                  value={username}
-                  onChange={(e) => {
-                    setUsername(e.target.value);
-                    if (error) setError('');
-                  }}
-                  placeholder="e.g. tanvir_bd"
-                  className="bx-input"
-                  disabled={registerBusy}
-                  required
-                />
-              </div>
-              <div>
-                <label htmlFor="reg-phone" className="bx-label">
-                  Phone Number
-                </label>
-                <input
-                  id="reg-phone"
-                  type="tel"
-                  autoComplete="tel"
-                  value={phone}
-                  onChange={(e) => {
-                    setPhone(e.target.value);
-                    if (error) setError('');
-                  }}
-                  placeholder="+8801XXXXXXXXX"
-                  className="bx-input"
-                  disabled={registerBusy}
-                  required
-                />
-              </div>
+            <div>
+              <label htmlFor="reg-username" className="bx-label">
+                Unique Username
+              </label>
+              <input
+                id="reg-username"
+                type="text"
+                autoComplete="username"
+                value={username}
+                onChange={(e) => {
+                  setUsername(e.target.value);
+                  if (error) setError('');
+                }}
+                placeholder="e.g. tanvir_bd"
+                className="bx-input"
+                disabled={registerBusy}
+                required
+              />
             </div>
+
+            <PhoneCountryInput
+              idPrefix="reg"
+              label="Mobile Phone Number"
+              countryIso2={phoneCountry}
+              onCountryChange={(nextCountry) => {
+                setPhoneCountry(nextCountry);
+                if (error) setError('');
+              }}
+              phoneValue={phone}
+              onPhoneChange={(nextPhone) => {
+                setPhone(nextPhone);
+                if (error) setError('');
+              }}
+              disabled={registerBusy}
+              required
+            />
 
             <div>
               <label htmlFor="reg-email" className="bx-label">

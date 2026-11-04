@@ -29,6 +29,7 @@ import {
   validateReviewReportReason,
 } from '../lib/reviewsAndStatsLogic';
 import { formatActivityRelativeTime } from '../lib/activityTickerLogic';
+import type { ReportModalTarget } from '../lib/moderationClient';
 
 export interface ReviewsViewProps {
   userUid: string | null;
@@ -40,6 +41,7 @@ export interface ReviewsViewProps {
   onBrowseMarketplace: () => void;
   onRequireAuth: () => void;
   onFlash: (msg: string) => void;
+  onReportReviewer?: (target: ReportModalTarget) => void;
 }
 
 const REVIEWS_PAGE_SIZE = 12;
@@ -54,6 +56,7 @@ export const ReviewsView: React.FC<ReviewsViewProps> = ({
   onBrowseMarketplace,
   onRequireAuth,
   onFlash,
+  onReportReviewer,
 }) => {
   const [allReviews, setAllReviews] = useState<ReviewRecord[]>([]);
   const [loading, setLoading] = useState(true);
@@ -143,11 +146,13 @@ export const ReviewsView: React.FC<ReviewsViewProps> = ({
       const reportId = `rrep_${reportingReview.id}_${userUid}`;
       await setDoc(doc(db, 'reviewReports', reportId), {
         reviewId: reportingReview.id,
+        dealId: reportingReview.dealId,
         reporterId: userUid,
         reporterName: (userDisplayName || 'Verified Member').slice(0, 80),
         reason: check.cleanReason,
         status: 'open',
         createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
       });
       setReportingReview(null);
       setReportReason('');
@@ -519,6 +524,20 @@ export const ReviewsView: React.FC<ReviewsViewProps> = ({
                         <button
                           type="button"
                           onClick={() => {
+                            if (onReportReviewer) {
+                              onReportReviewer({
+                                reportedUserId: rev.reviewerId,
+                                reportedUserName: rev.reviewerName || 'Reviewer',
+                                surface: 'review',
+                                reviewId: rev.id,
+                                dealId: rev.dealId,
+                                listingId: rev.listingId,
+                                listingTitle: rev.listingTitle,
+                                quotedContent: rev.comment,
+                                defaultCategory: 'review_manipulation',
+                              });
+                              return;
+                            }
                             if (!userUid) {
                               onRequireAuth();
                               return;

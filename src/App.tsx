@@ -4,6 +4,7 @@ import {
   collection,
   deleteDoc,
   doc,
+  enableNetwork,
   getDoc,
   limit,
   onSnapshot,
@@ -57,6 +58,7 @@ import {
   auth,
   BOOTSTRAPPED_SUPERADMIN_EMAIL,
   clearRecoverableSessionOnLogout,
+  consumePendingAuthRedirectResult,
   consumeStaleTokenSessionClearedNotice,
   db,
   detectFirebaseAuthCapabilities,
@@ -67,21 +69,20 @@ import {
   extractUserFacingFirestoreError,
   FirebaseAuthCapabilities,
   formatFirebaseAuthError,
+  getValidFirebaseIdToken,
   hasPendingRecoverableSession,
   isTokenServiceDisabledError,
   markAuthenticatedSessionActive,
   prepareFirestoreAuthSession,
   recoverFirestoreFromTokenServiceError,
-  restoreExpiredSessionSilently,
   safeRefreshCurrentUserToken,
   safeSendEmailVerification,
   syncProactiveRefreshWithCapabilities,
   testFirestoreConnection,
 } from './lib/firebase';
+import { shouldShowProtectedRouteLoading } from './lib/authDomainAndPersistenceLogic';
 import {
-  computeSessionRenewalSchedule,
   DEFAULT_PUBLIC_SETTINGS,
-  evaluateWakeSessionAction,
   getProtectionDurationHours,
   PLATFORM_CATALOG,
   PLATFORM_LIST,
@@ -125,6 +126,7 @@ import {
   FullScreenPage,
   parseRouteFromSearch,
   PendingAuthIntent,
+  resolveCanonicalPathnameForNavigation,
   sanitizeRouteId,
   serializePendingAuthIntent,
 } from './lib/checkoutAndIntentLogic';
@@ -158,6 +160,7 @@ import { AdminDashboard } from './components/AdminDashboard';
 import { FloatingSupportWidget } from './components/FloatingSupportWidget';
 import { PWAInstallBanner } from './components/PWAInstallBanner';
 import { NotificationCenter } from './components/NotificationCenter';
+import { NotificationPermissionOnboarding } from './components/NotificationPermissionOnboarding';
 import { canUserFollowSeller, resolveSellerFollowerCount } from './lib/engagementLogic';
 import {
   FollowTargetSellerSummary,
@@ -179,6 +182,14 @@ import { RecentSearchesView } from './components/RecentSearchesView';
 import { ReviewsView } from './components/ReviewsView';
 import { InfoCenterView } from './components/InfoCenterView';
 import { MarketplaceFooter } from './components/MarketplaceFooter';
+import { ModerationStatusBannerAndAppealModal } from './components/ModerationStatusBannerAndAppealModal';
+import { ReportUserModal } from './components/ReportUserModal';
+import {
+  fetchMyModerationStatus,
+  type MyModerationStatusResponse,
+  type ReportModalTarget,
+} from './lib/moderationClient';
+import type { UserRestrictionRecord } from './types/moderation';
 
 const PENDING_AUTH_INTENT_STORAGE_KEY = 'bx_pending_auth_intent';
 
@@ -268,6 +279,8 @@ function mapDealDocument(id: string, dl: Record<string, unknown>): DealRecord {
     refundLedgerId: dl.refundLedgerId ? String(dl.refundLedgerId) : undefined,
     settlementLedgerId: dl.settlementLedgerId ? String(dl.settlementLedgerId) : undefined,
     adminHoldNote: dl.adminHoldNote ? String(dl.adminHoldNote) : undefined,
+    moderationPaused: Boolean(dl.moderationPaused),
+    moderationPauseReason: dl.moderationPauseReason ? String(dl.moderationPauseReason) : undefined,
     settledAtMs: dl.settledAtMs ? Number(dl.settledAtMs) : undefined,
     refundedAtMs: dl.refundedAtMs ? Number(dl.refundedAtMs) : undefined,
     status: dl.status as DealRecord['status'],
@@ -298,7 +311,7 @@ export default function App() {
 
   // Full-Screen Website Route State & URL Synchronization
   const [route, setRoute] = useState<AppRouteState>(() =>
-    parseRouteFromSearch(window.location.search)
+    parseRouteFromSearch(window.location.search, window.location.pathname)
   );
   const page: FullScreenPage = route.page;
 
@@ -340,8 +353,12 @@ export default function App() {
   const navigateRoute = useCallback(
     (next: AppRouteState, opts?: { replace?: boolean; preserveScroll?: boolean }) => {
       setRoute(next);
-      const nextSearch = buildSearchForRoute(next, window.location.search);
-      const nextUrl = `${window.location.pathname}${nextSearch}${window.location.hash}`;
+      const targetPathname = resolveCanonicalPathnameForNavigation(window.location.pathname, next);
+      const nextSearch =
+        targetPathname !== '/' && next.page === 'info'
+          ? ''
+          : buildSearchForRoute(next, window.location.search);
+      const nextUrl = `${targetPathname}${nextSearch}${window.location.hash}`;
       const curUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`;
       if (nextUrl !== curUrl) {
         if (opts?.replace) {
@@ -398,7 +415,7 @@ export default function App() {
   // Sync browser Back/Forward history navigation
   useEffect(() => {
     const onPopState = () => {
-      const parsed = parseRouteFromSearch(window.location.search);
+      const parsed = parseRouteFromSearch(window.location.search, window.location.pathname);
       setRoute(parsed);
       const params = new URLSearchParams(window.location.search);
       setWpReturnSessionId(sanitizeRouteId(params.get('wp_session')) || null);
@@ -542,6 +559,23 @@ export default function App() {
   const [sendingBannerVerify, setSendingBannerVerify] = useState(false);
   const [checkingBannerVerify, setCheckingBannerVerify] = useState(false);
 
+  // 24/7 Trust & Safety Account Standing, Reporting & Appeals State
+  const [reportModalTarget, setReportModalTarget] = useState<ReportModalTarget | null>(null);
+  const [safetyAppealsModalOpen, setSafetyAppealsModalOpen] = useState(false);
+  const [firestoreRestriction, setFirestoreRestriction] = useState<UserRestrictionRecord | null>(null);
+  const [moderationStatus, setModerationStatus] = useState<MyModerationStatusResponse | null>(null);
+  const [walletInitialMode, setWalletInitialMode] = useState<'deposit' | 'withdraw' | 'history'>('deposit');
+
+  const refreshModerationStatus = useCallback(async () => {
+    if (!auth.currentUser) return;
+    try {
+      const res = await fetchMyModerationStatus();
+      setModerationStatus(res);
+    } catch {
+      // Non-blocking fallback to live Firestore userRestrictions snapshot
+    }
+  }, []);
+
   useEffect(() => {
     if (verifyCooldownSec <= 0) return;
     const tId = window.setInterval(() => {
@@ -564,7 +598,14 @@ export default function App() {
   useEffect(() => {
     if (!fbUser || !profileBootstrapped || signingOut) return;
     void syncActiveWebPushTokenForSession(fbUser.uid, settings.fcmVapidPublicKey);
-    return subscribeForegroundPushMessages((payload) => {
+    const onWindowFocusOrVisible = () => {
+      if (typeof document === 'undefined' || document.visibilityState === 'visible') {
+        void syncActiveWebPushTokenForSession(fbUser.uid, settings.fcmVapidPublicKey);
+      }
+    };
+    window.addEventListener('focus', onWindowFocusOrVisible);
+    document.addEventListener('visibilitychange', onWindowFocusOrVisible);
+    const unsubFg = subscribeForegroundPushMessages((payload) => {
       // If payload carries a Firestore notificationId, the live `/notifications` onSnapshot
       // listener + NotificationArrivalTracker already updates the bell badge and plays the
       // exact chime/vibration once — skip duplicate foreground toast & sound here.
@@ -576,6 +617,11 @@ export default function App() {
       const kind = payload?.data?.alertKind === 'deal_room_created' ? 'deal_room_created' : 'normal';
       void dispatchForegroundNotificationAlert(kind, notificationPrefsRef.current);
     }, settings.fcmVapidPublicKey);
+    return () => {
+      window.removeEventListener('focus', onWindowFocusOrVisible);
+      document.removeEventListener('visibilitychange', onWindowFocusOrVisible);
+      unsubFg();
+    };
   }, [fbUser, profileBootstrapped, signingOut, settings.fcmVapidPublicKey, showFlash]);
 
   const handleReconnectSession = useCallback(async () => {
@@ -737,12 +783,21 @@ export default function App() {
     let active = true;
     const unsubAuth = onAuthStateChanged(auth, async (u) => {
       if (!u) {
+        const redirectedUser = await consumePendingAuthRedirectResult();
+        if (!active) return;
+        if (redirectedUser || auth.currentUser) {
+          // Returning OAuth redirect completed; onAuthStateChanged will immediately fire with the authenticated user
+          return;
+        }
         if (hasPendingRecoverableSession()) {
-          await prepareFirestoreAuthSession();
+          const caps = await detectFirebaseAuthCapabilities();
           if (!active) return;
-          if (auth.currentUser) {
-            // Silent background OAuth restoration succeeded; onAuthStateChanged will immediately fire with the live user
-            return;
+          if (caps.tokenServiceStatus === 'disabled') {
+            await prepareFirestoreAuthSession();
+            if (!active) return;
+            if (auth.currentUser) {
+              return;
+            }
           }
           const fallbackMsg = consumeStaleTokenSessionClearedNotice();
           if (fallbackMsg) {
@@ -767,35 +822,30 @@ export default function App() {
         setPersonalNotifications([]);
         setNotificationsLoading(false);
         setNotificationsError(null);
+        setFirestoreRestriction(null);
+        setModerationStatus(null);
         return;
       }
 
       markAuthenticatedSessionActive(u);
 
-      // Gate internal ProactiveRefresh immediately so disabled securetoken.googleapis.com is never hit at minute 55
+      // Keep Firebase's native ProactiveRefresh active unless Token Service is conclusively disabled
       void detectFirebaseAuthCapabilities().then((caps) => {
-        syncProactiveRefreshWithCapabilities(u, caps.tokenServiceEnabled);
+        syncProactiveRefreshWithCapabilities(u, caps.tokenServiceStatus);
       });
 
-      // Verify cached token validity without forcing an unnecessary securetoken.googleapis.com refresh
-      try {
-        await u.getIdToken(false);
-      } catch (tokenErr) {
-        if (isTokenServiceDisabledError(tokenErr)) {
-          await recoverFirestoreFromTokenServiceError();
-          if (!active) return;
-          if (!auth.currentUser) {
-            const fallbackMsg = consumeStaleTokenSessionClearedNotice();
-            if (fallbackMsg) {
-              setStaleSessionNotice(fallbackMsg);
-              setTokenBannerDismissed(false);
-            }
-            return;
-          }
+      // Validate/refresh the ID token via persisted refreshToken; sign out ONLY if account was genuinely revoked/disabled
+      await getValidFirebaseIdToken(false);
+      if (!active) return;
+      if (!auth.currentUser) {
+        const fallbackMsg = consumeStaleTokenSessionClearedNotice();
+        if (fallbackMsg) {
+          setStaleSessionNotice(fallbackMsg);
+          setTokenBannerDismissed(false);
         }
+        return;
       }
 
-      if (!active) return;
       const activeUser = auth.currentUser || u;
       setStaleSessionNotice(null);
       setSessionExtendPromptVisible(false);
@@ -819,184 +869,63 @@ export default function App() {
     };
   }, []);
 
-  // 3-Stage Session Continuity Engine + Tab-Wake / Device-Sleep Recovery:
-  // 1) Minute 52 (8m before expiry) & on tab wake (<=15m left): Silent OAuth handler / FedCM auto-refresh (0 popups, 0 securetoken calls).
-  // 2) Minute 57.5 (2.5m before expiry): Non-intrusive 1-click "Extend Session" bar only if silent background renewal wasn't available.
-  // 3) Minute 59:15 (45s before expiry, ahead of Firebase's 30s StsTokenManager.isExpired buffer): Final silent renewal attempt + safe recovery so Firestore never drops offline.
+  // Persistent Session Wake & Network Continuity:
+  // Keeps users signed in permanently across multi-hour/multi-day sleep, tab backgrounding, and Wi-Fi reconnects
+  // by refreshing expired 60-minute ID tokens via `browserLocalPersistence` without ever forcing automatic logout.
   useEffect(() => {
-    if (!fbUser || !authCaps || authCaps.tokenServiceEnabled) return;
+    if (!fbUser || signingOut) return;
     let cancelled = false;
-    let wakeRenewalBusy = false;
-    const timers: number[] = [];
+    let wakeRefreshBusy = false;
 
-    const checkAndRenewOnWake = async () => {
-      if (cancelled || wakeRenewalBusy || !auth.currentUser) return;
+    const refreshTokenSilentlyOnWake = async () => {
+      if (cancelled || wakeRefreshBusy || !auth.currentUser) return;
       if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
-      wakeRenewalBusy = true;
+      wakeRefreshBusy = true;
       try {
-        const latestCaps = await detectFirebaseAuthCapabilities();
+        syncProactiveRefreshWithCapabilities(auth.currentUser, authCaps?.tokenServiceStatus);
+        const token = await getValidFirebaseIdToken(false);
         if (cancelled) return;
-        if (latestCaps.tokenServiceEnabled) {
-          syncProactiveRefreshWithCapabilities(auth.currentUser, true);
-          return;
-        }
-        const tokenRes = await auth.currentUser.getIdTokenResult(false).catch(() => null);
-        const expMs = tokenRes ? Date.parse(tokenRes.expirationTime) : 0;
-        const action = evaluateWakeSessionAction(expMs, Date.now(), false);
-        if (action === 'silent_refresh_now' && auth.currentUser) {
-          const ok = await attemptSilentGoogleSessionRefresh(auth.currentUser);
-          if (!cancelled && ok) {
-            setSessionExtendPromptVisible(false);
-            setStaleSessionNotice(null);
-            setAuthTokenEpoch((n) => n + 1);
+        if (token && auth.currentUser) {
+          await enableNetwork(db).catch(() => {});
+          setSessionExtendPromptVisible(false);
+          setStaleSessionNotice(null);
+        } else if (!auth.currentUser) {
+          const msg = consumeStaleTokenSessionClearedNotice();
+          if (msg) {
+            setStaleSessionNotice(msg);
+            setTokenBannerDismissed(false);
           }
-        } else if (action === 'restore_expired_now') {
-          await recoverFirestoreFromTokenServiceError();
-          if (cancelled) return;
-          if (auth.currentUser) {
-            setSessionExtendPromptVisible(false);
-            setStaleSessionNotice(null);
-            setAuthTokenEpoch((n) => n + 1);
-          } else {
-            const msg = consumeStaleTokenSessionClearedNotice();
-            if (msg) {
-              setStaleSessionNotice(msg);
-              setTokenBannerDismissed(false);
-            }
-          }
+        } else if (authCaps?.tokenServiceStatus === 'disabled' && auth.currentUser) {
+          await attemptSilentGoogleSessionRefresh(auth.currentUser);
         }
       } finally {
-        wakeRenewalBusy = false;
+        wakeRefreshBusy = false;
       }
     };
 
     const onVisibilityChange = () => {
       if (document.visibilityState === 'visible') {
-        void checkAndRenewOnWake();
+        void refreshTokenSilentlyOnWake();
       }
     };
     const onWindowFocus = () => {
-      void checkAndRenewOnWake();
+      void refreshTokenSilentlyOnWake();
+    };
+    const onBrowserOnline = () => {
+      void refreshTokenSilentlyOnWake();
     };
 
     document.addEventListener('visibilitychange', onVisibilityChange);
     window.addEventListener('focus', onWindowFocus);
-
-    (async () => {
-      try {
-        syncProactiveRefreshWithCapabilities(fbUser, false);
-        const tokenResult = await fbUser.getIdTokenResult(false);
-        if (cancelled) return;
-        const expMs = Date.parse(tokenResult.expirationTime);
-        const schedule = computeSessionRenewalSchedule(expMs, Date.now());
-        let silentlyRenewed = false;
-
-        timers.push(
-          window.setTimeout(async () => {
-            if (cancelled) return;
-            const latestCaps = await detectFirebaseAuthCapabilities(true);
-            if (cancelled) return;
-            setAuthCaps(latestCaps);
-            if (latestCaps.tokenServiceEnabled) {
-              syncProactiveRefreshWithCapabilities(fbUser, true);
-              silentlyRenewed = true;
-              return;
-            }
-            const ok = await attemptSilentGoogleSessionRefresh(fbUser);
-            if (!cancelled && ok) {
-              silentlyRenewed = true;
-              setSessionExtendPromptVisible(false);
-              setStaleSessionNotice(null);
-              setAuthTokenEpoch((n) => n + 1);
-            }
-          }, schedule.silentIdpRefreshDelayMs)
-        );
-
-        timers.push(
-          window.setTimeout(async () => {
-            if (cancelled || silentlyRenewed) return;
-            const latestCaps = await detectFirebaseAuthCapabilities(true);
-            if (cancelled) return;
-            setAuthCaps(latestCaps);
-            if (latestCaps.tokenServiceEnabled) return;
-            // Retry silent refresh once more before showing any prompt
-            const okRetry = await attemptSilentGoogleSessionRefresh(fbUser);
-            if (!cancelled && okRetry) {
-              silentlyRenewed = true;
-              setSessionExtendPromptVisible(false);
-              setStaleSessionNotice(null);
-              setAuthTokenEpoch((n) => n + 1);
-              return;
-            }
-            if (!cancelled) {
-              setTokenBannerDismissed(false);
-              setSessionExtendPromptVisible(true);
-            }
-          }, schedule.promptExtendDelayMs)
-        );
-
-        timers.push(
-          window.setTimeout(async () => {
-            if (cancelled || silentlyRenewed) return;
-            const latestCaps = await detectFirebaseAuthCapabilities(true);
-            if (cancelled) return;
-            setAuthCaps(latestCaps);
-            if (latestCaps.tokenServiceEnabled) return;
-            if (auth.currentUser) {
-              const freshRes = await auth.currentUser.getIdTokenResult(false).catch(() => null);
-              const freshExp = freshRes ? Date.parse(freshRes.expirationTime) : 0;
-              if (freshExp - Date.now() > 60_000) {
-                setSessionExtendPromptVisible(false);
-                setAuthTokenEpoch((n) => n + 1);
-                return;
-              }
-            }
-            setSessionExtendPromptVisible(false);
-            await recoverFirestoreFromTokenServiceError();
-            if (cancelled) return;
-            if (auth.currentUser) {
-              setStaleSessionNotice(null);
-              setAuthTokenEpoch((n) => n + 1);
-            } else {
-              const msg = consumeStaleTokenSessionClearedNotice();
-              if (msg) {
-                setStaleSessionNotice(msg);
-                setTokenBannerDismissed(false);
-              }
-            }
-          }, schedule.safePreExpiryGuardDelayMs)
-        );
-      } catch (err) {
-        if (isTokenServiceDisabledError(err) && !cancelled) {
-          await recoverFirestoreFromTokenServiceError();
-        }
-      }
-    })();
+    window.addEventListener('online', onBrowserOnline);
 
     return () => {
       cancelled = true;
       document.removeEventListener('visibilitychange', onVisibilityChange);
       window.removeEventListener('focus', onWindowFocus);
-      timers.forEach((id) => window.clearTimeout(id));
+      window.removeEventListener('online', onBrowserOnline);
     };
-  }, [fbUser, authCaps, authTokenEpoch]);
-
-  // Also attempt silent restoration when user focuses the tab while a recoverable session is pending
-  useEffect(() => {
-    if (fbUser || signingOut) return;
-    const onFocusRestore = () => {
-      if (!auth.currentUser && hasPendingRecoverableSession()) {
-        void restoreExpiredSessionSilently().then((restored) => {
-          if (restored) {
-            setStaleSessionNotice(null);
-            setSessionExtendPromptVisible(false);
-          }
-        });
-      }
-    };
-    window.addEventListener('focus', onFocusRestore);
-    return () => window.removeEventListener('focus', onFocusRestore);
-  }, [fbUser, signingOut]);
+  }, [fbUser, signingOut, authCaps?.tokenServiceStatus]);
 
   const handleRefreshAuthToken = useCallback(async () => {
     if (!auth.currentUser) return;
@@ -1146,6 +1075,8 @@ export default function App() {
               uid: d.uid,
               email: d.email || '',
               phone: d.phone || '',
+              phoneCountryCode: d.phoneCountryCode ? String(d.phoneCountryCode) : undefined,
+              phoneFormatValidated: Boolean(d.phoneFormatValidated || d.phone),
               emailVerified: Boolean(d.emailVerified),
               phoneVerified: Boolean(d.phoneVerified),
               nidStatus: d.nidStatus || 'not_verified',
@@ -1159,6 +1090,23 @@ export default function App() {
         () => {}
       )
     );
+
+    unsubs.push(
+      onSnapshot(
+        doc(db, 'userRestrictions', uid),
+        (snap) => {
+          if (snap.exists()) {
+            const rd = snap.data() as UserRestrictionRecord;
+            setFirestoreRestriction({ ...rd, userId: uid });
+            void refreshModerationStatus();
+          } else {
+            setFirestoreRestriction(null);
+          }
+        },
+        () => {}
+      )
+    );
+    void refreshModerationStatus();
 
     unsubs.push(
       onSnapshot(
@@ -1315,6 +1263,10 @@ export default function App() {
               lastMessage: cd.lastMessage,
               safetyAcceptedByBuyer: Boolean(cd.safetyAcceptedByBuyer),
               safetyAcceptedBySeller: Boolean(cd.safetyAcceptedBySeller),
+              moderationPaused: Boolean(cd.moderationPaused),
+              moderationPauseReason: cd.moderationPauseReason
+                ? String(cd.moderationPauseReason)
+                : undefined,
               updatedAtMs: cd.updatedAt?.toMillis ? cd.updatedAt.toMillis() : Date.now(),
             };
           });
@@ -1341,6 +1293,10 @@ export default function App() {
               lastMessage: cd.lastMessage,
               safetyAcceptedByBuyer: Boolean(cd.safetyAcceptedByBuyer),
               safetyAcceptedBySeller: Boolean(cd.safetyAcceptedBySeller),
+              moderationPaused: Boolean(cd.moderationPaused),
+              moderationPauseReason: cd.moderationPauseReason
+                ? String(cd.moderationPauseReason)
+                : undefined,
               updatedAtMs: cd.updatedAt?.toMillis ? cd.updatedAt.toMillis() : Date.now(),
             };
           });
@@ -1477,16 +1433,7 @@ export default function App() {
             };
           });
           const prefsNow = notificationPrefsRef.current;
-          const visibleForArrival = parsed.filter((item) => {
-            if (prefsNow.followedSellerListingsEnabled === false && isFollowedSellerNewListingNotification(item)) {
-              return false;
-            }
-            if (prefsNow.bidUpdatesEnabled === false && item.category === 'bid') {
-              return false;
-            }
-            return true;
-          });
-          const arrival = arrivalTrackerRef.current.processSnapshot(uid, visibleForArrival);
+          const arrival = arrivalTrackerRef.current.processSnapshot(uid, parsed);
           if (arrival.shouldAlert) {
             void dispatchForegroundNotificationAlert(arrival.alertKind, prefsNow);
           }
@@ -1681,20 +1628,8 @@ export default function App() {
 
   const combinedNotifications = useMemo(() => {
     void announcementReadEpoch;
-    const filteredPersonal = personalNotifications.filter((item) => {
-      if (
-        notificationPrefs.followedSellerListingsEnabled === false &&
-        isFollowedSellerNewListingNotification(item)
-      ) {
-        return false;
-      }
-      if (notificationPrefs.bidUpdatesEnabled === false && item.category === 'bid') {
-        return false;
-      }
-      return true;
-    });
     return mergeAnnouncementsIntoFeed(
-      filteredPersonal,
+      personalNotifications,
       activeAnnouncements,
       fbUser?.uid ?? null
     );
@@ -1703,8 +1638,6 @@ export default function App() {
     activeAnnouncements,
     fbUser?.uid,
     announcementReadEpoch,
-    notificationPrefs.followedSellerListingsEnabled,
-    notificationPrefs.bidUpdatesEnabled,
   ]);
 
   const unreadNotificationCount = useMemo(
@@ -1906,6 +1839,10 @@ export default function App() {
     setDeposits([]);
     setWithdrawals([]);
     setFetchedDeal(null);
+    setFirestoreRestriction(null);
+    setModerationStatus(null);
+    setSafetyAppealsModalOpen(false);
+    setReportModalTarget(null);
     navigateRoute({ page: 'home' }, { replace: true });
     try {
       await unlinkCurrentDevicePushTokenOnLogout(outgoingUid);
@@ -2533,7 +2470,8 @@ export default function App() {
           }
           navigateRoute({ page: 'sell' });
         }}
-        onOpenWallet={() => {
+        onOpenWallet={(mode = 'deposit') => {
+          setWalletInitialMode(mode);
           if (!fbUser) {
             requireAuthWithIntent({
               kind: 'open_page',
@@ -2545,6 +2483,15 @@ export default function App() {
           }
           setWalletReturnRoute(null);
           navigateRoute({ page: 'wallet' });
+        }}
+        onOpenPublicSelf={() => {
+          if (fbUser) {
+            handleOpenPublicProfile(fbUser.uid);
+          }
+        }}
+        onOpenSafetyAndAppeals={() => {
+          void refreshModerationStatus();
+          setSafetyAppealsModalOpen(true);
         }}
         onLogout={handleLogout}
         isInstalled={pwa.isInstalled}
@@ -2561,9 +2508,6 @@ export default function App() {
             loading={notificationsLoading}
             error={notificationsError}
             isOffline={isOffline}
-            fallbackVapidKey={settings.fcmVapidPublicKey}
-            preferences={notificationPrefs}
-            onUpdatePreferences={handleUpdateNotificationPreferences}
             onRetry={() => setNotifReloadEpoch((n) => n + 1)}
             onMarkOneRead={handleMarkSingleNotificationRead}
             onMarkAllRead={handleMarkAllNotificationsRead}
@@ -2577,6 +2521,12 @@ export default function App() {
             externalOpenSignal={notifOpenSignal}
           />
         }
+      />
+
+      {/* Automatic Browser Notification Permission Onboarding (Case A: default permission) */}
+      <NotificationPermissionOnboarding
+        fallbackVapidKey={settings.fcmVapidPublicKey}
+        onFlash={showFlash}
       />
 
       {/* Optional Admin-Configured Top Platform Notice Banner */}
@@ -2703,6 +2653,29 @@ export default function App() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Trust & Safety Standing, Warnings & Account Appeal Center */}
+      {fbUser && (
+        <ModerationStatusBannerAndAppealModal
+          currentUser={
+            profile || {
+              uid: fbUser.uid,
+              displayName: fbUser.displayName,
+            }
+          }
+          restriction={moderationStatus?.restriction || firestoreRestriction}
+          activeStrikes={moderationStatus?.activeStrikes || []}
+          appeals={moderationStatus?.appeals || []}
+          myReports={moderationStatus?.myReports || []}
+          modalOpen={safetyAppealsModalOpen}
+          onOpenModal={() => {
+            void refreshModerationStatus();
+            setSafetyAppealsModalOpen(true);
+          }}
+          onCloseModal={() => setSafetyAppealsModalOpen(false)}
+          onRefreshStatus={refreshModerationStatus}
+        />
       )}
 
       {/* Main Content Area — All Pages Render as Full-Screen Website Views */}
@@ -2960,9 +2933,9 @@ export default function App() {
                     ) : (
                       <div
                         data-testid="home-latest-listings-grid"
-                        className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 min-[1400px]:grid-cols-4 gap-5"
+                        className="bx-listing-grid"
                       >
-                        {activeListings.slice(0, 8).map((item) => (
+                        {activeListings.slice(0, 8).map((item, idx) => (
                           <ListingCard
                             key={item.id}
                             listing={item}
@@ -2972,6 +2945,11 @@ export default function App() {
                             onOpenSellerProfile={handleOpenPublicProfile}
                             isFavorited={favoriteListingIds.has(item.id)}
                             onToggleFavorite={(l) => void handleToggleFavorite(l)}
+                            className={
+                              idx === 0
+                                ? '!w-[325px] !max-w-none !rounded-[19px] !border-[6px] !text-[15px] !leading-[14px]'
+                                : undefined
+                            }
                           />
                         ))}
                       </div>
@@ -3153,9 +3131,9 @@ export default function App() {
                     ) : (
                       <div
                         data-testid="marketplace-listings-grid"
-                        className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 min-[1440px]:grid-cols-4 gap-4"
+                        className="bx-listing-grid"
                       >
-                        {filteredMarketplaceListings.map((item) => (
+                        {filteredMarketplaceListings.map((item, idx) => (
                           <ListingCard
                             key={item.id}
                             listing={item}
@@ -3165,6 +3143,11 @@ export default function App() {
                             onOpenSellerProfile={handleOpenPublicProfile}
                             isFavorited={favoriteListingIds.has(item.id)}
                             onToggleFavorite={(l) => void handleToggleFavorite(l)}
+                            className={
+                              idx === 0
+                                ? '!w-[320px] !max-w-none !h-[299.438px] !mt-0 !ml-[10px] !rounded-[14px] !border-[1px] !text-[10px] !leading-[10px] !font-bold !text-left'
+                                : undefined
+                            }
                           />
                         ))}
                       </div>
@@ -3283,6 +3266,11 @@ export default function App() {
                     isFollowingSeller={followedSellerIds.has(resolvedTargetListing.sellerId)}
                     sellerFollowerCount={listingSellerFollowerCount}
                     onToggleFollowSeller={(s) => void handleToggleFollowSeller(s)}
+                    onReportListingOrSeller={(target) => setReportModalTarget(target)}
+                    onEditListing={(targetListing) =>
+                      navigateRoute({ page: 'sell', editListingId: targetListing.id })
+                    }
+                    onListingDeleted={() => navigateRoute({ page: 'profile', profileTab: 'listings' })}
                   />
                 )}
               </>
@@ -3384,7 +3372,15 @@ export default function App() {
             {/* FULL-SCREEN WALLET PAGE */}
             {page === 'wallet' && (
               <>
-                {!authReady || (fbUser && (!profile || !privateUser)) ? (
+                {shouldShowProtectedRouteLoading({
+                  authReady,
+                  signingOut,
+                  hasFbUser: Boolean(fbUser),
+                  needsProfile: true,
+                  hasProfile: Boolean(profile),
+                  needsPrivateUser: true,
+                  hasPrivateUser: Boolean(privateUser),
+                }) ? (
                   <div className="bx-wrap py-12 text-center text-sm font-bold opacity-75">
                     Loading your BEXORA Wallet…
                   </div>
@@ -3440,6 +3436,12 @@ export default function App() {
                     deposits={deposits}
                     withdrawals={withdrawals}
                     displayCurrency={currency}
+                    moderationRestriction={moderationStatus?.restriction || firestoreRestriction}
+                    onOpenSafetyAppeals={() => {
+                      void refreshModerationStatus();
+                      setSafetyAppealsModalOpen(true);
+                    }}
+                    initialMode={walletInitialMode}
                     onFlash={showFlash}
                   />
                 )}
@@ -3449,7 +3451,13 @@ export default function App() {
             {/* FULL-SCREEN SELL ASSET PAGE */}
             {page === 'sell' && (
               <>
-                {!authReady || (fbUser && !profile) ? (
+                {shouldShowProtectedRouteLoading({
+                  authReady,
+                  signingOut,
+                  hasFbUser: Boolean(fbUser),
+                  needsProfile: true,
+                  hasProfile: Boolean(profile),
+                }) ? (
                   <div className="bx-wrap py-12 text-center text-sm font-bold opacity-75">
                     Preparing Seller Listing Studio…
                   </div>
@@ -3518,147 +3526,208 @@ export default function App() {
             )}
 
             {/* FAVORITES PAGE */}
-            {page === 'favorites' && (
-              <FavoritesView
-                userUid={fbUser?.uid ?? null}
-                favorites={favorites}
-                liveListings={activeListings}
-                displayCurrency={currency}
-                usdToBdtRate={settings.usdToBdtRate}
-                onOpenListingById={(listingId) =>
-                  navigateRoute({ page: 'listing', listingId })
-                }
-                onOpenPublicProfile={handleOpenPublicProfile}
-                onRemoveFavorite={handleRemoveFavoriteById}
-                onBrowseMarketplace={() => navigateRoute({ page: 'market' })}
-                onRequireAuth={() =>
-                  requireAuthWithIntent({
-                    kind: 'open_page',
-                    targetPage: 'favorites',
-                    returnPage: 'favorites',
-                    createdAtMs: Date.now(),
-                  })
-                }
-              />
-            )}
+            {page === 'favorites' &&
+              (shouldShowProtectedRouteLoading({
+                authReady,
+                signingOut,
+                hasFbUser: Boolean(fbUser),
+              }) ? (
+                <div className="bx-wrap py-12 text-center text-sm font-bold opacity-75">
+                  Loading your Favorites…
+                </div>
+              ) : (
+                <FavoritesView
+                  userUid={fbUser?.uid ?? null}
+                  favorites={favorites}
+                  liveListings={activeListings}
+                  displayCurrency={currency}
+                  usdToBdtRate={settings.usdToBdtRate}
+                  onOpenListingById={(listingId) =>
+                    navigateRoute({ page: 'listing', listingId })
+                  }
+                  onOpenPublicProfile={handleOpenPublicProfile}
+                  onRemoveFavorite={handleRemoveFavoriteById}
+                  onBrowseMarketplace={() => navigateRoute({ page: 'market' })}
+                  onRequireAuth={() =>
+                    requireAuthWithIntent({
+                      kind: 'open_page',
+                      targetPage: 'favorites',
+                      returnPage: 'favorites',
+                      createdAtMs: Date.now(),
+                    })
+                  }
+                />
+              ))}
 
             {/* MY BIDS PAGE */}
-            {page === 'my-bids' && (
-              <MyBidsView
-                userUid={fbUser?.uid ?? null}
-                liveListings={activeListings}
-                displayCurrency={currency}
-                usdToBdtRate={settings.usdToBdtRate}
-                onOpenListingById={(listingId) =>
-                  navigateRoute({ page: 'listing', listingId })
-                }
-                onOpenPublicProfile={handleOpenPublicProfile}
-                onOpenDealRoom={(dealId) => navigateRoute({ page: 'deals', dealId })}
-                onStartDealCheckout={(dealId, listingTitle) => {
-                  if (!fbUser) {
+            {page === 'my-bids' &&
+              (shouldShowProtectedRouteLoading({
+                authReady,
+                signingOut,
+                hasFbUser: Boolean(fbUser),
+              }) ? (
+                <div className="bx-wrap py-12 text-center text-sm font-bold opacity-75">
+                  Loading your Bids…
+                </div>
+              ) : (
+                <MyBidsView
+                  userUid={fbUser?.uid ?? null}
+                  liveListings={activeListings}
+                  displayCurrency={currency}
+                  usdToBdtRate={settings.usdToBdtRate}
+                  onOpenListingById={(listingId) =>
+                    navigateRoute({ page: 'listing', listingId })
+                  }
+                  onOpenPublicProfile={handleOpenPublicProfile}
+                  onOpenDealRoom={(dealId) => navigateRoute({ page: 'deals', dealId })}
+                  onStartDealCheckout={(dealId, listingTitle) => {
+                    if (!fbUser) {
+                      requireAuthWithIntent({
+                        kind: 'pay_deal',
+                        dealId,
+                        listingTitle,
+                        returnPage: 'my-bids',
+                        createdAtMs: Date.now(),
+                      });
+                      return;
+                    }
+                    navigateRoute({ page: 'checkout', checkoutDealId: dealId });
+                  }}
+                  onBrowseMarketplace={() => navigateRoute({ page: 'market' })}
+                  onRequireAuth={() =>
                     requireAuthWithIntent({
-                      kind: 'pay_deal',
-                      dealId,
-                      listingTitle,
+                      kind: 'open_page',
+                      targetPage: 'my-bids',
                       returnPage: 'my-bids',
                       createdAtMs: Date.now(),
-                    });
-                    return;
+                    })
                   }
-                  navigateRoute({ page: 'checkout', checkoutDealId: dealId });
-                }}
-                onBrowseMarketplace={() => navigateRoute({ page: 'market' })}
-                onRequireAuth={() =>
-                  requireAuthWithIntent({
-                    kind: 'open_page',
-                    targetPage: 'my-bids',
-                    returnPage: 'my-bids',
-                    createdAtMs: Date.now(),
-                  })
-                }
-                onFlash={showFlash}
-              />
-            )}
+                  onFlash={showFlash}
+                />
+              ))}
 
             {/* FOLLOWING SELLERS PAGE */}
-            {page === 'following' && (
-              <FollowingView
-                userUid={fbUser?.uid ?? null}
-                follows={followedSellers}
-                liveListings={activeListings}
-                favoriteListingIds={favoriteListingIds}
-                displayCurrency={currency}
-                usdToBdtRate={settings.usdToBdtRate}
-                onOpenPublicProfile={handleOpenPublicProfile}
-                onUnfollowSeller={handleUnfollowSellerById}
-                onOpenListing={handleOpenListingDetail}
-                onToggleFavorite={(l) => void handleToggleFavorite(l)}
-                onExploreTopSellers={() => navigateRoute({ page: 'sellers' })}
-                onRequireAuth={() =>
-                  requireAuthWithIntent({
-                    kind: 'open_page',
-                    targetPage: 'following',
-                    returnPage: 'following',
-                    createdAtMs: Date.now(),
-                  })
-                }
-              />
-            )}
+            {page === 'following' &&
+              (shouldShowProtectedRouteLoading({
+                authReady,
+                signingOut,
+                hasFbUser: Boolean(fbUser),
+              }) ? (
+                <div className="bx-wrap py-12 text-center text-sm font-bold opacity-75">
+                  Loading Followed Sellers…
+                </div>
+              ) : (
+                <FollowingView
+                  userUid={fbUser?.uid ?? null}
+                  follows={followedSellers}
+                  liveListings={activeListings}
+                  favoriteListingIds={favoriteListingIds}
+                  displayCurrency={currency}
+                  usdToBdtRate={settings.usdToBdtRate}
+                  onOpenPublicProfile={handleOpenPublicProfile}
+                  onUnfollowSeller={handleUnfollowSellerById}
+                  onOpenListing={handleOpenListingDetail}
+                  onToggleFavorite={(l) => void handleToggleFavorite(l)}
+                  onExploreTopSellers={() => navigateRoute({ page: 'sellers' })}
+                  onRequireAuth={() =>
+                    requireAuthWithIntent({
+                      kind: 'open_page',
+                      targetPage: 'following',
+                      returnPage: 'following',
+                      createdAtMs: Date.now(),
+                    })
+                  }
+                />
+              ))}
 
             {/* PRE-DEAL MESSENGER CHAT PAGE */}
-            {page === 'chat' && (
-              <ChatView
-                userUid={fbUser?.uid ?? null}
-                profile={profile}
-                conversations={conversations}
-                initialConvId={route.convId || null}
-                onRequireAuth={() =>
-                  requireAuthWithIntent({
-                    kind: 'open_page',
-                    targetPage: 'chat',
-                    convId: route.convId,
-                    returnPage: 'chat',
-                    createdAtMs: Date.now(),
-                  })
-                }
-                onFlash={showFlash}
-              />
-            )}
+            {page === 'chat' &&
+              (shouldShowProtectedRouteLoading({
+                authReady,
+                signingOut,
+                hasFbUser: Boolean(fbUser),
+                needsProfile: true,
+                hasProfile: Boolean(profile),
+              }) ? (
+                <div className="bx-wrap py-12 text-center text-sm font-bold opacity-75">
+                  Loading Pre-Deal Messenger…
+                </div>
+              ) : (
+                <ChatView
+                  userUid={fbUser?.uid ?? null}
+                  profile={profile}
+                  conversations={conversations}
+                  initialConvId={route.convId || null}
+                  onRequireAuth={() =>
+                    requireAuthWithIntent({
+                      kind: 'open_page',
+                      targetPage: 'chat',
+                      convId: route.convId,
+                      returnPage: 'chat',
+                      createdAtMs: Date.now(),
+                    })
+                  }
+                  onReportConversation={(target) => setReportModalTarget(target)}
+                  onFlash={showFlash}
+                />
+              ))}
 
             {/* ESCROW DEALS PAGE */}
-            {page === 'deals' && (
-              <DealsView
-                userUid={fbUser?.uid ?? null}
-                profile={profile}
-                privateUser={privateUser}
-                deals={deals}
-                initialDealId={route.dealId || null}
-                settings={settings}
-                displayCurrency={currency}
-                onRequireAuth={() =>
-                  requireAuthWithIntent({
-                    kind: 'open_page',
-                    targetPage: 'deals',
-                    dealId: route.dealId,
-                    returnPage: 'deals',
-                    createdAtMs: Date.now(),
-                  })
-                }
-                onOpenWallet={() => {
-                  setWalletReturnRoute(null);
-                  navigateRoute({ page: 'wallet' });
-                }}
-                onOpenDealCheckout={(dealId) => {
-                  navigateRoute({ page: 'checkout', checkoutDealId: dealId });
-                }}
-                onFlash={showFlash}
-              />
-            )}
+            {page === 'deals' &&
+              (shouldShowProtectedRouteLoading({
+                authReady,
+                signingOut,
+                hasFbUser: Boolean(fbUser),
+                needsProfile: true,
+                hasProfile: Boolean(profile),
+                needsPrivateUser: true,
+                hasPrivateUser: Boolean(privateUser),
+              }) ? (
+                <div className="bx-wrap py-12 text-center text-sm font-bold opacity-75">
+                  Loading Escrow Deal Rooms…
+                </div>
+              ) : (
+                <DealsView
+                  userUid={fbUser?.uid ?? null}
+                  profile={profile}
+                  privateUser={privateUser}
+                  deals={deals}
+                  initialDealId={route.dealId || null}
+                  settings={settings}
+                  displayCurrency={currency}
+                  onRequireAuth={() =>
+                    requireAuthWithIntent({
+                      kind: 'open_page',
+                      targetPage: 'deals',
+                      dealId: route.dealId,
+                      returnPage: 'deals',
+                      createdAtMs: Date.now(),
+                    })
+                  }
+                  onOpenWallet={() => {
+                    setWalletReturnRoute(null);
+                    navigateRoute({ page: 'wallet' });
+                  }}
+                  onOpenDealCheckout={(dealId) => {
+                    navigateRoute({ page: 'checkout', checkoutDealId: dealId });
+                  }}
+                  onReportDealCounterparty={(target) => setReportModalTarget(target)}
+                  onFlash={showFlash}
+                />
+              ))}
 
             {/* OWNER PROFILE PAGE */}
             {page === 'profile' && (
               <>
-                {!authReady ? (
+                {shouldShowProtectedRouteLoading({
+                  authReady,
+                  signingOut,
+                  hasFbUser: Boolean(fbUser),
+                  needsProfile: true,
+                  hasProfile: Boolean(profile),
+                  needsPrivateUser: true,
+                  hasPrivateUser: Boolean(privateUser),
+                }) ? (
                   <div className="max-w-3xl mx-auto px-4 py-12 text-center text-sm font-bold opacity-75">
                     Checking authentication session…
                   </div>
@@ -3725,6 +3794,12 @@ export default function App() {
                       navigateRoute({ page: 'wallet' });
                     }}
                     onOpenPublicSelf={() => handleOpenPublicProfile(fbUser.uid)}
+                    onOpenSafetyAndAppeals={() => {
+                      void refreshModerationStatus();
+                      setSafetyAppealsModalOpen(true);
+                    }}
+                    onLogout={handleLogout}
+                    signingOut={signingOut}
                     onAuthTokenRefreshed={handleRefreshAuthToken}
                     onFlash={showFlash}
                     initialTab={route.profileTab}
@@ -3750,13 +3825,24 @@ export default function App() {
                 onMessageSeller={(sellerUid, sellerName, listing) =>
                   handleStartChatWithUser(sellerUid, sellerName, listing)
                 }
+                onReportUser={(target) => setReportModalTarget(target)}
               />
             )}
 
             {/* ADMIN CONSOLE PAGE */}
             {page === 'admin' && (
               <>
-                {!fbUser || !isAdmin ? (
+                {shouldShowProtectedRouteLoading({
+                  authReady,
+                  signingOut,
+                  hasFbUser: Boolean(fbUser),
+                  needsProfileBootstrapped: true,
+                  profileBootstrapped,
+                }) ? (
+                  <div className="max-w-lg mx-auto px-4 py-14 text-center text-sm font-bold opacity-75">
+                    Verifying Administrator Access…
+                  </div>
+                ) : !fbUser || !isAdmin ? (
                   <div className="max-w-lg mx-auto px-4 py-14">
                     <div className="bx-card p-8 text-center space-y-3">
                       <Lock className="w-8 h-8 text-red-600 mx-auto" />
@@ -3835,6 +3921,7 @@ export default function App() {
                     createdAtMs: Date.now(),
                   })
                 }
+                onReportReviewer={(target) => setReportModalTarget(target)}
                 onFlash={showFlash}
               />
             )}
@@ -3934,6 +4021,30 @@ export default function App() {
         onDismissBanner={pwa.dismissBanner}
         onCloseManualGuide={() => pwa.setShowManualGuide(false)}
       />
+
+      {/* Confidential User-to-User Trust & Safety Report Modal */}
+      {reportModalTarget && (
+        <ReportUserModal
+          target={reportModalTarget}
+          currentUser={
+            fbUser
+              ? profile || {
+                  uid: fbUser.uid,
+                  displayName: fbUser.displayName,
+                }
+              : null
+          }
+          onClose={() => setReportModalTarget(null)}
+          onRequireAuth={() => {
+            setReportModalTarget(null);
+            navigateRoute({ page: 'auth', authMode: 'login' });
+          }}
+          onSubmitted={(referenceCode) => {
+            void refreshModerationStatus();
+            showFlash(`Confidential report submitted (${referenceCode}).`);
+          }}
+        />
+      )}
     </div>
   );
 }

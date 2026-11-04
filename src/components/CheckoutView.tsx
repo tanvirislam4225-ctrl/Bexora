@@ -22,7 +22,12 @@ import {
   PublicProfile,
   PublicSettings,
 } from '../types';
-import { auth, db, extractUserFacingFirestoreError } from '../lib/firebase';
+import {
+  auth,
+  db,
+  extractUserFacingFirestoreError,
+  fetchWithFreshBearerToken,
+} from '../lib/firebase';
 import {
   formatMoneyFromMinor,
   isDealUnpaidStatus,
@@ -162,14 +167,8 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
     setVerifyingSession(true);
     (async () => {
       try {
-        const headers: Record<string, string> = {};
-        if (auth.currentUser) {
-          const idToken = await auth.currentUser.getIdToken(false).catch(() => '');
-          if (idToken) headers.Authorization = `Bearer ${idToken}`;
-        }
-        const resp = await fetch(
-          `/api/payments/wordpress/verify-session?sessionId=${encodeURIComponent(wpReturnSessionId)}`,
-          { headers }
+        const resp = await fetchWithFreshBearerToken(
+          `/api/payments/wordpress/verify-session?sessionId=${encodeURIComponent(wpReturnSessionId)}`
         );
         const data = await resp.json().catch(() => null);
         if (cancelled) return;
@@ -541,18 +540,16 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
 
     setSubmitting(true);
     try {
-      const idToken = await auth.currentUser.getIdToken(false);
       const returnUrl = `${window.location.origin}${window.location.pathname}?view=checkout&${
         mode === 'accepted_bid_deal' && deal
           ? `dealId=${encodeURIComponent(deal.id)}`
           : `listingId=${encodeURIComponent(quote.listingId)}`
       }`;
 
-      const resp = await fetch('/api/payments/wordpress/create-session', {
+      const resp = await fetchWithFreshBearerToken('/api/payments/wordpress/create-session', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${idToken}`,
         },
         body: JSON.stringify({
           mode,

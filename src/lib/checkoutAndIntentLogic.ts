@@ -128,11 +128,48 @@ export function sanitizeAuthMode(raw: string | null | undefined): AuthScreenMode
   return 'login';
 }
 
+function mapCleanLegalPathnameToInfoTopic(
+  rawPathname?: string | null
+): InfoTopicId | null {
+  const cleanPath = String(rawPathname || '')
+    .split('?')[0]!
+    .split('#')[0]!
+    .trim()
+    .replace(/\/+$/, '')
+    .toLowerCase();
+  if (cleanPath === '/privacy' || cleanPath === '/privacy-policy') {
+    return 'privacy-policy';
+  }
+  if (cleanPath === '/terms' || cleanPath === '/terms-of-service') {
+    return 'terms-of-service';
+  }
+  return null;
+}
+
 /**
- * Parses URL search parameters (including direct links, `?autostart=1`, and legacy `?dest=...`
- * notification links) into a clean, full-screen `AppRouteState`.
+ * Resolves the canonical URL pathname when navigating between SPA routes so clean OAuth legal URLs
+ * (`/privacy`, `/terms`) stay clean while viewing those policies and normalize back to `/` when
+ * navigating anywhere else.
  */
-export function parseRouteFromSearch(search: string): AppRouteState {
+export function resolveCanonicalPathnameForNavigation(
+  currentPathname: string,
+  nextRoute: AppRouteState
+): string {
+  const mappedTopic = mapCleanLegalPathnameToInfoTopic(currentPathname);
+  if (!mappedTopic) {
+    return currentPathname || '/';
+  }
+  if (nextRoute.page === 'info' && nextRoute.infoTopic === mappedTopic) {
+    return currentPathname;
+  }
+  return '/';
+}
+
+/**
+ * Parses URL search parameters and clean OAuth legal paths (`/privacy`, `/terms`), `?autostart=1`,
+ * and `?dest=...` notification links into a full-screen `AppRouteState`.
+ */
+export function parseRouteFromSearch(search: string, pathname = '/'): AppRouteState {
   const cleanSearch = search.startsWith('?') ? search.slice(1) : search;
   const params = new URLSearchParams(cleanSearch);
 
@@ -181,6 +218,13 @@ export function parseRouteFromSearch(search: string): AppRouteState {
   }
 
   const view = (params.get('view') || '').trim().toLowerCase();
+  if (!view) {
+    const cleanLegalTopic = mapCleanLegalPathnameToInfoTopic(pathname);
+    if (cleanLegalTopic) {
+      return { page: 'info', infoTopic: cleanLegalTopic };
+    }
+  }
+
   switch (view) {
     case 'market': {
       const rawPlat = (params.get('platform') || '').trim().toLowerCase();

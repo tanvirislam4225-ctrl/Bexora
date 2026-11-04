@@ -46,6 +46,10 @@ test('HTTP Security Headers: emits CSP, nosniff, Referrer-Policy, Permissions-Po
   assert.equal(httpsHeaders['Strict-Transport-Security'], 'max-age=31536000; includeSubDomains');
   assert.match(httpsHeaders['Content-Security-Policy']!, /object-src 'none'/);
   assert.match(httpsHeaders['Content-Security-Policy']!, /frame-ancestors 'self'/);
+  assert.match(
+    httpsHeaders['Content-Security-Policy']!,
+    /frame-src[^;]*https:\/\/bexora\.ai\.studio[^;]*https:\/\/auth\.bexora\.com/
+  );
   assert.doesNotMatch(buildContentSecurityPolicy(false), /\sws:\s/);
 
   const httpDevHeaders = buildSecurityHeaders({ isHttps: false, isDev: true });

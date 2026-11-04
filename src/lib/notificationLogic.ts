@@ -500,3 +500,51 @@ export function matchesNotificationInboxFilter(
       );
   }
 }
+
+export type NotificationOnboardingDecision =
+  | 'show_onboarding'
+  | 'silent_auto_sync'
+  | 'denied_discreet_inbox_hint'
+  | 'ios_install_inbox_hint'
+  | 'dismissed_or_unsupported';
+
+export interface NotificationOnboardingEvaluationInput {
+  isSecureContext: boolean;
+  supportsNotificationApi: boolean;
+  supportsServiceWorker: boolean;
+  iosRequiresHomeScreenInstall: boolean;
+  permission: NotificationPermission | 'unsupported';
+  dismissedInStorage: boolean;
+}
+
+/**
+ * Pure evaluator for Automatic Notification Permission Onboarding:
+ * - Case A (`permission === 'default'` & not dismissed): `'show_onboarding'`
+ * - Case B (`permission === 'granted'`): `'silent_auto_sync'` (never show onboarding again)
+ * - Case C (`permission === 'denied'`): `'denied_discreet_inbox_hint'` (never nag on page; discreet hint in Inbox)
+ * - iOS non-standalone Safari: `'ios_install_inbox_hint'`
+ */
+export function resolveNotificationOnboardingState(
+  input: NotificationOnboardingEvaluationInput
+): NotificationOnboardingDecision {
+  if (!input.isSecureContext) {
+    return 'dismissed_or_unsupported';
+  }
+  if (input.iosRequiresHomeScreenInstall) {
+    return 'ios_install_inbox_hint';
+  }
+  if (!input.supportsNotificationApi || !input.supportsServiceWorker || input.permission === 'unsupported') {
+    return 'dismissed_or_unsupported';
+  }
+  if (input.permission === 'granted') {
+    return 'silent_auto_sync';
+  }
+  if (input.permission === 'denied') {
+    return 'denied_discreet_inbox_hint';
+  }
+  if (input.dismissedInStorage) {
+    return 'dismissed_or_unsupported';
+  }
+  return 'show_onboarding';
+}
+

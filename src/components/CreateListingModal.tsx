@@ -9,7 +9,18 @@ import {
   setDoc,
   updateDoc,
 } from 'firebase/firestore';
-import { ArrowLeft, ImagePlus, ShieldAlert, Trash2, Upload } from 'lucide-react';
+import {
+  ArrowLeft,
+  ArrowRight,
+  CheckCircle2,
+  Film,
+  ImagePlus,
+  RefreshCw,
+  ShieldAlert,
+  Star,
+  Trash2,
+  Upload,
+} from 'lucide-react';
 import {
   CurrencyCode,
   MarketplaceListing,
@@ -39,6 +50,22 @@ import {
   validatePlatformAssetUrl,
 } from '../lib/marketplaceLogic';
 import { emitUserNotification } from '../lib/notificationService';
+import {
+  extractVideoFramesBase64,
+  inspectMediaClient,
+  inspectTextClient,
+  stripDataUrlPrefix,
+} from '../lib/moderationClient';
+import {
+  LISTING_UPDATED_REVIEW_NOTICE,
+  MAX_GALLERY_LIMIT_MESSAGE,
+  MAX_LISTING_IMAGES,
+  moveGalleryImage,
+  removeGalleryImageAt,
+  replaceGalleryImageAt,
+  setGalleryCoverImage,
+  validateGalleryBatchAdd,
+} from '../lib/listingAndBidManagementLogic';
 import { PlatformIcon } from './Icons';
 
 interface CreateListingModalProps {
@@ -88,12 +115,41 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
 
   const [uploadingImg, setUploadingImg] = useState(false);
   const [uploadingEvidence, setUploadingEvidence] = useState(false);
+  const [videoClipName, setVideoClipName] = useState('');
+  const [videoFrames, setVideoFrames] = useState<Array<{ mimeType: string; base64Data: string }>>([]);
+  const [scanningVideo, setScanningVideo] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [savingDraft, setSavingDraft] = useState(false);
   const [error, setError] = useState('');
+  const [galleryNotice, setGalleryNotice] = useState('');
+  const [replaceTargetIdx, setReplaceTargetIdx] = useState<number | null>(null);
+  const [editReviewCompleted, setEditReviewCompleted] = useState(false);
 
   const listingImgInputRef = useRef<HTMLInputElement | null>(null);
+  const replaceImgInputRef = useRef<HTMLInputElement | null>(null);
   const evidenceImgInputRef = useRef<HTMLInputElement | null>(null);
+  const videoClipInputRef = useRef<HTMLInputElement | null>(null);
+
+  const handleVideoPreviewSelect = async (files: FileList | null) => {
+    const file = files?.[0];
+    if (!file) return;
+    setError('');
+    setScanningVideo(true);
+    try {
+      const frames = await extractVideoFramesBase64(file, 3);
+      if (frames.length === 0) {
+        setError('Could not sample frames from video file. Please upload a valid MP4 or WebM clip.');
+        return;
+      }
+      setVideoClipName(file.name);
+      setVideoFrames(frames);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not inspect video clip.');
+    } finally {
+      setScanningVideo(false);
+      if (videoClipInputRef.current) videoClipInputRef.current.value = '';
+    }
+  };
 
   useEffect(() => {
     if (!editingListing) return;
@@ -171,25 +227,52 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
   const handleListingImageFiles = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
     setError('');
+    setGalleryNotice('');
     setUploadingImg(true);
     try {
-      const remainingSlots = Math.max(0, 4 - listingImages.length);
-      if (remainingSlots === 0) {
-        setError('Maximum 4 showcase images can be attached to a listing.');
+      const batchCheck = validateGalleryBatchAdd(
+        listingImages.length,
+        files.length,
+        MAX_LISTING_IMAGES
+      );
+      if (batchCheck.exceededLimit && batchCheck.notice) {
+        setGalleryNotice(batchCheck.notice);
+      }
+      if (batchCheck.allowedCount === 0) {
+        setError(MAX_GALLERY_LIMIT_MESSAGE);
         return;
       }
-      const selected = Array.from(files).slice(0, remainingSlots);
+      const selected = Array.from(files).slice(0, batchCheck.allowedCount);
       const processed: string[] = [];
       for (const f of selected) {
-        const compressed = await validateAndProcessImageFile(f, 960, 0.75);
+        const compressed = await validateAndProcessImageFile(f, 900, 0.66, 92_000);
         processed.push(compressed);
       }
-      setListingImages((prev) => [...prev, ...processed]);
+      setListingImages((prev) => [...prev, ...processed].slice(0, MAX_LISTING_IMAGES));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to process listing image.');
     } finally {
       setUploadingImg(false);
       if (listingImgInputRef.current) listingImgInputRef.current.value = '';
+    }
+  };
+
+  const handleReplaceListingImageFile = async (files: FileList | null) => {
+    const file = files?.[0];
+    const targetIdx = replaceTargetIdx;
+    setReplaceTargetIdx(null);
+    if (!file || targetIdx === null) return;
+    setError('');
+    setGalleryNotice('');
+    setUploadingImg(true);
+    try {
+      const compressed = await validateAndProcessImageFile(file, 900, 0.66, 92_000);
+      setListingImages((prev) => replaceGalleryImageAt(prev, targetIdx, compressed));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to replace listing image.');
+    } finally {
+      setUploadingImg(false);
+      if (replaceImgInputRef.current) replaceImgInputRef.current.value = '';
     }
   };
 
@@ -316,6 +399,23 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
         return;
       }
 
+      if (title.trim() || description.trim()) {
+        const draftMod = await inspectTextClient({
+          surface: 'listing_text',
+          callerName: profile.displayName,
+          text: title.trim() || normalized.title,
+          secondaryText: description.trim() || normalized.description,
+          listingId: editingListing?.id,
+        });
+        if (!draftMod.allowed) {
+          setError(
+            draftMod.userNoticeMessage ||
+              'Draft contains prohibited language or off-platform contact details.'
+          );
+          return;
+        }
+      }
+
       const urlRes = validatePlatformAssetUrl(platform, accountUrl);
       const finalMonStatus: MonetizationStatus = !supportsMonetizationHere
         ? 'not_applicable'
@@ -434,6 +534,65 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
     setSubmitting(true);
     setError('');
     try {
+      const modText = await inspectTextClient({
+        surface: 'listing_text',
+        callerName: profile.displayName,
+        text: title.trim(),
+        secondaryText: description.trim(),
+        listingId: editingListing?.id,
+      });
+      if (!modText.allowed) {
+        setError(
+          `${modText.userNoticeTitle ? `${modText.userNoticeTitle}: ` : ''}${
+            modText.userNoticeMessage || 'Listing text was blocked by BEXORA Trust & Safety.'
+          }`
+        );
+        return;
+      }
+
+      const mediaItems = [
+        ...listingImages
+          .map((imgSrc, idx) => {
+            const parsed = stripDataUrlPrefix(imgSrc);
+            if (!parsed) return null;
+            return {
+              id: `showcase_${idx}`,
+              kind: 'image' as const,
+              mimeType: parsed.mimeType,
+              base64Data: parsed.base64Data,
+              fileName: `showcase_${idx + 1}.jpg`,
+            };
+          })
+          .filter((v): v is NonNullable<typeof v> => v !== null),
+        ...videoFrames.map((vf, idx) => ({
+          id: `video_frame_${idx}`,
+          kind: 'video_frame' as const,
+          mimeType: vf.mimeType,
+          base64Data: vf.base64Data,
+          fileName: `${videoClipName || 'clip'}_frame_${idx + 1}.jpg`,
+        })),
+      ];
+
+      if (mediaItems.length > 0) {
+        const modMedia = await inspectMediaClient({
+          surface: 'listing_media',
+          callerName: profile.displayName,
+          items: mediaItems,
+          listingId: editingListing?.id,
+        });
+        if (
+          !modMedia.allowed ||
+          modMedia.mediaScanStatus === 'blocked' ||
+          modMedia.mediaScanStatus === 'quarantined'
+        ) {
+          setError(
+            modMedia.userNoticeMessage ||
+              'Attached showcase media was blocked by BEXORA Trust & Safety.'
+          );
+          return;
+        }
+      }
+
       const ageRes = validateAccountAge(ageYears, ageMonths, true);
       const urlRes = validatePlatformAssetUrl(platform, accountUrl);
       const priceMinor = Math.round(Number(price) * 100);
@@ -481,14 +640,103 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
 
       let targetListingId = editingListing?.id || '';
       if (editingListing?.id) {
-        try {
-          await updateDoc(doc(db, 'listings', editingListing.id), {
-            ...mutableFields,
-            verifiedOptions: [],
-            rejectionReason: deleteField(),
-          });
-        } catch (e) {
-          handleFirestoreError(e, OperationType.UPDATE, `listings/${editingListing.id}`);
+        let updatedViaServer = false;
+        const idToken = auth.currentUser ? await auth.currentUser.getIdToken().catch(() => '') : '';
+        if (idToken) {
+          try {
+            const editResp = await fetch(
+              `/api/listings/${encodeURIComponent(editingListing.id)}/edit`,
+              {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  Accept: 'application/json',
+                  Authorization: `Bearer ${idToken}`,
+                },
+                body: JSON.stringify({
+                  subcategory,
+                  title: title.trim(),
+                  description: description.trim(),
+                  priceMinor,
+                  currency,
+                  monetizationStatus: finalMonStatus,
+                  claimedOptions: finalClaimed,
+                  ageYears: ageRes.years,
+                  ageMonths: ageRes.months,
+                  metricValue:
+                    platform === 'gaming'
+                      ? Math.round(Number(gameLevel) || 1)
+                      : Math.round(Number(metricValue) || 0),
+                  monthlyRevenueMinor: revMinor,
+                  accountUrl: platform === 'gaming' ? '' : urlRes.normalizedUrl,
+                  urlValidationStatus: platform === 'gaming' ? 'not_applicable' : urlRes.status,
+                  images: listingImages.slice(0, MAX_LISTING_IMAGES),
+                  ...(platform === 'gaming'
+                    ? {
+                        gameName,
+                        gameUid: gameUid.trim(),
+                        gameLevel: Math.round(Number(gameLevel) || 1),
+                      }
+                    : {}),
+                }),
+              }
+            );
+            const ct = editResp.headers.get('content-type') || '';
+            if (ct.includes('application/json')) {
+              const editJson = (await editResp.json()) as { ok?: boolean; error?: string };
+              if (editResp.ok && editJson.ok) {
+                updatedViaServer = true;
+              } else if (editResp.status === 403 || editResp.status === 409 || editResp.status === 400) {
+                throw new Error(editJson.error || 'Could not update listing.');
+              }
+            }
+          } catch (srvErr) {
+            if (
+              srvErr instanceof Error &&
+              (srvErr.message.includes('active transaction') ||
+                srvErr.message.includes('Only the verified') ||
+                srvErr.message.includes('Maximum 10'))
+            ) {
+              throw srvErr;
+            }
+          }
+        }
+
+        if (!updatedViaServer) {
+          try {
+            const changedFields: string[] = [];
+            if (editingListing.title !== title.trim()) changedFields.push('title');
+            if (editingListing.description !== description.trim()) changedFields.push('description');
+            if (editingListing.priceMinor !== priceMinor) changedFields.push('priceMinor');
+            if (editingListing.subcategory !== subcategory) changedFields.push('subcategory');
+            if (JSON.stringify(editingListing.images || []) !== JSON.stringify(listingImages)) {
+              changedFields.push('images');
+            }
+            if (changedFields.length === 0) changedFields.push('resubmitted');
+
+            await addDoc(collection(db, 'listings', editingListing.id, 'revisions'), {
+              listingId: editingListing.id,
+              sellerId: userUid,
+              previousStatus: editingListing.status,
+              newStatus: 'pending',
+              previousTitle: editingListing.title,
+              newTitle: title.trim(),
+              previousPriceMinor: editingListing.priceMinor,
+              newPriceMinor: priceMinor,
+              changedFields,
+              createdAtMs: Date.now(),
+              createdAt: serverTimestamp(),
+            }).catch(() => {});
+
+            await updateDoc(doc(db, 'listings', editingListing.id), {
+              ...mutableFields,
+              currency,
+              verifiedOptions: [],
+              rejectionReason: deleteField(),
+            });
+          } catch (e) {
+            handleFirestoreError(e, OperationType.UPDATE, `listings/${editingListing.id}`);
+          }
         }
       } else {
         try {
@@ -580,11 +828,12 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
         });
       }
 
-      onCreated(
-        editingListing
-          ? 'Listing updated and resubmitted for administrator moderation.'
-          : 'Listing submitted for administrator moderation.'
-      );
+      if (editingListing) {
+        setEditReviewCompleted(true);
+        return;
+      }
+
+      onCreated('Listing submitted for administrator moderation.');
       onClose();
     } catch (err) {
       setError(extractUserFacingFirestoreError(err, 'Failed to submit listing.'));
@@ -592,6 +841,41 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
       setSubmitting(false);
     }
   };
+
+  if (editReviewCompleted) {
+    return (
+      <section className="bx-wrap py-10" aria-label="Listing updated pending review">
+        <div className="bx-card max-w-xl mx-auto p-6 sm:p-8 text-center space-y-5">
+          <div
+            className="w-14 h-14 rounded-2xl mx-auto grid place-items-center"
+            style={{ background: 'var(--yellow-soft)', color: 'var(--orange)' }}
+          >
+            <CheckCircle2 className="w-7 h-7" />
+          </div>
+          <div className="space-y-2">
+            <h1 className="text-xl sm:text-2xl font-black tracking-tight">
+              {LISTING_UPDATED_REVIEW_NOTICE.title}
+            </h1>
+            <p className="text-sm leading-relaxed font-semibold" style={{ color: 'var(--text-2)' }}>
+              {LISTING_UPDATED_REVIEW_NOTICE.message}
+            </p>
+          </div>
+          <div className="flex flex-wrap justify-center gap-3 pt-2">
+            <button
+              type="button"
+              onClick={() => {
+                onCreated(LISTING_UPDATED_REVIEW_NOTICE.title);
+                onClose();
+              }}
+              className="bx-btn bx-btn-primary px-6 py-2.5 text-sm font-extrabold"
+            >
+              Return to My Listings
+            </button>
+          </div>
+        </div>
+      </section>
+    );
+  }
 
   const allSelected =
     enabledMonetizationOptions.length > 0 &&
@@ -620,9 +904,9 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
           <div>
             <h1 className="text-xl sm:text-2xl font-black">
               {editingListing
-                ? editingListing.status === 'rejected'
-                  ? 'Edit & Resubmit Listing'
-                  : 'Resume Asset Draft'
+                ? editingListing.status === 'draft'
+                  ? 'Resume Asset Draft'
+                  : 'Edit & Resubmit Listing'
                 : 'Sell a Digital Asset'}
             </h1>
             <p className="bx-hint mt-0.5">
@@ -1031,11 +1315,11 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
               </p>
             </div>
 
-            {/* Product Listing Showcase Image Upload (Restored & Fully Functional) */}
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <span className="bx-label !mb-0">
-                  Product / Asset Showcase Images ({listingImages.length}/4)
+            {/* Product Listing Showcase Image Gallery (Up to 10 Images with Cover, Reorder, Replace & Remove) */}
+            <div className="space-y-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="bx-label !mb-0 tabular-nums">
+                  Product / Asset Showcase Gallery ({listingImages.length}/{MAX_LISTING_IMAGES})
                 </span>
                 <input
                   ref={listingImgInputRef}
@@ -1045,19 +1329,46 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
                   onChange={(e) => handleListingImageFiles(e.target.files)}
                   className="hidden"
                 />
+                <input
+                  ref={replaceImgInputRef}
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp"
+                  onChange={(e) => handleReplaceListingImageFile(e.target.files)}
+                  className="hidden"
+                />
                 <button
                   type="button"
-                  disabled={uploadingImg || listingImages.length >= 4}
+                  disabled={uploadingImg || listingImages.length >= MAX_LISTING_IMAGES}
                   onClick={() => listingImgInputRef.current?.click()}
                   className="bx-btn bx-btn-sm"
                 >
                   <ImagePlus className="w-4 h-4" />
-                  <span>{uploadingImg ? 'Processing…' : 'Upload Images'}</span>
+                  <span>
+                    {uploadingImg
+                      ? 'Processing…'
+                      : listingImages.length >= MAX_LISTING_IMAGES
+                      ? '10/10 Attached'
+                      : 'Add Images'}
+                  </span>
                 </button>
               </div>
               <p className="bx-hint">
-                JPEG, PNG, or WebP up to 5 MB each. Publicly visible on your listing card and gallery.
+                Upload up to 10 screenshots (JPEG, PNG, or WebP). Image #1 is your public Cover photo; reorder, set cover, replace, or remove anytime.
               </p>
+
+              {(galleryNotice || listingImages.length >= MAX_LISTING_IMAGES) && (
+                <div
+                  role="status"
+                  className="rounded-xl border px-3 py-2 text-xs font-extrabold"
+                  style={{
+                    background: 'var(--yellow-soft)',
+                    borderColor: 'var(--orange)',
+                    color: '#6E5600',
+                  }}
+                >
+                  {galleryNotice || MAX_GALLERY_LIMIT_MESSAGE}
+                </div>
+              )}
 
               {listingImages.length === 0 ? (
                 <button
@@ -1073,26 +1384,157 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
                 >
                   <Upload className="w-6 h-6" style={{ color: 'var(--orange)' }} />
                   <span className="text-xs font-bold">
-                    Click or drag & drop asset screenshots here
+                    Click or drag &amp; drop up to 10 asset screenshots here
                   </span>
                 </button>
               ) : (
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2.5">
                   {listingImages.map((src, idx) => (
-                    <div key={idx} className="relative aspect-[16/10] rounded-xl overflow-hidden border" style={{ borderColor: 'var(--border-soft)' }}>
-                      <img src={src} alt={`Listing preview ${idx + 1}`} className="w-full h-full object-cover" />
-                      <button
-                        type="button"
-                        onClick={() => setListingImages((prev) => prev.filter((_, i) => i !== idx))}
-                        className="absolute top-1.5 right-1.5 w-7 h-7 rounded-lg bg-black/75 text-white grid place-items-center"
-                        aria-label={`Remove image ${idx + 1}`}
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
+                    <div
+                      key={idx}
+                      className="rounded-xl overflow-hidden border flex flex-col"
+                      style={{
+                        borderColor: idx === 0 ? 'var(--orange)' : 'var(--border-soft)',
+                        background: 'var(--surface-2)',
+                      }}
+                    >
+                      <div className="relative aspect-[4/3] w-full overflow-hidden bg-black/10">
+                        <img
+                          src={src}
+                          alt={`Listing gallery image ${idx + 1}`}
+                          className="w-full h-full object-cover"
+                        />
+                        <span
+                          className="absolute top-1.5 left-1.5 rounded-md px-1.5 py-0.5 text-[10px] font-extrabold text-white"
+                          style={{
+                            background: idx === 0 ? 'var(--orange)' : 'rgba(15, 15, 20, 0.78)',
+                          }}
+                        >
+                          {idx === 0 ? 'Cover (1)' : `#${idx + 1}`}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setGalleryNotice('');
+                            setListingImages((prev) => removeGalleryImageAt(prev, idx));
+                          }}
+                          className="absolute top-1.5 right-1.5 w-6 h-6 rounded-md bg-black/75 text-white grid place-items-center hover:bg-red-600 transition-colors"
+                          aria-label={`Remove image ${idx + 1}`}
+                          title="Remove image"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </button>
+                      </div>
+
+                      <div className="p-1.5 flex items-center justify-between gap-1 text-[10px] font-bold">
+                        <div className="inline-flex items-center gap-1">
+                          <button
+                            type="button"
+                            disabled={idx === 0}
+                            onClick={() =>
+                              setListingImages((prev) => moveGalleryImage(prev, idx, idx - 1))
+                            }
+                            aria-label={`Move image ${idx + 1} left`}
+                            title="Move left"
+                            className="p-1 rounded border disabled:opacity-35"
+                            style={{ borderColor: 'var(--border-soft)' }}
+                          >
+                            <ArrowLeft className="w-3 h-3" />
+                          </button>
+                          <button
+                            type="button"
+                            disabled={idx === listingImages.length - 1}
+                            onClick={() =>
+                              setListingImages((prev) => moveGalleryImage(prev, idx, idx + 1))
+                            }
+                            aria-label={`Move image ${idx + 1} right`}
+                            title="Move right"
+                            className="p-1 rounded border disabled:opacity-35"
+                            style={{ borderColor: 'var(--border-soft)' }}
+                          >
+                            <ArrowRight className="w-3 h-3" />
+                          </button>
+                        </div>
+
+                        <div className="inline-flex items-center gap-1">
+                          {idx > 0 && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setListingImages((prev) => setGalleryCoverImage(prev, idx))
+                              }
+                              aria-label={`Set image ${idx + 1} as cover`}
+                              title="Set as Cover"
+                              className="px-1.5 py-0.5 rounded border inline-flex items-center gap-0.5"
+                              style={{ borderColor: 'var(--orange)', color: 'var(--orange)' }}
+                            >
+                              <Star className="w-2.5 h-2.5" />
+                              <span>Cover</span>
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setReplaceTargetIdx(idx);
+                              replaceImgInputRef.current?.click();
+                            }}
+                            aria-label={`Replace image ${idx + 1}`}
+                            title="Replace image"
+                            className="p-1 rounded border"
+                            style={{ borderColor: 'var(--border-soft)' }}
+                          >
+                            <RefreshCw className="w-3 h-3" />
+                          </button>
+                        </div>
+                      </div>
                     </div>
                   ))}
                 </div>
               )}
+
+              {/* Optional Video Walkthrough Safety Verification */}
+              <div className="pt-2 border-t flex flex-wrap items-center justify-between gap-2" style={{ borderColor: 'var(--border-soft)' }}>
+                <div className="min-w-0">
+                  <span className="text-xs font-extrabold flex items-center gap-1.5">
+                    <Film className="w-3.5 h-3.5 text-[#FF6500]" />
+                    <span>Optional Video Walkthrough Frame Scan</span>
+                  </span>
+                  <p className="bx-hint">
+                    {videoClipName
+                      ? `Verified ${videoFrames.length} sampled frames from ${videoClipName}`
+                      : 'Attach an optional MP4/WebM walkthrough clip to verify frames with AI Trust & Safety.'}
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <input
+                    ref={videoClipInputRef}
+                    type="file"
+                    accept="video/mp4,video/webm"
+                    onChange={(e) => handleVideoPreviewSelect(e.target.files)}
+                    className="hidden"
+                  />
+                  {videoClipName && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setVideoClipName('');
+                        setVideoFrames([]);
+                      }}
+                      className="bx-btn bx-btn-sm bx-btn-ghost"
+                    >
+                      Clear Clip
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    disabled={scanningVideo}
+                    onClick={() => videoClipInputRef.current?.click()}
+                    className="bx-btn bx-btn-sm bx-btn-ghost whitespace-nowrap"
+                  >
+                    {scanningVideo ? 'Sampling Frames…' : videoClipName ? 'Replace Clip' : 'Scan Video Clip'}
+                  </button>
+                </div>
+              </div>
             </div>
 
             {/* Private Monetization Verification Evidence Upload */}

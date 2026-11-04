@@ -124,6 +124,9 @@ export default defineConfig(() => {
           ],
         },
         workbox: {
+          cleanupOutdatedCaches: true,
+          skipWaiting: true,
+          clientsClaim: true,
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2,wav}'],
           globIgnores: [
             '**/firebase-messaging-sw.js',
@@ -132,6 +135,7 @@ export default defineConfig(() => {
           ],
           navigateFallbackDenylist: [
             /^\/api\//,
+            /^\/__\//,
             /^\/firebase-messaging-sw\.js$/,
             /^\/vendor\/firebase\/.*\.js$/,
             /^\/sounds\/.*\.wav$/,
@@ -174,6 +178,7 @@ export default defineConfig(() => {
       sourcemap: false,
     },
     server: {
+      allowedHosts: ['.run.app', '.ai.studio', 'bexora.com', '.bexora.com', 'localhost', '127.0.0.1'],
       ws: hmrDisabled ? (false as const) : undefined,
       hmr: hmrDisabled ? (false as const) : { overlay: false },
       watch: hmrDisabled ? null : {},

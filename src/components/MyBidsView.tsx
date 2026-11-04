@@ -21,12 +21,10 @@ import {
   filterClassifiedBids,
   MyBidsFilterTab,
 } from '../lib/engagementLogic';
-import {
-  fetchSpecificListingsByIds,
-  withdrawPendingBidInFirestore,
-} from '../lib/engagementService';
+import { fetchSpecificListingsByIds } from '../lib/engagementService';
 import { formatMoneyFromMinor, PLATFORM_CATALOG } from '../lib/marketplaceLogic';
 import { formatNotificationExactDateTime } from '../lib/notificationLogic';
+import { BidActionConfirmModal } from './BidActionConfirmModal';
 import { PLATFORM_BANNER_BG, PlatformIcon } from './Icons';
 
 interface MyBidsViewProps {
@@ -66,8 +64,10 @@ export const MyBidsView: React.FC<MyBidsViewProps> = ({
   );
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState<MyBidsFilterTab>('all');
-  const [confirmWithdrawId, setConfirmWithdrawId] = useState<string | null>(null);
-  const [withdrawingId, setWithdrawingId] = useState<string | null>(null);
+  const [withdrawModalTarget, setWithdrawModalTarget] = useState<{
+    bid: BidRecord;
+    title: string;
+  } | null>(null);
   const [visibleLimit, setVisibleLimit] = useState(20);
   const [failedImages, setFailedImages] = useState<Record<string, boolean>>({});
 
@@ -234,22 +234,20 @@ export const MyBidsView: React.FC<MyBidsViewProps> = ({
     );
   }
 
-  const handleConfirmWithdraw = async (bid: BidRecord, title: string) => {
-    if (!userUid) return;
-    setWithdrawingId(bid.id);
-    try {
-      await withdrawPendingBidInFirestore(userUid, bid, title);
-      setConfirmWithdrawId(null);
-      onFlash('Pending bid withdrawn and recorded in your bid history.');
-    } catch (err) {
-      onFlash(extractUserFacingFirestoreError(err, 'Could not withdraw bid.'));
-    } finally {
-      setWithdrawingId(null);
-    }
-  };
-
   return (
     <section className="bx-wrap py-8 space-y-6" aria-label="My Bids">
+      <BidActionConfirmModal
+        mode="withdraw"
+        bid={withdrawModalTarget?.bid || null}
+        listingTitle={withdrawModalTarget?.title || 'Marketplace Asset'}
+        displayCurrency={displayCurrency}
+        usdToBdtRate={usdToBdtRate}
+        onClose={() => setWithdrawModalTarget(null)}
+        onCompleted={(_bidId, _nextStatus, bannerMessage) => {
+          setWithdrawModalTarget(null);
+          onFlash(bannerMessage);
+        }}
+      />
       {/* Header */}
       <div
         className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 pb-5 border-b"
@@ -490,39 +488,16 @@ export const MyBidsView: React.FC<MyBidsViewProps> = ({
                     )}
 
                     {entry.canWithdraw && (
-                      <>
-                        {confirmWithdrawId === bid.id ? (
-                          <div className="inline-flex items-center gap-1.5">
-                            <button
-                              type="button"
-                              disabled={withdrawingId === bid.id}
-                              onClick={() => handleConfirmWithdraw(bid, entry.assetTitle)}
-                              className="bx-btn bx-btn-danger bx-btn-sm whitespace-nowrap shrink-0"
-                            >
-                              <span>
-                                {withdrawingId === bid.id ? 'Withdrawing…' : 'Confirm Withdraw'}
-                              </span>
-                            </button>
-                            <button
-                              type="button"
-                              disabled={withdrawingId === bid.id}
-                              onClick={() => setConfirmWithdrawId(null)}
-                              className="bx-btn bx-btn-sm whitespace-nowrap shrink-0"
-                            >
-                              <span>Keep Bid</span>
-                            </button>
-                          </div>
-                        ) : (
-                          <button
-                            type="button"
-                            onClick={() => setConfirmWithdrawId(bid.id)}
-                            className="bx-btn bx-btn-sm whitespace-nowrap shrink-0"
-                          >
-                            <RotateCcw className="w-3.5 h-3.5" />
-                            <span>Withdraw Bid</span>
-                          </button>
-                        )}
-                      </>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setWithdrawModalTarget({ bid, title: entry.assetTitle })
+                        }
+                        className="bx-btn bx-btn-danger bx-btn-sm whitespace-nowrap shrink-0"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" />
+                        <span>Withdraw Bid</span>
+                      </button>
                     )}
                   </div>
                 </div>

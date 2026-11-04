@@ -7,8 +7,16 @@ export interface SecurityHeadersOptions {
 }
 
 export function buildContentSecurityPolicy(isDev: boolean): string {
+  const bexoraAuthRelayOrigins = [
+    'https://bexora.ai.studio',
+    'https://bexora-448578956301.asia-southeast1.run.app',
+    'https://auth.bexora.com',
+    'https://bexora.com',
+    'https://www.bexora.com',
+  ];
   const connectSources = [
     "'self'",
+    ...bexoraAuthRelayOrigins,
     'https://*.googleapis.com',
     'https://*.firebaseio.com',
     'https://*.firebaseapp.com',
@@ -21,6 +29,16 @@ export function buildContentSecurityPolicy(isDev: boolean): string {
     connectSources.push('ws:', 'wss:');
   }
 
+  const frameSources = [
+    "'self'",
+    ...bexoraAuthRelayOrigins,
+    'https://*.firebaseapp.com',
+    'https://accounts.google.com',
+    'https://apis.google.com',
+    'https://www.google.com',
+    'https://recaptcha.google.com',
+  ];
+
   return [
     "default-src 'self'",
     "script-src 'self' 'unsafe-inline' https://apis.google.com https://accounts.google.com https://www.gstatic.com https://www.google.com",
@@ -29,7 +47,7 @@ export function buildContentSecurityPolicy(isDev: boolean): string {
     "img-src 'self' data: blob: https:",
     "media-src 'self' data: blob:",
     `connect-src ${connectSources.join(' ')}`,
-    "frame-src 'self' https://*.firebaseapp.com https://accounts.google.com https://apis.google.com https://www.google.com https://recaptcha.google.com",
+    `frame-src ${frameSources.join(' ')}`,
     "worker-src 'self' blob:",
     "manifest-src 'self'",
     "object-src 'none'",

@@ -67,7 +67,7 @@ export const FloatingSupportWidget: React.FC<FloatingSupportWidgetProps> = ({ se
                     <MessageCircle className="w-4 h-4 text-emerald-600" />
                     WhatsApp Support
                   </span>
-                  <span className="opacity-70">{settings.supportWhatsapp}</span>
+                  <span className="opacity-70 text-[11px] -ml-[4px] leading-[17px]">{settings.supportWhatsapp}</span>
                 </a>
               )}
 

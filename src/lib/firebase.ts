@@ -3,6 +3,7 @@ import {
   browserLocalPersistence,
   browserPopupRedirectResolver,
   getAuth,
+  getRedirectResult,
   GoogleAuthProvider,
   initializeAuth,
   PopupRedirectResolver,
@@ -10,6 +11,7 @@ import {
   sendEmailVerification,
   sendPasswordResetEmail,
   signInWithPopup,
+  signInWithRedirect,
   signOut,
   User,
 } from 'firebase/auth';
@@ -25,11 +27,9 @@ import {
 import { getStorage } from 'firebase/storage';
 import firebaseConfig from '../../firebase-applet-config.json';
 import {
-  buildStagedRecoverableSession,
   classifyEmailPasswordProbe,
   classifyGoogleProviderProbe,
   extractTokenServiceActivationUrl,
-  inspectStoredFirebaseAuthToken,
   isTokenServiceDisabledMessage,
   parseStagedRecoverableSession,
   sanitizeCustomerAuthMessage,
@@ -37,6 +37,11 @@ import {
   StagedRecoverableAuthSession,
   validateImageMagicBytes,
 } from './marketplaceLogic';
+import {
+  classifySessionErrorDisposition,
+  resolveEffectiveFirebaseAuthDomain,
+  shouldKeepProactiveTokenRefreshEnabled,
+} from './authDomainAndPersistenceLogic';
 import { buildNotificationId, classifyTokenServiceProbe } from './notificationLogic';
 import type { AuthProviderStatus, TokenServiceStatus } from '../types';
 
@@ -76,60 +81,60 @@ function writeStagedRecoverableSession(session: StagedRecoverableAuthSession | n
 }
 
 /**
- * Synchronously inspects `window.localStorage` (`browserLocalPersistence`) BEFORE `initializeAuth`
- * and `getFirestore` initialize. When `securetoken.googleapis.com` is not verified enabled and a cached
- * 60-minute JWT expired while the user was away, this stages recoverable identity metadata into
- * `bx_recoverable_session_v1` and removes only the expired JWT so Firestore starts online immediately
- * while `prepareFirestoreAuthSession()` silently mints a fresh Firebase Auth ID token in the background.
+ * Preserves persisted `firebase:authUser:<apiKey>:[DEFAULT]` (`browserLocalPersistence`) across reloads,
+ * browser restarts, and multi-hour/multi-day inactivity so Firebase Auth automatically exchanges its
+ * long-lived `refreshToken` for a fresh ID token without ever logging the user out.
+ * Cleans up any legacy `bx_recoverable_session_v1` banner metadata when a persisted user record is present.
  */
-function stageExpiredLocalAuthBeforeInit(): void {
+function initializePersistentAuthStorageCleanly(): void {
   if (typeof window === 'undefined' || !window.localStorage) return;
   try {
-    const tokenServiceVerified =
-      window.localStorage.getItem(TOKEN_SERVICE_VERIFIED_STORAGE_KEY) === '1';
-    const lastLogoutRaw = Number(window.localStorage.getItem(INTENTIONAL_LOGOUT_TS_KEY) || 0);
-    const lastIntentionalLogoutAtMs = Number.isFinite(lastLogoutRaw) ? lastLogoutRaw : 0;
-
     const keyPrefix = `firebase:authUser:${String(firebaseConfig.apiKey || '')}:`;
-    const keysToInspect: string[] = [];
+    let hasPersistedUser = false;
     for (let i = 0; i < window.localStorage.length; i++) {
       const k = window.localStorage.key(i);
       if (k && k.startsWith(keyPrefix)) {
-        keysToInspect.push(k);
-      }
-    }
-    const now = Date.now();
-    for (const key of keysToInspect) {
-      const raw = window.localStorage.getItem(key);
-      const inspection = inspectStoredFirebaseAuthToken(raw, now, tokenServiceVerified, 60_000);
-      if (inspection.shouldPurgeBeforeBoot) {
-        window.localStorage.removeItem(key);
-        const staged = buildStagedRecoverableSession(inspection, now, lastIntentionalLogoutAtMs);
-        if (staged) {
-          writeStagedRecoverableSession(staged);
-          lastExpiredSessionProvider = staged.providerId;
-          lastExpiredSessionEmail = staged.email;
+        const raw = window.localStorage.getItem(k);
+        if (raw && raw.includes('"uid"')) {
+          hasPersistedUser = true;
+          break;
         }
-      } else if (inspection.hasSession) {
-        // Active valid token present — clear any stale staged record
-        writeStagedRecoverableSession(null);
       }
     }
-
-    // Also hydrate memory pointers if a valid staged session already exists from an earlier tab
-    const existingStaged = readStagedRecoverableSession();
-    if (existingStaged) {
-      lastExpiredSessionProvider = existingStaged.providerId || lastExpiredSessionProvider;
-      lastExpiredSessionEmail = existingStaged.email || lastExpiredSessionEmail;
+    if (hasPersistedUser) {
+      writeStagedRecoverableSession(null);
+    } else {
+      const existingStaged = readStagedRecoverableSession();
+      if (existingStaged) {
+        lastExpiredSessionProvider = existingStaged.providerId || lastExpiredSessionProvider;
+        lastExpiredSessionEmail = existingStaged.email || lastExpiredSessionEmail;
+      }
     }
   } catch {
     // Non-fatal if storage access is restricted
   }
 }
 
-stageExpiredLocalAuthBeforeInit();
+initializePersistentAuthStorageCleanly();
 
-export const app = initializeApp(firebaseConfig);
+const envCustomAuthDomain =
+  typeof import.meta !== 'undefined' &&
+  typeof (import.meta as unknown as { env?: Record<string, string> }).env === 'object'
+    ? (import.meta as unknown as { env?: Record<string, string> }).env
+        ?.VITE_FIREBASE_CUSTOM_AUTH_DOMAIN
+    : undefined;
+
+export const EFFECTIVE_FIREBASE_AUTH_DOMAIN = resolveEffectiveFirebaseAuthDomain({
+  configuredAuthDomain: String(firebaseConfig.authDomain || ''),
+  windowHostname: typeof window !== 'undefined' ? window.location?.hostname : null,
+  windowProtocol: typeof window !== 'undefined' ? window.location?.protocol : null,
+  envCustomAuthDomain,
+});
+
+export const app = initializeApp({
+  ...firebaseConfig,
+  authDomain: EFFECTIVE_FIREBASE_AUTH_DOMAIN,
+});
 export default app;
 export const auth =
   typeof window !== 'undefined'
@@ -141,6 +146,57 @@ export const auth =
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 export const storage = getStorage(app);
 export const googleProvider = new GoogleAuthProvider();
+export { signInWithRedirect };
+
+/**
+ * Dynamically promotes `auth.config.authDomain` to the highest-priority live-verified BEXORA brand domain
+ * (`auth.bexora.com` -> `bexora.com` -> `bexora.ai.studio`) when the backend confirms its `/__/auth/iframe`
+ * relay allows cross-origin framing and the current HTTPS origin is authorized.
+ */
+export function applyPreferredFirebaseAuthDomain(preferredDomain?: string | null): string {
+  const resolved = resolveEffectiveFirebaseAuthDomain({
+    configuredAuthDomain: EFFECTIVE_FIREBASE_AUTH_DOMAIN,
+    windowHostname: typeof window !== 'undefined' ? window.location?.hostname : null,
+    windowProtocol: typeof window !== 'undefined' ? window.location?.protocol : null,
+    envCustomAuthDomain,
+    verifiedBrandAuthDomain: preferredDomain || null,
+  });
+  if (resolved && typeof auth === 'object' && auth && 'config' in auth) {
+    const cfg = (auth as unknown as { config?: { authDomain?: string } }).config;
+    if (cfg && cfg.authDomain !== resolved) {
+      cfg.authDomain = resolved;
+    }
+  }
+  return resolved;
+}
+
+/**
+ * Executes Google Sign-In via the verified BEXORA authentication domain (`auth.bexora.com`, `bexora.com`,
+ * or `bexora.ai.studio`). If a cross-origin brand relay has not yet been redeployed with updated headers
+ * and triggers `auth/network-request-failed`, transparently falls back to same-origin `EFFECTIVE_FIREBASE_AUTH_DOMAIN`
+ * so Google Sign-In succeeds immediately without ever exposing `responsive-dragon-tmn89.firebaseapp.com`.
+ */
+export async function signInWithGoogleResilient(customProvider?: GoogleAuthProvider) {
+  const providerToUse = customProvider || googleProvider;
+  try {
+    return await signInWithPopup(auth, providerToUse);
+  } catch (err) {
+    const code =
+      err && typeof err === 'object' && 'code' in err
+        ? String((err as { code?: unknown }).code || '')
+        : '';
+    const cfg = (auth as unknown as { config?: { authDomain?: string } }).config;
+    if (
+      code === 'auth/network-request-failed' &&
+      cfg?.authDomain &&
+      cfg.authDomain !== EFFECTIVE_FIREBASE_AUTH_DOMAIN
+    ) {
+      cfg.authDomain = EFFECTIVE_FIREBASE_AUTH_DOMAIN;
+      return signInWithPopup(auth, providerToUse);
+    }
+    throw err;
+  }
+}
 
 export const BOOTSTRAPPED_SUPERADMIN_EMAIL = 'tanvirislam7574@gmail.com';
 export const DEFAULT_TOKEN_SERVICE_ACTIVATION_URL = extractTokenServiceActivationUrl(
@@ -340,20 +396,26 @@ export function dismissRecoverableSessionPrompt(): void {
 }
 
 /**
- * Prevents `@firebase/auth`'s internal 5-minute `ProactiveRefresh` timer from firing a doomed
- * `getIdToken(true)` request against `securetoken.googleapis.com` when the API is disabled,
- * and restores native `ProactiveRefresh` immediately whenever `securetoken.googleapis.com` is enabled.
+ * Keeps `@firebase/auth`'s native 5-minute `ProactiveRefresh` active by default across all sessions,
+ * stopping it ONLY if Google Cloud Token Service (`securetoken.googleapis.com`) is conclusively confirmed `'disabled'`.
+ * Never disables `ProactiveRefresh` during startup, offline wake, or `'unable_to_verify'` capability probes.
  */
 export function syncProactiveRefreshWithCapabilities(
   user: User | null,
-  tokenServiceEnabled: boolean
+  tokenServiceEnabledOrStatus?: boolean | TokenServiceStatus | null
 ): void {
   if (!user) return;
   const internalUser = user as unknown as {
     _stopProactiveRefresh?: () => void;
     _startProactiveRefresh?: () => void;
   };
-  if (tokenServiceEnabled) {
+  let keepEnabled = true;
+  if (typeof tokenServiceEnabledOrStatus === 'string') {
+    keepEnabled = shouldKeepProactiveTokenRefreshEnabled(tokenServiceEnabledOrStatus);
+  } else if (tokenServiceEnabledOrStatus === false) {
+    keepEnabled = cachedAuthCapabilities?.tokenServiceStatus !== 'disabled';
+  }
+  if (keepEnabled) {
     internalUser._startProactiveRefresh?.();
   } else {
     internalUser._stopProactiveRefresh?.();
@@ -427,7 +489,9 @@ class SilentIframePopupRedirectResolver implements InternalAuthResolver {
     authType: string,
     eventId: string
   ): Promise<InternalPopupHandle> {
-    const authDomain = String(authObj?.config?.authDomain || firebaseConfig.authDomain || '').trim();
+    const authDomain = String(
+      authObj?.config?.authDomain || EFFECTIVE_FIREBASE_AUTH_DOMAIN || firebaseConfig.authDomain || ''
+    ).trim();
     const apiKey = String(authObj?.config?.apiKey || firebaseConfig.apiKey || '').trim();
     const params = new URLSearchParams();
     params.set('apiKey', apiKey);
@@ -607,60 +671,148 @@ export function restoreExpiredSessionSilently(): Promise<boolean> {
 }
 
 /**
- * Safely recovers from an expiring or disabled-Token-Service Auth session:
- * 1) First tries zero-click silent OAuth reauthentication in place so the user never logs out.
- * 2) Only if silent renewal cannot complete, stages recoverable metadata, signs out the expired token
- *    so Firestore public listeners stay online, and attempts silent sign-in restoration.
+ * Safely recovers an active Firebase Auth session without EVER forcing an automatic logout on normal
+ * 60-minute ID token expiry, tab sleep/wake, or transient network interruptions:
+ * 1) Attempts native Firebase refresh-token renewal (`getIdToken(true)`) first.
+ * 2) Signs out ONLY when Firebase Auth / Identity Toolkit explicitly confirms account revocation
+ *    (`USER_DISABLED`, `USER_NOT_FOUND`, `TOKEN_EXPIRED` / `INVALID_REFRESH_TOKEN`).
+ * 3) Preserves the persisted session across temporary network or service hiccups.
  */
 export function recoverFirestoreFromTokenServiceError(customNotice?: string): Promise<void> {
   if (recoveryInflight) return recoveryInflight;
   recoveryInflight = (async () => {
     if (auth.currentUser) {
-      const renewedInPlace = await attemptSilentGoogleSessionRefresh(auth.currentUser);
-      if (renewedInPlace) {
+      try {
+        await auth.currentUser.getIdToken(true);
+        markAuthenticatedSessionActive(auth.currentUser);
+        await enableNetwork(db).catch(() => {});
+        return;
+      } catch (refreshErr) {
+        const disposition = classifySessionErrorDisposition(refreshErr);
+        if (disposition === 'sign_out_revoked') {
+          writeStagedRecoverableSession(null);
+          staleTokenClearedNotice = customNotice || formatFirebaseAuthError(refreshErr);
+          await signOut(auth).catch(() => {});
+          await enableNetwork(db).catch(() => {});
+          return;
+        }
+
+        if (isTokenServiceDisabledError(refreshErr)) {
+          const renewedInPlace = await attemptSilentGoogleSessionRefresh(auth.currentUser);
+          if (renewedInPlace) {
+            await enableNetwork(db).catch(() => {});
+            return;
+          }
+        }
+        // Transient network / wake error: preserve persisted session in localStorage (NEVER signOut)
         await enableNetwork(db).catch(() => {});
         return;
       }
-
-      const current = auth.currentUser;
-      const email = current.email || lastExpiredSessionEmail;
-      const providerId = current.providerData[0]?.providerId || lastExpiredSessionProvider;
-      lastExpiredSessionEmail = email;
-      lastExpiredSessionProvider = providerId;
-      writeStagedRecoverableSession({
-        uid: current.uid,
-        email,
-        displayName: current.displayName || '',
-        providerId,
-        stagedAtMs: Date.now(),
-      });
-      await signOut(auth).catch(() => {});
     }
 
     await enableNetwork(db).catch(() => {});
-
-    const restoredAfterSignOut = await restoreExpiredSessionSilently();
-    if (restoredAfterSignOut) {
-      staleTokenClearedNotice = null;
-      return;
-    }
-
-    if (customNotice) {
-      staleTokenClearedNotice = customNotice;
-    } else if (!staleTokenClearedNotice) {
-      staleTokenClearedNotice = lastExpiredSessionEmail
-        ? `Welcome back — click Continue Session to resume as ${lastExpiredSessionEmail}.`
-        : 'Welcome back — click Continue Session to resume your account.';
-    }
   })().finally(() => {
     recoveryInflight = null;
   });
   return recoveryInflight;
 }
 
+let redirectResultPromise: Promise<User | null> | null = null;
+
 /**
- * Fast pre-listener check ensuring Firestore never boots with an expired unrefreshable token,
- * without waiting on background OAuth network roundtrips.
+ * Consumes any returning OAuth redirect result once per page load (for mobile/in-app browsers that used
+ * `signInWithRedirect` when popups were blocked) and ensures the user's marketplace profile is initialized.
+ */
+export function consumePendingAuthRedirectResult(): Promise<User | null> {
+  if (typeof window === 'undefined') return Promise.resolve(null);
+  if (redirectResultPromise) return redirectResultPromise;
+  redirectResultPromise = (async () => {
+    try {
+      const cred = await getRedirectResult(auth, browserPopupRedirectResolver);
+      if (cred?.user) {
+        markAuthenticatedSessionActive(cred.user);
+        syncProactiveRefreshWithCapabilities(cred.user, true);
+        await ensureUserProfileInitialized(cred.user).catch(() => {});
+        return cred.user;
+      }
+    } catch {
+      // Non-fatal if no redirect operation was pending
+    }
+    return null;
+  })();
+  return redirectResultPromise;
+}
+
+/**
+ * Retrieves a valid Firebase ID token for the currently signed-in user, automatically refreshing an
+ * expired 60-minute JWT via the persisted refresh token (`browserLocalPersistence`) and signing out
+ * ONLY if the account was genuinely disabled, deleted, or revoked.
+ */
+export async function getValidFirebaseIdToken(forceRefresh = false): Promise<string> {
+  const user = auth.currentUser;
+  if (!user) return '';
+  try {
+    return await user.getIdToken(forceRefresh);
+  } catch (err) {
+    const disposition = classifySessionErrorDisposition(err);
+    if (disposition === 'retry_token_refresh' && !forceRefresh && auth.currentUser) {
+      try {
+        return await auth.currentUser.getIdToken(true);
+      } catch (retryErr) {
+        if (classifySessionErrorDisposition(retryErr) === 'sign_out_revoked') {
+          writeStagedRecoverableSession(null);
+          await signOut(auth).catch(() => {});
+        }
+        return '';
+      }
+    }
+    if (disposition === 'sign_out_revoked') {
+      writeStagedRecoverableSession(null);
+      await signOut(auth).catch(() => {});
+    }
+    return '';
+  }
+}
+
+/**
+ * Performs an authenticated `fetch` with a fresh Firebase Bearer ID token, and if the server responds
+ * with HTTP 401 (e.g. clock skew or ID token just crossed 60-minute boundary), forces a single
+ * `getIdToken(true)` refresh and retries transparently without logging the user out.
+ */
+export async function fetchWithFreshBearerToken(
+  input: RequestInfo | URL,
+  init: RequestInit = {}
+): Promise<Response> {
+  const buildHeaders = (token: string): Headers => {
+    const h = new Headers(init.headers || {});
+    if (token) {
+      h.set('Authorization', `Bearer ${token}`);
+    }
+    return h;
+  };
+
+  const initialToken = await getValidFirebaseIdToken(false);
+  const firstResp = await fetch(input, {
+    ...init,
+    headers: buildHeaders(initialToken),
+  });
+
+  if (firstResp.status === 401 && auth.currentUser) {
+    const refreshedToken = await getValidFirebaseIdToken(true);
+    if (refreshedToken && refreshedToken !== initialToken) {
+      return fetch(input, {
+        ...init,
+        headers: buildHeaders(refreshedToken),
+      });
+    }
+  }
+
+  return firstResp;
+}
+
+/**
+ * Fast pre-listener check ensuring Firebase Auth finishes hydrating its persisted `browserLocalPersistence`
+ * state and refreshes any expired 60-minute ID token cleanly before Firestore listeners attach.
  */
 export function ensureFirestoreBootReady(): Promise<void> {
   if (firestoreBootPromise) return firestoreBootPromise;
@@ -670,13 +822,8 @@ export function ensureFirestoreBootReady(): Promise<void> {
         await auth.authStateReady();
       }
       if (auth.currentUser) {
-        try {
-          await auth.currentUser.getIdToken(false);
-        } catch (tokenErr) {
-          if (isTokenServiceDisabledError(tokenErr)) {
-            await recoverFirestoreFromTokenServiceError();
-          }
-        }
+        markAuthenticatedSessionActive(auth.currentUser);
+        await getValidFirebaseIdToken(false);
       }
     } catch {
       // Non-fatal; allow Firestore public listeners to initialize normally
@@ -686,16 +833,14 @@ export function ensureFirestoreBootReady(): Promise<void> {
 }
 
 /**
- * Validates any cached Auth session AND automatically attempts silent session restoration
- * when a returning user's 60-minute JWT expired while away.
+ * Validates any persisted Auth session and processes any returning OAuth redirect result.
  */
 export function prepareFirestoreAuthSession(): Promise<void> {
   if (sessionPrepPromise) return sessionPrepPromise;
   sessionPrepPromise = (async () => {
     await ensureFirestoreBootReady();
-    if (!auth.currentUser && hasPendingRecoverableSession()) {
-      await restoreExpiredSessionSilently();
-    } else if (auth.currentUser) {
+    await consumePendingAuthRedirectResult();
+    if (auth.currentUser) {
       markAuthenticatedSessionActive(auth.currentUser);
     }
   })();
@@ -743,7 +888,7 @@ export async function extendCurrentUserSessionInteractive(): Promise<'renewed' |
     if (hintEmail) {
       hintedProvider.setCustomParameters({ login_hint: hintEmail });
     }
-    const cred = await signInWithPopup(auth, hintedProvider);
+    const cred = await signInWithGoogleResilient(hintedProvider);
     markAuthenticatedSessionActive(cred.user);
     await ensureUserProfileInitialized(cred.user);
     const caps = await detectFirebaseAuthCapabilities();
@@ -879,6 +1024,9 @@ export async function validateAndProcessImageFile(
 export interface FirebaseAuthCapabilities {
   projectId?: string;
   projectNumber?: string;
+  effectiveAuthDomain?: string;
+  preferredBrandAuthDomain?: string;
+  customAuthProxyEnabled?: boolean;
   googleEnabled: boolean;
   googleProviderStatus: AuthProviderStatus;
   emailPasswordEnabled: boolean;
@@ -984,10 +1132,23 @@ export async function detectFirebaseAuthCapabilities(
               ? data.currentDomainAuthorized
               : null;
 
+          const preferredBrandAuthDomain =
+            typeof data.preferredBrandAuthDomain === 'string' &&
+            data.preferredBrandAuthDomain.trim()
+              ? data.preferredBrandAuthDomain.trim().toLowerCase()
+              : undefined;
+          const activeAuthDomain =
+            currentDomainAuthorized !== false && preferredBrandAuthDomain
+              ? applyPreferredFirebaseAuthDomain(preferredBrandAuthDomain)
+              : data.effectiveAuthDomain || EFFECTIVE_FIREBASE_AUTH_DOMAIN;
+
           const serverResult: FirebaseAuthCapabilities = {
             projectId: data.projectId || firebaseConfig.projectId,
             projectNumber:
               data.projectNumber || String(firebaseConfig.messagingSenderId || '448578956301'),
+            effectiveAuthDomain: activeAuthDomain,
+            preferredBrandAuthDomain,
+            customAuthProxyEnabled: Boolean(data.customAuthProxyEnabled ?? true),
             googleEnabled: googleProviderStatus !== 'disabled',
             googleProviderStatus,
             emailPasswordEnabled: emailPasswordStatus === 'enabled',
@@ -995,7 +1156,7 @@ export async function detectFirebaseAuthCapabilities(
             phoneSmsEnabled: Boolean(data.phoneSmsEnabled),
             authorizedDomains,
             currentDomainAuthorized,
-            tokenServiceEnabled: status === 'enabled_verified',
+            tokenServiceEnabled: status !== 'disabled',
             tokenServiceStatus: status,
             tokenServiceMessage: data.tokenServiceMessage || '',
             tokenServiceActivationUrl:
@@ -1010,7 +1171,7 @@ export async function detectFirebaseAuthCapabilities(
             checkedAtMs: Date.now(),
           };
           syncPersistedTokenServiceStatus(status);
-          syncProactiveRefreshWithCapabilities(auth.currentUser, status === 'enabled_verified');
+          syncProactiveRefreshWithCapabilities(auth.currentUser, status);
           cachedAuthCapabilities = serverResult;
           inflightCapabilitiesPromise = null;
           return serverResult;
@@ -1034,8 +1195,8 @@ export async function detectFirebaseAuthCapabilities(
       const continueOrigin =
         typeof window !== 'undefined' && window.location?.origin
           ? window.location.origin
-          : projectId
-          ? `https://${projectId}.firebaseapp.com`
+          : EFFECTIVE_FIREBASE_AUTH_DOMAIN
+          ? `https://${EFFECTIVE_FIREBASE_AUTH_DOMAIN}`
           : 'http://localhost';
 
       const [projSettled, googleSettled, pwdSettled, phoneSettled, tokenSettled] =
@@ -1139,6 +1300,7 @@ export async function detectFirebaseAuthCapabilities(
     const result: FirebaseAuthCapabilities = {
       projectId,
       projectNumber,
+      effectiveAuthDomain: EFFECTIVE_FIREBASE_AUTH_DOMAIN,
       googleEnabled: googleProviderStatus !== 'disabled',
       googleProviderStatus,
       emailPasswordEnabled: emailPasswordStatus === 'enabled',
@@ -1146,7 +1308,7 @@ export async function detectFirebaseAuthCapabilities(
       phoneSmsEnabled,
       authorizedDomains,
       currentDomainAuthorized,
-      tokenServiceEnabled: tokenServiceStatus === 'enabled_verified',
+      tokenServiceEnabled: tokenServiceStatus !== 'disabled',
       tokenServiceStatus,
       tokenServiceActivationUrl: DEFAULT_TOKEN_SERVICE_ACTIVATION_URL,
       firebaseAuthConsoleUrl: DEFAULT_FIREBASE_AUTH_PROVIDERS_URL,
@@ -1154,7 +1316,7 @@ export async function detectFirebaseAuthCapabilities(
       checkedAtMs: Date.now(),
     };
     syncPersistedTokenServiceStatus(tokenServiceStatus);
-    syncProactiveRefreshWithCapabilities(auth.currentUser, tokenServiceStatus === 'enabled_verified');
+    syncProactiveRefreshWithCapabilities(auth.currentUser, tokenServiceStatus);
     cachedAuthCapabilities = result;
     inflightCapabilitiesPromise = null;
     return result;
@@ -1311,6 +1473,7 @@ export interface PendingSignupMeta {
   displayName?: string;
   username?: string;
   phone?: string;
+  phoneCountryCode?: string;
 }
 
 const pendingSignupByEmail = new Map<string, PendingSignupMeta>();
@@ -1458,12 +1621,16 @@ export async function ensureUserProfileInitialized(
         }
 
         if (!privSnap.exists()) {
+          const cleanPhone = (mergedOpts.phone || fbUser.phoneNumber || '').trim().slice(0, 32);
+          const cleanCountry = (mergedOpts.phoneCountryCode || '').trim().toUpperCase().slice(0, 4);
           tx.set(privRef, {
             uid: fbUser.uid,
             email: (fbUser.email || '').slice(0, 160),
-            phone: (mergedOpts.phone || fbUser.phoneNumber || '').trim().slice(0, 32),
+            phone: cleanPhone,
+            ...(cleanCountry ? { phoneCountryCode: cleanCountry } : {}),
+            phoneFormatValidated: Boolean(cleanPhone),
             emailVerified: Boolean(fbUser.emailVerified),
-            phoneVerified: Boolean(fbUser.phoneNumber),
+            phoneVerified: Boolean(fbUser.phoneNumber && fbUser.phoneNumber === cleanPhone),
             nidStatus: 'not_verified',
             walletBalanceMinor: 0,
             reservedBalanceMinor: 0,

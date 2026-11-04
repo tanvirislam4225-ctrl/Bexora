@@ -141,6 +141,7 @@ export async function emitUserNotification(
       referenceLabel,
       dealId: refType === 'deal' && refId ? refId : undefined,
       listingId: refType === 'listing' && refId ? refId : undefined,
+      conversationId: refType === 'conversation' && refId ? refId : undefined,
     });
 
     return { created: true, id: notificationId };

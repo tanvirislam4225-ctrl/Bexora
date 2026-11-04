@@ -12,9 +12,32 @@ self.addEventListener('activate', (event) => {
   event.waitUntil(self.clients.claim());
 });
 
+const VERIFIED_BEXORA_AUTH_HOSTS = new Set([
+  'bexora.com',
+  'www.bexora.com',
+  'auth.bexora.com',
+  'bexora.ai.studio',
+  'bexora-448578956301.asia-southeast1.run.app',
+  'ais-pre-45y7auub4nznkdwaxyqbcw-496121292925.asia-southeast1.run.app',
+  'ais-dev-45y7auub4nznkdwaxyqbcw-496121292925.asia-southeast1.run.app',
+  'ais-mob-45y7auub4nznkdwaxyqbcw-496121292925.asia-southeast1.run.app',
+]);
+
+const swHost =
+  typeof self !== 'undefined' && self.location && self.location.hostname
+    ? self.location.hostname.toLowerCase()
+    : '';
+const swProto =
+  typeof self !== 'undefined' && self.location && self.location.protocol
+    ? self.location.protocol.toLowerCase()
+    : '';
+
 firebase.initializeApp({
   apiKey: 'AIzaSyC_j2As3-45kP54cWDfzBOR69qqTR8rMr4',
-  authDomain: 'responsive-dragon-tmn89.firebaseapp.com',
+  authDomain:
+    swProto === 'https:' && VERIFIED_BEXORA_AUTH_HOSTS.has(swHost)
+      ? swHost
+      : 'bexora.ai.studio',
   projectId: 'responsive-dragon-tmn89',
   storageBucket: 'responsive-dragon-tmn89.firebasestorage.app',
   messagingSenderId: '448578956301',

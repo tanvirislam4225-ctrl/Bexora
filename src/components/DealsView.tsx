@@ -17,6 +17,7 @@ import {
   Clock,
   CreditCard,
   FileCheck2,
+  Flag,
   ImagePlus,
   Lock,
   RotateCcw,
@@ -126,6 +127,8 @@ const ProtectionCountdown: React.FC<{
 };
 
 import { computeCheckoutWalletState } from '../lib/checkoutAndIntentLogic';
+import { PAUSED_CONVERSATION_NOTICE } from '../lib/moderationEngine';
+import { inspectTextClient, type ReportModalTarget } from '../lib/moderationClient';
 
 interface DealsViewProps {
   userUid: string | null;
@@ -138,6 +141,7 @@ interface DealsViewProps {
   onRequireAuth: () => void;
   onOpenWallet: () => void;
   onOpenDealCheckout?: (dealId: string) => void;
+  onReportDealCounterparty?: (target: ReportModalTarget) => void;
   onFlash: (msg: string) => void;
 }
 
@@ -152,6 +156,7 @@ export const DealsView: React.FC<DealsViewProps> = ({
   onRequireAuth,
   onOpenWallet,
   onOpenDealCheckout,
+  onReportDealCounterparty,
   onFlash,
 }) => {
   const [selectedDealId, setSelectedDealId] = useState<string | null>(initialDealId);
@@ -161,6 +166,7 @@ export const DealsView: React.FC<DealsViewProps> = ({
   const [auditEvents, setAuditEvents] = useState<DealAuditEvent[]>([]);
 
   const [chatText, setChatText] = useState('');
+  const [locallyPausedDealIds, setLocallyPausedDealIds] = useState<Record<string, string>>({});
 
   // Buyer Rejection State
   const [showRejectBox, setShowRejectBox] = useState(false);
@@ -1013,8 +1019,19 @@ export const DealsView: React.FC<DealsViewProps> = ({
     }
   };
 
+  const isDealChatPaused = Boolean(
+    activeDeal && (activeDeal.moderationPaused || locallyPausedDealIds[activeDeal.id])
+  );
+  const dealPauseNoticeText =
+    (activeDeal && (locallyPausedDealIds[activeDeal.id] || activeDeal.moderationPauseReason)) ||
+    PAUSED_CONVERSATION_NOTICE;
+
   const handleSendDealMessage = async () => {
     if (!activeDeal || !chatText.trim()) return;
+    if (isDealChatPaused) {
+      setErrMsg('Deal Room messaging is temporarily paused pending BEXORA Administrator review.');
+      return;
+    }
     const safety = detectSensitiveOrOffPlatformContent(chatText);
     if (safety.blocked) {
       setErrMsg(safety.reason || 'Message blocked for safety.');
@@ -1023,14 +1040,60 @@ export const DealsView: React.FC<DealsViewProps> = ({
     setBusy(true);
     setErrMsg('');
     try {
-      await addDoc(collection(db, 'deals', activeDeal.id, 'messages'), {
+      const modRes = await inspectTextClient({
+        surface: 'deal_room_chat',
+        callerName: profile.displayName,
+        text: chatText.trim(),
+        dealId: activeDeal.id,
+        listingId: activeDeal.listingId,
+        counterpartyId: isBuyer ? activeDeal.sellerId : activeDeal.buyerId,
+        counterpartyName: isBuyer ? activeDeal.sellerName : activeDeal.buyerName,
+      });
+      if (modRes.conversationPaused) {
+        setLocallyPausedDealIds((prev) => ({
+          ...prev,
+          [activeDeal.id]: modRes.pauseNotice || PAUSED_CONVERSATION_NOTICE,
+        }));
+        return;
+      }
+      if (!modRes.allowed) {
+        setErrMsg(
+          `${modRes.userNoticeTitle ? `${modRes.userNoticeTitle}: ` : ''}${
+            modRes.userNoticeMessage || 'Message blocked by BEXORA Trust & Safety.'
+          }`
+        );
+        return;
+      }
+
+      const cleanMsg = chatText.trim().slice(0, 1500);
+      const msgRef = await addDoc(collection(db, 'deals', activeDeal.id, 'messages'), {
         senderId: userUid,
         senderName: profile.displayName,
         senderRole: isBuyer ? 'buyer' : isSeller ? 'seller' : 'admin',
         kind: 'text',
-        text: chatText.trim().slice(0, 1500),
+        text: cleanMsg,
         createdAt: serverTimestamp(),
       });
+      const recipientIds = Array.from(
+        new Set([activeDeal.buyerId, activeDeal.sellerId].filter((id) => id && id !== userUid))
+      );
+      for (const targetUid of recipientIds) {
+        void emitUserNotification({
+          recipientId: targetUid,
+          actorId: userUid,
+          actorRole: isBuyer || isSeller ? 'user' : 'admin',
+          eventKey: `deal_msg_${msgRef.id}_${targetUid}`,
+          category: 'deal',
+          severity: 'info',
+          title: `New Deal Room Message · ${profile.displayName}`,
+          preview: cleanMsg.slice(0, 140),
+          body: `${profile.displayName} posted a message in Escrow Deal Room #${activeDeal.id.slice(0, 10)} ("${activeDeal.listingTitle}"):\n\n${cleanMsg.slice(0, 400)}`,
+          refType: 'deal',
+          refId: activeDeal.id,
+          referenceLabel: `Deal #${activeDeal.id.slice(0, 10)}`,
+          destination: `deal:${activeDeal.id}`,
+        });
+      }
       setChatText('');
     } catch (err) {
       setErrMsg(extractUserFacingFirestoreError(err, 'Failed to send deal message.'));
@@ -1049,6 +1112,24 @@ export const DealsView: React.FC<DealsViewProps> = ({
     setBusy(true);
     setErrMsg('');
     try {
+      const modRev = await inspectTextClient({
+        surface: 'review',
+        callerName: profile.displayName,
+        text: reviewComment.trim(),
+        dealId: activeDeal.id,
+        listingId: activeDeal.listingId,
+        counterpartyId: activeDeal.sellerId,
+        counterpartyName: activeDeal.sellerName,
+      });
+      if (!modRev.allowed) {
+        setErrMsg(
+          `${modRev.userNoticeTitle ? `${modRev.userNoticeTitle}: ` : ''}${
+            modRev.userNoticeMessage || 'Review contains prohibited language.'
+          }`
+        );
+        return;
+      }
+
       const revId = `rev_${activeDeal.id}`;
       await runTransaction(db, async (tx) => {
         const revRef = doc(db, 'reviews', revId);
@@ -1170,8 +1251,28 @@ export const DealsView: React.FC<DealsViewProps> = ({
                     <strong>BEXORA Admin</strong>
                   </p>
                 </div>
-                <div className="text-right">
-                  <span className="inline-block text-xs font-extrabold px-3 py-1.5 rounded-lg bx-soft">
+                <div className="flex flex-wrap items-center justify-end gap-2">
+                  {onReportDealCounterparty && (isBuyer || isSeller) && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onReportDealCounterparty({
+                          reportedUserId: isBuyer ? activeDeal.sellerId : activeDeal.buyerId,
+                          reportedUserName: isBuyer ? activeDeal.sellerName : activeDeal.buyerName,
+                          surface: 'deal_room_chat',
+                          dealId: activeDeal.id,
+                          listingId: activeDeal.listingId,
+                          listingTitle: activeDeal.listingTitle,
+                        })
+                      }
+                      aria-label="Report counterparty conduct"
+                      className="bx-btn bx-btn-ghost px-3 py-1.5 text-xs font-extrabold inline-flex items-center gap-1.5 whitespace-nowrap"
+                    >
+                      <Flag className="w-3.5 h-3.5 text-rose-600 dark:text-rose-400" />
+                      <span>Report Conduct</span>
+                    </button>
+                  )}
+                  <span className="inline-block text-xs font-extrabold px-3 py-1.5 rounded-lg bx-soft whitespace-nowrap">
                     {getDealStatusLabel(activeDeal.status)}
                   </span>
                 </div>
@@ -1939,24 +2040,42 @@ export const DealsView: React.FC<DealsViewProps> = ({
                   )}
                 </div>
 
+                {isDealChatPaused && (
+                  <div
+                    className="p-3.5 rounded-xl border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 text-amber-950 dark:text-amber-100 text-xs space-y-1.5"
+                    role="status"
+                  >
+                    <div className="flex items-center gap-1.5 font-extrabold">
+                      <Lock className="w-3.5 h-3.5 shrink-0" />
+                      <span>Safety Review Hold</span>
+                    </div>
+                    <p className="whitespace-pre-line leading-relaxed">{dealPauseNoticeText}</p>
+                  </div>
+                )}
+
                 {!isDealTerminalStatus(activeDeal.status) && (
                   <div className="flex gap-2">
                     <input
                       type="text"
+                      disabled={isDealChatPaused}
                       value={chatText}
                       onChange={(e) => setChatText(e.target.value)}
                       onKeyDown={(e) => {
-                        if (e.key === 'Enter' && chatText.trim()) {
+                        if (e.key === 'Enter' && chatText.trim() && !isDealChatPaused) {
                           e.preventDefault();
                           handleSendDealMessage();
                         }
                       }}
-                      placeholder="Coordinate asset transfer safely (passwords & external links blocked)…"
+                      placeholder={
+                        isDealChatPaused
+                          ? 'Deal Room chat paused pending administrator review…'
+                          : 'Coordinate asset transfer safely (passwords & external links blocked)…'
+                      }
                       className="bx-input flex-1"
                     />
                     <button
                       type="button"
-                      disabled={!chatText.trim() || busy}
+                      disabled={!chatText.trim() || busy || isDealChatPaused}
                       onClick={handleSendDealMessage}
                       className="bx-btn bx-btn-primary"
                       aria-label="Send deal message"
