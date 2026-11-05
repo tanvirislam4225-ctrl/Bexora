@@ -2298,6 +2298,13 @@ export default function App() {
     [navigateRoute]
   );
 
+  const handleListingViewCountUpdated = useCallback((listingId: string, newViews: number) => {
+    setActiveListings((prev) =>
+      prev.map((item) => (item.id === listingId ? { ...item, views: newViews } : item))
+    );
+    setFetchedListing((prev) => (prev && prev.id === listingId ? { ...prev, views: newViews } : prev));
+  }, []);
+
   // Sync guest recent searches when signed out
   useEffect(() => {
     if (!fbUser) {
@@ -2947,7 +2954,7 @@ export default function App() {
                             onToggleFavorite={(l) => void handleToggleFavorite(l)}
                             className={
                               idx === 0
-                                ? '!w-[325px] !max-w-none !rounded-[19px] !border-[6px] !text-[15px] !leading-[14px]'
+                                ? 'md:!w-[325px] max-md:!w-full max-md:!max-w-none !rounded-[19px] !border-[6px] !text-[15px] !leading-[14px]'
                                 : undefined
                             }
                           />
@@ -3145,7 +3152,7 @@ export default function App() {
                             onToggleFavorite={(l) => void handleToggleFavorite(l)}
                             className={
                               idx === 0
-                                ? '!w-[320px] !max-w-none !h-[299.438px] !mt-0 !ml-[10px] !rounded-[14px] !border-[1px] !text-[10px] !leading-[10px] !font-bold !text-left'
+                                ? 'md:!w-[320px] md:!h-[299.438px] md:!ml-[10px] max-md:!w-full max-md:!h-auto max-md:!ml-0 max-md:!max-w-none !mt-0 !rounded-[14px] !border-[1px] !text-[10px] !leading-[10px] !font-bold !text-left'
                                 : undefined
                             }
                           />
@@ -3271,6 +3278,7 @@ export default function App() {
                       navigateRoute({ page: 'sell', editListingId: targetListing.id })
                     }
                     onListingDeleted={() => navigateRoute({ page: 'profile', profileTab: 'listings' })}
+                    onViewCountUpdated={handleListingViewCountUpdated}
                   />
                 )}
               </>

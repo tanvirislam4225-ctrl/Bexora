@@ -1459,86 +1459,90 @@ service cloud.firestore {
         && !('firstPublishedAtMs' in incoming())
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time;
-      allow update: if isSignedIn()
-        && isValidId(listingId)
+      allow update: if isValidId(listingId)
         && isValidListing(incoming())
         && incoming().sellerId == existing().sellerId
         && incoming().createdAt == existing().createdAt
         && (
           (
-            isAdmin()
-            && incoming().updatedAt == request.time
-          )
-          || (
-            // Seller editing own draft/pending/active/rejected/archived listing (never sold/reserved/suspended) resets verifiedOptions to []
-            existing().sellerId == request.auth.uid
-            && !isUserModerationSuspended(request.auth.uid)
-            && !hasActiveRestrictionFlag(request.auth.uid, 'restrictListings')
-            && existing().status in ['draft', 'pending', 'active', 'rejected', 'archived']
-            && incoming().status in ['draft', 'pending', 'archived']
-            && incoming().verifiedOptions.size() == 0
-            && incoming().views == existing().views
+            isSignedIn()
             && (
-              !('rejectionReason' in incoming())
-              || ('rejectionReason' in existing() && incoming().rejectionReason == existing().rejectionReason)
+              (
+                isAdmin()
+                && incoming().updatedAt == request.time
+              )
+              || (
+                // Seller editing own draft/pending/active/rejected/archived listing (never sold/reserved/suspended) resets verifiedOptions to []
+                existing().sellerId == request.auth.uid
+                && !isUserModerationSuspended(request.auth.uid)
+                && !hasActiveRestrictionFlag(request.auth.uid, 'restrictListings')
+                && existing().status in ['draft', 'pending', 'active', 'rejected', 'archived']
+                && incoming().status in ['draft', 'pending', 'archived']
+                && incoming().verifiedOptions.size() == 0
+                && incoming().views == existing().views
+                && (
+                  !('rejectionReason' in incoming())
+                  || ('rejectionReason' in existing() && incoming().rejectionReason == existing().rejectionReason)
+                )
+                && incoming().updatedAt == request.time
+                && incoming().diff(existing()).affectedKeys().hasOnly([
+                  'title', 'description', 'priceMinor', 'subcategory', 'monetizationStatus',
+                  'claimedOptions', 'verifiedOptions', 'verificationState', 'ageYears', 'ageMonths',
+                  'metricValue', 'monthlyRevenueMinor', 'accountUrl', 'urlValidationStatus',
+                  'gameName', 'gameUid', 'gameLevel', 'images', 'status', 'rejectionReason', 'updatedAt'
+                ])
+              )
+              || (
+                // Seller accepting a bid reserves their own active listing atomically with deal creation
+                existing().sellerId == request.auth.uid
+                && existing().status == 'active'
+                && incoming().status == 'reserved'
+                && incoming().activeDealId is string
+                && isValidId(incoming().activeDealId)
+                && existsAfter(/databases/$(database)/documents/deals/$(incoming().activeDealId))
+                && getAfter(/databases/$(database)/documents/deals/$(incoming().activeDealId)).data.listingId == listingId
+                && incoming().updatedAt == request.time
+                && incoming().diff(existing()).affectedKeys().hasOnly([
+                  'status', 'activeDealId', 'acceptedBidAmountMinor', 'reservedBuyerId', 'updatedAt'
+                ])
+              )
+              || (
+                // Seller or reserved buyer safely cancelling an unpaid reservation restores listing to active
+                existing().status == 'reserved'
+                && existing().activeDealId is string
+                && (
+                  existing().sellerId == request.auth.uid
+                  || ('reservedBuyerId' in existing() && existing().reservedBuyerId == request.auth.uid)
+                )
+                && incoming().status == 'active'
+                && !('activeDealId' in incoming())
+                && !('acceptedBidAmountMinor' in incoming())
+                && !('reservedBuyerId' in incoming())
+                && !exists(/databases/$(database)/documents/walletLedger/$('led_pay_' + existing().activeDealId))
+                && getAfter(/databases/$(database)/documents/deals/$(existing().activeDealId)).data.status == 'cancelled'
+                && incoming().updatedAt == request.time
+                && incoming().diff(existing()).affectedKeys().hasOnly([
+                  'status', 'activeDealId', 'acceptedBidAmountMinor', 'reservedBuyerId', 'updatedAt'
+                ])
+              )
+              || (
+                // Buyer completing atomic Buy Now or Reserved Deal Payment transitions listing -> sold
+                existing().status in ['active', 'reserved']
+                && (existing().status == 'active' || !('reservedBuyerId' in existing()) || existing().reservedBuyerId == request.auth.uid)
+                && incoming().status == 'sold'
+                && incoming().activeDealId is string
+                && (existing().status == 'active' || incoming().activeDealId == existing().activeDealId)
+                && existsAfter(/databases/$(database)/documents/deals/$(incoming().activeDealId))
+                && getAfter(/databases/$(database)/documents/deals/$(incoming().activeDealId)).data.listingId == listingId
+                && getAfter(/databases/$(database)/documents/deals/$(incoming().activeDealId)).data.buyerId == request.auth.uid
+                && existsAfter(/databases/$(database)/documents/walletLedger/$('led_pay_' + incoming().activeDealId))
+                && incoming().updatedAt == request.time
+                && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'activeDealId', 'updatedAt'])
+              )
             )
-            && incoming().updatedAt == request.time
-            && incoming().diff(existing()).affectedKeys().hasOnly([
-              'title', 'description', 'priceMinor', 'subcategory', 'monetizationStatus',
-              'claimedOptions', 'verifiedOptions', 'verificationState', 'ageYears', 'ageMonths',
-              'metricValue', 'monthlyRevenueMinor', 'accountUrl', 'urlValidationStatus',
-              'gameName', 'gameUid', 'gameLevel', 'images', 'status', 'rejectionReason', 'updatedAt'
-            ])
           )
           || (
-            // Seller accepting a bid reserves their own active listing atomically with deal creation
-            existing().sellerId == request.auth.uid
-            && existing().status == 'active'
-            && incoming().status == 'reserved'
-            && incoming().activeDealId is string
-            && isValidId(incoming().activeDealId)
-            && existsAfter(/databases/$(database)/documents/deals/$(incoming().activeDealId))
-            && getAfter(/databases/$(database)/documents/deals/$(incoming().activeDealId)).data.listingId == listingId
-            && incoming().updatedAt == request.time
-            && incoming().diff(existing()).affectedKeys().hasOnly([
-              'status', 'activeDealId', 'acceptedBidAmountMinor', 'reservedBuyerId', 'updatedAt'
-            ])
-          )
-          || (
-            // Seller or reserved buyer safely cancelling an unpaid reservation restores listing to active
-            existing().status == 'reserved'
-            && existing().activeDealId is string
-            && (
-              existing().sellerId == request.auth.uid
-              || ('reservedBuyerId' in existing() && existing().reservedBuyerId == request.auth.uid)
-            )
-            && incoming().status == 'active'
-            && !('activeDealId' in incoming())
-            && !('acceptedBidAmountMinor' in incoming())
-            && !('reservedBuyerId' in incoming())
-            && !exists(/databases/$(database)/documents/walletLedger/$('led_pay_' + existing().activeDealId))
-            && getAfter(/databases/$(database)/documents/deals/$(existing().activeDealId)).data.status == 'cancelled'
-            && incoming().updatedAt == request.time
-            && incoming().diff(existing()).affectedKeys().hasOnly([
-              'status', 'activeDealId', 'acceptedBidAmountMinor', 'reservedBuyerId', 'updatedAt'
-            ])
-          )
-          || (
-            // Buyer completing atomic Buy Now or Reserved Deal Payment transitions listing -> sold
-            existing().status in ['active', 'reserved']
-            && (existing().status == 'active' || !('reservedBuyerId' in existing()) || existing().reservedBuyerId == request.auth.uid)
-            && incoming().status == 'sold'
-            && incoming().activeDealId is string
-            && (existing().status == 'active' || incoming().activeDealId == existing().activeDealId)
-            && existsAfter(/databases/$(database)/documents/deals/$(incoming().activeDealId))
-            && getAfter(/databases/$(database)/documents/deals/$(incoming().activeDealId)).data.listingId == listingId
-            && getAfter(/databases/$(database)/documents/deals/$(incoming().activeDealId)).data.buyerId == request.auth.uid
-            && existsAfter(/databases/$(database)/documents/walletLedger/$('led_pay_' + incoming().activeDealId))
-            && incoming().updatedAt == request.time
-            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'activeDealId', 'updatedAt'])
-          )
-          || (
-            // Safe +1 view counter increment
+            // Safe +1 view counter increment (open to all legitimate viewers including guests)
             existing().status in ['active', 'reserved']
             && incoming().views == existing().views + 1
             && incoming().diff(existing()).affectedKeys().hasOnly(['views'])

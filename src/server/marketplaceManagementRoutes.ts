@@ -22,6 +22,12 @@ import {
   MAX_LISTING_IMAGES,
   SELLER_REJECT_BID_COPY,
 } from '../lib/listingAndBidManagementLogic';
+import {
+  evaluateViewQualification,
+  normalizeViewerKey,
+  ViewDeduplicationCache,
+  VIEW_DEDUPLICATION_WINDOW_MS,
+} from '../lib/viewCountLogic';
 import { recordSecurityEvent, SlidingWindowRateLimiter } from '../lib/serverSecurity';
 
 export interface VerifiedFirebaseRuntimeConfig {
@@ -207,6 +213,8 @@ export function registerMarketplaceManagementRoutes<
   const listingMutationLimiter = new SlidingWindowRateLimiter(30, 60_000);
   const bidMutationLimiter = new SlidingWindowRateLimiter(40, 60_000);
   const publicEligibilityLimiter = new SlidingWindowRateLimiter(30, 60_000);
+  const viewCounterCache = new ViewDeduplicationCache(VIEW_DEDUPLICATION_WINDOW_MS);
+  const viewCounterLimiter = new SlidingWindowRateLimiter(60, 60_000);
 
   function buildFirestoreRestBase(cfg: VerifiedFirebaseRuntimeConfig): string {
     return `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
@@ -2316,6 +2324,143 @@ export function registerMarketplaceManagementRoutes<
       return res.status(500).json({
         ok: false,
         error: 'An error occurred during permanent user deletion.',
+      });
+    }
+  });
+
+  /**
+   * POST /api/listings/:listingId/view
+   * Authoritative, real-time asset view counter endpoint.
+   * Increments the public view count ONLY when a user/guest actually opens the asset details.
+   * Deduplicates repeated visits within a 30-minute sliding window.
+   * Excludes seller self-views and inactive listings.
+   */
+  app.post('/api/listings/:listingId/view', async (req, res) => {
+    const listingId = String(req.params.listingId || '').trim();
+    if (!VALID_ID_REGEX.test(listingId)) {
+      return res.status(400).json({ ok: false, error: 'Invalid listing ID format.' });
+    }
+
+    const clientKey = getCallerClientKey(req);
+    if (!viewCounterLimiter.consume(`view:${clientKey}`).allowed) {
+      return res.status(429).json({
+        ok: false,
+        error: 'Too many view count requests. Please wait a moment.',
+      });
+    }
+
+    const cfg = loadVerifiedFirebaseConfig();
+    if (!cfg.configValid) {
+      return res.status(503).json({ ok: false, error: 'Firebase configuration is unavailable.' });
+    }
+
+    // Caller can be authenticated or anonymous/guest
+    let callerUid: string | null = null;
+    try {
+      const caller = await verifyCallerFirebaseToken(req, cfg);
+      if (caller?.uid) {
+        callerUid = caller.uid;
+      }
+    } catch {
+      // Guest viewer (unauthenticated)
+    }
+
+    const viewerToken =
+      typeof req.body?.viewerToken === 'string' ? req.body.viewerToken.trim() : undefined;
+    const viewerKey = normalizeViewerKey({
+      callerUid,
+      viewerToken,
+      clientIp: clientKey,
+    });
+
+    // Check sliding window deduplication cache first
+    if (viewCounterCache.hasRecentView(listingId, viewerKey)) {
+      return res.json({
+        ok: true,
+        counted: false,
+        reason: 'deduplicated',
+        message: 'View already recorded recently within the deduplication window.',
+      });
+    }
+
+    try {
+      const adminApp = getOrInitFirebaseAdminApp(cfg.projectId);
+      const db = getAdminFirestore(adminApp, cfg.firestoreDatabaseId);
+      const listingRef = db.collection('listings').doc(listingId);
+
+      const result = await db.runTransaction(async (transaction) => {
+        const docSnap = await transaction.get(listingRef);
+        if (!docSnap.exists) {
+          return { notFound: true, qualified: false, reason: 'not_found', currentViews: 0, newViews: 0 };
+        }
+        const data = docSnap.data() || {};
+        const sellerId = typeof data.sellerId === 'string' ? data.sellerId : '';
+        const status = typeof data.status === 'string' ? data.status : 'active';
+        const existingViews =
+          typeof data.views === 'number' && Number.isFinite(data.views)
+            ? Math.max(0, Math.floor(data.views))
+            : 0;
+
+        const evalResult = evaluateViewQualification({
+          listingId,
+          sellerId,
+          viewerKey,
+          callerUid,
+          listingStatus: status,
+        });
+
+        if (!evalResult.qualifies) {
+          return {
+            notFound: false,
+            qualified: false,
+            reason: evalResult.reason,
+            currentViews: existingViews,
+            newViews: existingViews,
+          };
+        }
+
+        const nextViews = existingViews + 1;
+        transaction.update(listingRef, {
+          views: FieldValue.increment(1),
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+
+        return {
+          notFound: false,
+          qualified: true,
+          reason: 'qualified',
+          currentViews: existingViews,
+          newViews: nextViews,
+        };
+      });
+
+      if (result.notFound) {
+        return res.status(404).json({ ok: false, error: 'Listing not found.' });
+      }
+
+      if (!result.qualified) {
+        return res.json({
+          ok: true,
+          counted: false,
+          reason: result.reason,
+          views: result.currentViews,
+        });
+      }
+
+      // Record in deduplication sliding cache
+      viewCounterCache.recordView(listingId, viewerKey);
+
+      return res.json({
+        ok: true,
+        counted: true,
+        views: result.newViews,
+      });
+    } catch (err) {
+      return res.json({
+        ok: false,
+        counted: false,
+        reason: 'server_credentials_unavailable',
+        message: 'Client-side Firestore rules update will be used.',
       });
     }
   });

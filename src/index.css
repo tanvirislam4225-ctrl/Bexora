@@ -429,36 +429,35 @@ button {
 }
 
 /* ============================= COMPACT BOUNDED LISTING GRIDS ============================= */
+/* Mobile: Strictly ONE card per row (360px-767px), 100% width, 20px vertical spacing */
 .bx-listing-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: 10px;
+  gap: 20px;
+  width: 100%;
   align-items: stretch;
 }
 
-@media (min-width: 350px) {
+/* Tablet (768px - 1023px): Approved 2-column balanced grid */
+@media (min-width: 768px) {
   .bx-listing-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 10px;
-  }
-}
-
-@media (min-width: 640px) {
-  .bx-listing-grid {
-    grid-template-columns: repeat(auto-fill, minmax(250px, 300px));
     gap: 16px;
     justify-content: start;
   }
 }
 
+/* Desktop (1024px+): Approved multi-column grid */
 @media (min-width: 1024px) {
   .bx-listing-grid {
-    grid-template-columns: repeat(auto-fill, minmax(280px, 320px));
+    grid-template-columns: repeat(auto-fill, minmax(270px, 320px));
     gap: 20px;
     justify-content: start;
   }
 }
 }
+
+
 
 @keyframes bx-ticker-scroll {
   0% {

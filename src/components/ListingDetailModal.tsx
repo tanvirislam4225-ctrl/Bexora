@@ -20,6 +20,7 @@ import {
   CreditCard,
   Edit3,
   ExternalLink,
+  Eye,
   Flag,
   Heart,
   Lock,
@@ -75,6 +76,8 @@ import {
   partitionBidsForListingView,
 } from '../lib/listingAndBidManagementLogic';
 import { executeShareListing } from '../lib/engagementLogic';
+import { formatListingPublishedTime, formatViewCount } from '../lib/viewCountLogic';
+import { recordAssetDetailView } from '../lib/viewCountClient';
 import type { ReportModalTarget } from '../lib/moderationClient';
 import { BidActionConfirmModal } from './BidActionConfirmModal';
 import { DeleteListingModal } from './DeleteListingModal';
@@ -116,6 +119,7 @@ interface ListingDetailModalProps {
   onReportListingOrSeller?: (target: ReportModalTarget) => void;
   onEditListing?: (listing: MarketplaceListing) => void;
   onListingDeleted?: (listingId: string) => void;
+  onViewCountUpdated?: (listingId: string, newViews: number) => void;
 }
 
 export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
@@ -144,8 +148,10 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
   onReportListingOrSeller,
   onEditListing,
   onListingDeleted,
+  onViewCountUpdated,
 }) => {
   void privateUser;
+  const [localViews, setLocalViews] = useState(listing.views || 0);
   const [selectedImg, setSelectedImg] = useState(0);
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
@@ -220,25 +226,37 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
     return () => unsub();
   }, [listing.id]);
 
-  // Increment view count once atomically ONLY for authenticated non-owner viewers
+  // Keep local view count synced if parent listing state changes
   useEffect(() => {
-    if (
-      auth.currentUser &&
-      userUid &&
-      userUid !== listing.sellerId &&
-      listing.status === 'active' &&
-      viewCountedRef.current !== listing.id
-    ) {
-      viewCountedRef.current = listing.id;
-      const listingRef = doc(db, 'listings', listing.id);
-      runTransaction(db, async (tx) => {
-        const snap = await tx.get(listingRef);
-        if (!snap.exists() || snap.data()?.status !== 'active') return;
-        const currentViews = Number(snap.data()?.views) || 0;
-        tx.update(listingRef, { views: currentViews + 1 });
-      }).catch(() => {});
-    }
-  }, [listing.id, listing.sellerId, listing.status, userUid]);
+    setLocalViews(listing.views || 0);
+  }, [listing.id, listing.views]);
+
+  // Real-time authoritative YouTube-style view counting (deduplicated 30 min per viewer, non-seller)
+  useEffect(() => {
+    let cancelled = false;
+    if (viewCountedRef.current === listing.id) return;
+    viewCountedRef.current = listing.id;
+
+    recordAssetDetailView({
+      listingId: listing.id,
+      sellerId: listing.sellerId,
+      userUid: userUid || auth.currentUser?.uid || null,
+    })
+      .then((res) => {
+        if (cancelled) return;
+        if (res.ok && res.counted && typeof res.views === 'number') {
+          setLocalViews(res.views);
+          if (onViewCountUpdated) {
+            onViewCountUpdated(listing.id, res.views);
+          }
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      cancelled = true;
+    };
+  }, [listing.id, listing.sellerId, userUid, onViewCountUpdated]);
 
   const acceptedBidRecord = useMemo(
     () =>
@@ -892,13 +910,24 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
               <h1 className="text-xl sm:text-2xl lg:text-3xl font-black leading-snug">
                 {listing.title}
               </h1>
-              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs font-semibold text-[var(--text-2)]">
+              <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs font-semibold text-[var(--text-2)]">
                 <span className="font-bold text-[var(--orange)]">
                   {listing.subcategory
                     .toLowerCase()
                     .startsWith(platformDef.name.toLowerCase())
                     ? listing.subcategory
                     : `${platformDef.name} · ${listing.subcategory}`}
+                </span>
+                <span aria-hidden="true">·</span>
+                <span title="Published time">{formatListingPublishedTime(listing.firstPublishedAtMs || listing.createdAtMs)}</span>
+                <span aria-hidden="true">·</span>
+                <span
+                  data-testid="detail-view-counter"
+                  className="inline-flex items-center gap-1 font-bold text-[var(--text)] tabular-nums"
+                  title="Total authentic views"
+                >
+                  <Eye className="w-3.5 h-3.5 text-[var(--orange)]" />
+                  <span>{formatViewCount(localViews)}</span>
                 </span>
                 <span aria-hidden="true">·</span>
                 <span>{getProtectionDurationHours(listing.platform, settings)}h Escrow Protection</span>
