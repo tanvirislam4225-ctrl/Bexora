@@ -5,15 +5,26 @@ import {
   ArrowLeft,
   ArrowRight,
   CheckCircle2,
+  Copy,
   CreditCard,
   ExternalLink,
   Globe,
+  Info,
+  Layers,
   Loader2,
   Lock,
   RefreshCw,
+  Send,
   ShieldCheck,
+  Smartphone,
   Wallet,
 } from 'lucide-react';
+import {
+  calculateExactBdtSerial,
+  getDefaultManualPaymentMethods,
+  EXACT_LINK_UNAVAILABLE_MESSAGE,
+  ManualPaymentMethod,
+} from '../lib/paymentManagementLogic';
 import {
   CurrencyCode,
   DealRecord,

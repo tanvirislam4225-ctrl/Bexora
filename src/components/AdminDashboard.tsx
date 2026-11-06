@@ -113,6 +113,7 @@ import { shouldTriggerFollowerPublicationAlert } from '../lib/engagementLogic';
 import { fanoutNewListingToFollowers } from '../lib/engagementService';
 import { enableFcmCloudApisViaServer } from '../lib/pushNotifications';
 import { SUPPORTED_LANGUAGES } from '../lib/i18n';
+import { AdminPaymentManagement } from './AdminPaymentManagement';
 import { AdminAiAssistantWorkspace } from './AdminAiAssistantWorkspace';
 import { AdminTrustSafetyCenter } from './AdminTrustSafetyCenter';
 import { AdminUsersDirectory } from './AdminUsersDirectory';
@@ -4328,173 +4329,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </div>
           )}
 
-          {/* 10. MANUAL PAYMENT & WORDPRESS LIVE GATEWAY SETTINGS */}
+          {/* 10. COMPLETE PAYMENT MANAGEMENT SYSTEM */}
           {section === 'payments' && (
-            <div className="space-y-6 max-w-3xl">
-              <form onSubmit={handleSaveManualPayments} className="bx-card p-6 space-y-5">
-                <h1 className="text-xl font-black">Manual Wallet Payment Destinations</h1>
-                <p className="text-xs opacity-75">
-                  Configure official Send Money / Cash Out numbers displayed on the BEXORA Wallet page. Buyers can add balance to their BEXORA Wallet and immediately complete Buy Now or Accepted Bid Escrow purchases.
-                </p>
-
-                <div>
-                  <label htmlFor="bx-pay-bkash" className="block text-xs font-extrabold mb-1">
-                    bKash Destination Number
-                  </label>
-                  <input
-                    id="bx-pay-bkash"
-                    type="text"
-                    value={bkashNum}
-                    onChange={(e) => setBkashNum(e.target.value)}
-                    placeholder="017XXXXXXXX"
-                    className="bx-input w-full px-3.5 py-2.5 text-sm"
-                  />
-                </div>
-
-                <div>
-                  <label htmlFor="bx-pay-nagad" className="block text-xs font-extrabold mb-1">
-                    Nagad Destination Number
-                  </label>
-                  <input
-                    id="bx-pay-nagad"
-                    type="text"
-                    value={nagadNum}
-                    onChange={(e) => setNagadNum(e.target.value)}
-                    placeholder="018XXXXXXXX"
-                    className="bx-input w-full px-3.5 py-2.5 text-sm"
-                  />
-                </div>
-
-                <div>
-                  <label htmlFor="bx-pay-rocket" className="block text-xs font-extrabold mb-1">
-                    Rocket Destination Number
-                  </label>
-                  <input
-                    id="bx-pay-rocket"
-                    type="text"
-                    value={rocketNum}
-                    onChange={(e) => setRocketNum(e.target.value)}
-                    placeholder="019XXXXXXXXX"
-                    className="bx-input w-full px-3.5 py-2.5 text-sm"
-                  />
-                </div>
-
-                <button type="submit" className="bx-btn bx-btn-primary px-6 py-2.5 text-sm font-extrabold">
-                  Save Wallet Payment Numbers
-                </button>
-              </form>
-
-              <form onSubmit={handleSaveWordPressBridge} className="bx-card p-6 space-y-5">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex items-center gap-2">
-                    <Globe className="w-5 h-5 text-[#FF6500]" />
-                    <h2 className="text-lg font-black">
-                      WordPress Live Payment Bridge (Multi-Gateway Checkout)
-                    </h2>
-                  </div>
-                  <span
-                    className="text-[11px] font-black uppercase px-2.5 py-1 rounded-lg border"
-                    style={{
-                      background: settings.wordpressPaymentEnabled
-                        ? 'var(--green-soft)'
-                        : 'var(--surface-2)',
-                      color: settings.wordpressPaymentEnabled ? 'var(--green)' : 'var(--text-2)',
-                      borderColor: 'var(--border-soft)',
-                    }}
-                  >
-                    {settings.wordpressPaymentEnabled ? 'Enabled in Settings' : 'Wallet-Only Mode'}
-                  </span>
-                </div>
-
-                <p className="text-xs opacity-80 leading-relaxed">
-                  Connect your WordPress / WooCommerce payment hub to dynamically expose any number of live payment gateways (bKash Merchant, SSLCommerz, Stripe, PayPal, UddoktaPay, Cards) on the BEXORA Checkout page. Secret keys (<code>WORDPRESS_WEBHOOK_SECRET</code>, <code>WORDPRESS_CONSUMER_KEY</code>, <code>WORDPRESS_CONSUMER_SECRET</code>) stay strictly server-side in environment variables—never in public database settings.
-                </p>
-
-                <label className="flex items-center gap-2.5 text-xs font-extrabold cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={wpEnabled}
-                    onChange={(e) => setWpEnabled(e.target.checked)}
-                    className="w-4 h-4 accent-[#FF6500]"
-                  />
-                  <span>Enable WordPress Live Payment Gateways on Checkout Page</span>
-                </label>
-
-                <div>
-                  <label htmlFor="bx-wp-site-url" className="block text-xs font-extrabold mb-1">
-                    WordPress Site HTTPS Origin URL
-                  </label>
-                  <input
-                    id="bx-wp-site-url"
-                    type="url"
-                    value={wpSiteUrl}
-                    onChange={(e) => setWpSiteUrl(e.target.value)}
-                    placeholder="https://pay.yourdomain.com"
-                    className="bx-input w-full px-3.5 py-2.5 text-sm"
-                  />
-                </div>
-
-                <div>
-                  <label htmlFor="bx-wp-bridge-endpoint" className="block text-xs font-extrabold mb-1">
-                    WordPress REST Bridge Base Path
-                  </label>
-                  <input
-                    id="bx-wp-bridge-endpoint"
-                    type="text"
-                    value={wpBridgeEndpoint}
-                    onChange={(e) => setWpBridgeEndpoint(e.target.value)}
-                    placeholder="/wp-json/bexora/v1"
-                    className="bx-input w-full px-3.5 py-2.5 text-sm"
-                  />
-                  <span className="bx-hint block mt-1">
-                    Supports custom <code>/wp-json/bexora/v1/gateways</code> plugin endpoints or standard WooCommerce REST <code>/wp-json/wc/v3/payment_gateways</code>.
-                  </span>
-                </div>
-
-                {wpTestResult && (
-                  <div className="p-3.5 rounded-xl bx-soft space-y-2 text-xs">
-                    <div className="font-extrabold">
-                      Status: <span className="uppercase">{wpTestResult.statusCode}</span> · Webhook Secret:{' '}
-                      {wpTestResult.webhookSecretConfigured ? 'Configured' : 'Not Configured'}
-                    </div>
-                    <p style={{ color: 'var(--text-2)' }}>{wpTestResult.userMessage}</p>
-                    {wpTestResult.methods.length > 0 && (
-                      <div className="pt-1 flex flex-wrap gap-1.5">
-                        {wpTestResult.methods.map((m) => (
-                          <span
-                            key={m.id}
-                            className="px-2 py-0.5 rounded-md border font-bold"
-                            style={{
-                              background: 'var(--surface)',
-                              borderColor: 'var(--border-soft)',
-                            }}
-                          >
-                            {m.title} ({m.id})
-                          </span>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                <div className="flex flex-wrap items-center gap-3">
-                  <button
-                    type="submit"
-                    className="bx-btn bx-btn-primary px-6 py-2.5 text-sm font-extrabold"
-                  >
-                    Save WordPress Bridge Settings
-                  </button>
-                  <button
-                    type="button"
-                    disabled={testingWpBridge}
-                    onClick={handleTestWordPressBridge}
-                    className="bx-btn px-4 py-2.5 text-xs font-extrabold inline-flex items-center gap-1.5"
-                  >
-                    <RefreshCw className={`w-3.5 h-3.5 ${testingWpBridge ? 'animate-spin' : ''}`} />
-                    <span>{testingWpBridge ? 'Testing Gateways…' : 'Test WordPress Connection'}</span>
-                  </button>
-                </div>
-              </form>
+            <div className="space-y-6 max-w-6xl">
+              <AdminPaymentManagement
+                getIdToken={async () => (auth.currentUser ? await auth.currentUser.getIdToken() : '')}
+              />
             </div>
           )}
 

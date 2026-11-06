@@ -47,6 +47,7 @@ import {
 import { createAiAdminEngine } from './src/server/aiAdminEngine';
 import { createTrustSafetyEngine } from './src/server/trustSafetyEngine';
 import { registerMarketplaceManagementRoutes } from './src/server/marketplaceManagementRoutes';
+import { registerPaymentManagementRoutes } from './src/server/paymentManagementRoutes';
 import {
   mergeAndSortTickerItems,
   parseRawPublicActivityItem,
@@ -4658,6 +4659,16 @@ Current system snapshot: ${typeof systemContext === 'string' ? systemContext.sli
 
   // 6. Seller Listing Management, Atomic Bid Withdraw/Reject, & Admin ALL USERS Management Routes
   registerMarketplaceManagementRoutes({
+    app,
+    loadVerifiedFirebaseConfig,
+    getOrInitFirebaseAdminApp,
+    verifyCallerFirebaseToken,
+    verifyAdminCaller,
+    getCallerClientKey,
+  });
+
+  // 7. Complete Payment Management: Manual Numbers, Live Links, and Verification Requests
+  registerPaymentManagementRoutes({
     app,
     loadVerifiedFirebaseConfig,
     getOrInitFirebaseAdminApp,
