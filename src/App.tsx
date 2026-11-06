@@ -320,6 +320,21 @@ export default function App() {
     return sanitizeRouteId(params.get('wp_session')) || null;
   });
 
+  const [spReturnSessionId, setSpReturnSessionId] = useState<string | null>(() => {
+    const params = new URLSearchParams(window.location.search);
+    return sanitizeRouteId(params.get('sp_session')) || null;
+  });
+
+  const [spPaymentStatus, setSpPaymentStatus] = useState<string | null>(() => {
+    const params = new URLSearchParams(window.location.search);
+    return params.get('payment_status') || null;
+  });
+
+  const [spTransactionId, setSpTransactionId] = useState<string | null>(() => {
+    const params = new URLSearchParams(window.location.search);
+    return sanitizeRouteId(params.get('transaction_id') || params.get('transactionId')) || null;
+  });
+
   const [pendingAuthIntent, setPendingAuthIntent] = useState<PendingAuthIntent | null>(() => {
     try {
       return deserializePendingAuthIntent(sessionStorage.getItem(PENDING_AUTH_INTENT_STORAGE_KEY));
@@ -3303,6 +3318,9 @@ export default function App() {
                 settings={settings}
                 displayCurrency={currency}
                 wpReturnSessionId={wpReturnSessionId}
+                spReturnSessionId={spReturnSessionId}
+                spPaymentStatus={spPaymentStatus}
+                spTransactionId={spTransactionId}
                 onBack={() => {
                   if (route.checkoutDealId) {
                     navigateRoute({ page: 'deals', dealId: route.checkoutDealId });

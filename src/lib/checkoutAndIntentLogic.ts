@@ -324,6 +324,18 @@ export function buildSearchForRoute(
   if (wpSession && route.page === 'checkout') {
     out.set('wp_session', wpSession);
   }
+  const spSession = sanitizeRouteId(incoming.get('sp_session'));
+  if (spSession && route.page === 'checkout') {
+    out.set('sp_session', spSession);
+  }
+  const paymentStatus = incoming.get('payment_status');
+  if (paymentStatus && route.page === 'checkout') {
+    out.set('payment_status', paymentStatus);
+  }
+  const transactionId = sanitizeRouteId(incoming.get('transaction_id') || incoming.get('transactionId'));
+  if (transactionId && route.page === 'checkout') {
+    out.set('transaction_id', transactionId);
+  }
 
   switch (route.page) {
     case 'home':

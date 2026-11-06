@@ -16,6 +16,7 @@ import {
 } from 'firebase-admin/app';
 import { getAuth as getAdminAuth } from 'firebase-admin/auth';
 import { getMessaging as getAdminMessaging } from 'firebase-admin/messaging';
+import { getFirestore as getAdminFirestore, FieldValue } from 'firebase-admin/firestore';
 import {
   assertSafeExternalHttpsDestination,
   buildSecurityHeaders,
@@ -33,6 +34,16 @@ import {
 } from './src/lib/serverSecurity';
 import { validateImageMagicBytes } from './src/lib/marketplaceLogic';
 import { verifyWordPressWebhookRequest } from './src/lib/serverWebhookSecurity';
+import {
+  getSecurePayConfig,
+  requestSecurePayCreateApi,
+  requestSecurePayVerifyApi,
+  finalizeDealEscrowPaymentInFirestore,
+  storeSessionInMemory,
+  getSessionFromMemory,
+  type SecurePaySessionRecord,
+  SECUREPAY_SUPPORTED_METHODS,
+} from './src/server/securePayGatewayEngine';
 import { createAiAdminEngine } from './src/server/aiAdminEngine';
 import { createTrustSafetyEngine } from './src/server/trustSafetyEngine';
 import { registerMarketplaceManagementRoutes } from './src/server/marketplaceManagementRoutes';
@@ -3594,6 +3605,527 @@ Current system snapshot: ${typeof systemContext === 'string' ? systemContext.sli
       return false;
     }
   }
+
+  // ==========================================================================
+  // SECURE PAY BD — LIVE PAYMENT GATEWAY INTEGRATION ENDPOINTS
+  // Direct REST API integration (No WordPress / WooCommerce required)
+  // Supports: bKash, Nagad, Rocket, Upay, Visa, Mastercard, and BD Gateways
+  // ==========================================================================
+
+  // 1. Check Gateway Status and Supported Payment Methods
+  app.get(
+    '/api/payments/securepay/config',
+    makeRateLimitMiddleware('sp_config', diagnosticProbeLimiter),
+    async (_req, res) => {
+      res.setHeader('Cache-Control', 'no-store');
+      const spConfig = getSecurePayConfig();
+      return res.json({
+        ok: true,
+        provider: 'Secure Pay BD',
+        isConfigured: spConfig.isConfigured,
+        siteUrl: spConfig.siteUrl,
+        supportedMethods: spConfig.supportedMethods,
+      });
+    }
+  );
+
+  // 2. Create Live Payment Checkout Session
+  app.post(
+    '/api/payments/securepay/create-session',
+    makeRateLimitMiddleware('sp_create_session', paymentSessionLimiter),
+    async (req, res) => {
+      res.setHeader('Cache-Control', 'no-store');
+      try {
+        const cfg = loadVerifiedFirebaseConfig();
+        const caller = await verifyCallerFirebaseToken(req, cfg);
+        if (!caller) {
+          return res.status(401).json({
+            ok: false,
+            errorCode: 'unauthorized',
+            message: 'Sign in required to initiate live checkout.',
+          });
+        }
+
+        if (!consumeAuthenticatedUidLimit(req, res, 'sp_create_session', caller.uid, paymentSessionLimiter)) {
+          return;
+        }
+
+        const body = (req.body || {}) as Record<string, unknown>;
+        const mode = body.mode === 'accepted_bid_deal' ? 'accepted_bid_deal' : 'buy_now';
+        const listingId = String(body.listingId || '').trim();
+        const dealId = String(body.dealId || '').trim();
+
+        const adminApp = getOrInitFirebaseAdminApp(cfg.projectId);
+        const adminDb = getAdminFirestore(adminApp);
+
+        let targetDealId = dealId;
+        let targetListingId = listingId;
+        let verifiedTitle = 'BEXORA Digital Asset';
+        let verifiedPlatform = 'other';
+        let sellerId = '';
+        let sellerName = 'Seller';
+        let baseAmountMinor = 0;
+        let buyerFeePct = 0;
+        let sellerFeePct = 0;
+        let buyerFeeMinor = 0;
+        let sellerFeeMinor = 0;
+        let buyerTotalMinor = 0;
+        let sellerPayoutMinor = 0;
+        let platformCommissionMinor = 0;
+        let protectionDurationHours = 48;
+        let currency: 'BDT' | 'USD' = 'BDT';
+
+        if (mode === 'accepted_bid_deal') {
+          if (!/^[a-zA-Z0-9_-]{1,128}$/.test(dealId)) {
+            return res.status(400).json({ ok: false, errorCode: 'invalid_deal', message: 'Invalid deal ID.' });
+          }
+          const dealSnap = await adminDb.collection('deals').doc(dealId).get();
+          if (!dealSnap.exists) {
+            return res.status(404).json({ ok: false, errorCode: 'deal_not_found', message: 'Deal not found.' });
+          }
+          const dealData = dealSnap.data()!;
+          if (dealData.buyerId !== caller.uid) {
+            return res.status(403).json({ ok: false, errorCode: 'forbidden', message: 'Only the reserved buyer can fund this deal.' });
+          }
+          if (dealData.status !== 'accepted_pending_payment' && dealData.status !== 'awaiting_payment') {
+            return res.status(409).json({ ok: false, errorCode: 'already_paid', message: 'This deal is already funded or closed.' });
+          }
+          targetListingId = dealData.listingId;
+          verifiedTitle = dealData.listingTitle || 'BEXORA Escrow Deal';
+          verifiedPlatform = dealData.platform || 'other';
+          sellerId = dealData.sellerId;
+          sellerName = dealData.sellerName;
+          baseAmountMinor = Number(dealData.baseAmountMinor) || 0;
+          buyerFeePct = Number(dealData.buyerFeePct) || 0;
+          sellerFeePct = Number(dealData.sellerFeePct) || 0;
+          buyerFeeMinor = Number(dealData.buyerFeeMinor) || 0;
+          sellerFeeMinor = Number(dealData.sellerFeeMinor) || 0;
+          buyerTotalMinor = Number(dealData.buyerTotalMinor) || 0;
+          sellerPayoutMinor = Number(dealData.sellerPayoutMinor) || 0;
+          platformCommissionMinor = Number(dealData.platformCommissionMinor) || 0;
+          protectionDurationHours = Number(dealData.protectionDurationHours) || 48;
+          currency = dealData.currency === 'USD' ? 'USD' : 'BDT';
+        } else {
+          if (!/^[a-zA-Z0-9_-]{1,128}$/.test(listingId)) {
+            return res.status(400).json({ ok: false, errorCode: 'invalid_listing', message: 'Invalid listing ID.' });
+          }
+          const listingSnap = await adminDb.collection('listings').doc(listingId).get();
+          if (!listingSnap.exists) {
+            return res.status(404).json({ ok: false, errorCode: 'listing_not_found', message: 'Listing not found.' });
+          }
+          const listingData = listingSnap.data()!;
+          if (listingData.sellerId === caller.uid) {
+            return res.status(400).json({ ok: false, errorCode: 'self_purchase', message: 'Sellers cannot purchase their own listing.' });
+          }
+          if (listingData.status !== 'active') {
+            return res.status(409).json({ ok: false, errorCode: 'listing_unavailable', message: 'Listing is no longer active for Buy Now.' });
+          }
+
+          const savedSettings = await readPublicWordPressSettings(cfg);
+          targetDealId = `deal_${listingId}_${Date.now()}`.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 120);
+          verifiedTitle = listingData.title || 'BEXORA Digital Asset';
+          verifiedPlatform = listingData.platform || 'other';
+          sellerId = listingData.sellerId;
+          sellerName = listingData.sellerName;
+          baseAmountMinor = Number(listingData.priceMinor) || 0;
+          buyerFeePct = savedSettings.buyerFeeEnabled ? savedSettings.buyerFeePct : 0;
+          sellerFeePct = savedSettings.sellerFeeEnabled ? savedSettings.sellerFeePct : 0;
+          buyerFeeMinor = Math.round((baseAmountMinor * buyerFeePct) / 100);
+          sellerFeeMinor = Math.round((baseAmountMinor * sellerFeePct) / 100);
+          buyerTotalMinor = baseAmountMinor + buyerFeeMinor;
+          sellerPayoutMinor = Math.max(0, baseAmountMinor - sellerFeeMinor);
+          platformCommissionMinor = buyerFeeMinor + sellerFeeMinor;
+          currency = listingData.currency === 'USD' ? 'USD' : 'BDT';
+        }
+
+        if (buyerTotalMinor <= 0) {
+          return res.status(400).json({ ok: false, errorCode: 'invalid_amount', message: 'Order total must be greater than zero.' });
+        }
+
+        // Convert order currency to BDT if needed
+        const usdRate = 120; // Default exchange rate
+        const amountMinorBdt = currency === 'USD' ? Math.round(buyerTotalMinor * usdRate) : buyerTotalMinor;
+        const amountBdt = Number((amountMinorBdt / 100).toFixed(2));
+
+        const sessionId = `sp_session_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+        const appUrl = String(process.env.APP_URL || `${req.protocol}://${req.get('host') || 'localhost:3000'}`).replace(/\/+$/, '');
+
+        const returnUrl = `${appUrl}/?view=checkout&dealId=${encodeURIComponent(targetDealId)}&sp_session=${encodeURIComponent(sessionId)}`;
+        const webhookUrl = `${appUrl}/api/payments/securepay/webhook?session_id=${encodeURIComponent(sessionId)}`;
+
+        const sessionRecord: SecurePaySessionRecord = {
+          sessionId,
+          mode,
+          buyerUid: caller.uid,
+          buyerName: String(caller.email.split('@')[0] || 'Buyer').slice(0, 80),
+          buyerEmail: caller.email,
+          listingId: targetListingId,
+          dealId: targetDealId,
+          listingTitle: verifiedTitle,
+          amountMinorBdt,
+          amountBdt,
+          originalCurrency: currency,
+          originalAmountMinor: buyerTotalMinor,
+          status: 'created',
+          createdAtMs: Date.now(),
+          updatedAtMs: Date.now(),
+        };
+
+        storeSessionInMemory(sessionRecord);
+
+        // Also persist session details in Firestore collection paymentSessions
+        await adminDb.collection('paymentSessions').doc(sessionId).set({
+          ...sessionRecord,
+          sellerId,
+          sellerName,
+          platform: verifiedPlatform,
+          baseAmountMinor,
+          buyerFeePct,
+          sellerFeePct,
+          buyerFeeMinor,
+          sellerFeeMinor,
+          buyerTotalMinor,
+          sellerPayoutMinor,
+          platformCommissionMinor,
+          protectionDurationHours,
+          createdAt: FieldValue.serverTimestamp(),
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+
+        const spConfig = getSecurePayConfig();
+
+        if (!spConfig.isConfigured) {
+          // If in test or simulate mode, provide a mock sandbox payment URL
+          if (process.env.NODE_ENV === 'test' || String(req.query.simulate) === '1' || !process.env.NODE_ENV) {
+            const mockPaymentUrl = `${appUrl}/?view=checkout&dealId=${encodeURIComponent(targetDealId)}&sp_session=${encodeURIComponent(sessionId)}&mock_gateway=1`;
+            return res.json({
+              ok: true,
+              sessionId,
+              paymentUrl: mockPaymentUrl,
+              amountBdt,
+              isMock: true,
+              notice: 'Secure Pay BD API key not configured yet; simulated sandbox payment checkout URL generated.',
+            });
+          }
+
+          return res.status(409).json({
+            ok: false,
+            errorCode: 'gateway_credentials_missing',
+            message: 'Secure Pay BD API Key is not configured on this server. Please add SECUREPAY_API_KEY in your environment variables.',
+          });
+        }
+
+        // Call the official Secure Pay BD API POST /api/create
+        const createResult = await requestSecurePayCreateApi(
+          {
+            cus_name: sessionRecord.buyerName,
+            cus_email: sessionRecord.buyerEmail,
+            amount: amountBdt,
+            webhook_url: webhookUrl,
+            success_url: `${returnUrl}&payment_status=success`,
+            cancel_url: `${returnUrl}&payment_status=cancelled`,
+          },
+          spConfig
+        );
+
+        if (!createResult.ok || !createResult.paymentUrl) {
+          recordSecurityEvent({
+            type: 'webhook_rejected',
+            endpoint: '/api/payments/securepay/create-session',
+            actor: caller.uid,
+            summary: createResult.error || 'Failed to initiate Secure Pay BD checkout session.',
+          });
+          return res.status(502).json({
+            ok: false,
+            errorCode: 'gateway_error',
+            message: createResult.error || 'Secure Pay BD could not generate a checkout URL at this time.',
+          });
+        }
+
+        sessionRecord.paymentUrl = createResult.paymentUrl;
+        sessionRecord.status = 'pending';
+        storeSessionInMemory(sessionRecord);
+
+        return res.json({
+          ok: true,
+          sessionId,
+          paymentUrl: createResult.paymentUrl,
+          amountBdt,
+        });
+      } catch (err: unknown) {
+        return res.status(500).json({
+          ok: false,
+          errorCode: 'internal_error',
+          message: err instanceof Error ? err.message : 'Unexpected error initializing live payment.',
+        });
+      }
+    }
+  );
+
+  // 3. Verify Payment Status & Transition Escrow Deal
+  app.all(
+    '/api/payments/securepay/verify-session',
+    makeRateLimitMiddleware('sp_verify_session', paymentSessionLimiter),
+    async (req, res) => {
+      res.setHeader('Cache-Control', 'no-store');
+      try {
+        const cfg = loadVerifiedFirebaseConfig();
+        const sessionId = String(req.query.sessionId || req.body?.sessionId || '').trim();
+        let transactionId = String(req.query.transactionId || req.query.transaction_id || req.body?.transactionId || req.body?.transaction_id || '').trim();
+
+        if (!sessionId) {
+          return res.status(400).json({ ok: false, isPaid: false, message: 'Missing sessionId parameter.' });
+        }
+
+        const adminApp = getOrInitFirebaseAdminApp(cfg.projectId);
+        const adminDb = getAdminFirestore(adminApp);
+
+        // Fetch session record from memory or Firestore
+        let session = getSessionFromMemory(sessionId);
+        let sessionDocData: Record<string, unknown> | null = null;
+        if (!session) {
+          const docSnap = await adminDb.collection('paymentSessions').doc(sessionId).get();
+          if (docSnap.exists) {
+            sessionDocData = docSnap.data()!;
+            session = {
+              sessionId: docSnap.id,
+              mode: sessionDocData.mode as 'buy_now' | 'accepted_bid_deal',
+              buyerUid: String(sessionDocData.buyerUid || ''),
+              buyerName: String(sessionDocData.buyerName || 'Buyer'),
+              buyerEmail: String(sessionDocData.buyerEmail || ''),
+              listingId: String(sessionDocData.listingId || ''),
+              dealId: String(sessionDocData.dealId || ''),
+              listingTitle: String(sessionDocData.listingTitle || 'BEXORA Asset'),
+              amountMinorBdt: Number(sessionDocData.amountMinorBdt) || 0,
+              amountBdt: Number(sessionDocData.amountBdt) || 0,
+              originalCurrency: (sessionDocData.originalCurrency as 'BDT' | 'USD') || 'BDT',
+              originalAmountMinor: Number(sessionDocData.originalAmountMinor) || 0,
+              status: (sessionDocData.status as any) || 'pending',
+              transactionId: sessionDocData.transactionId ? String(sessionDocData.transactionId) : undefined,
+              createdAtMs: Number(sessionDocData.createdAtMs) || Date.now(),
+              updatedAtMs: Number(sessionDocData.updatedAtMs) || Date.now(),
+            };
+            storeSessionInMemory(session);
+          }
+        } else {
+          const docSnap = await adminDb.collection('paymentSessions').doc(sessionId).get();
+          if (docSnap.exists) sessionDocData = docSnap.data()!;
+        }
+
+        if (!session) {
+          return res.status(404).json({ ok: false, isPaid: false, message: 'Payment session not found.' });
+        }
+
+        // Idempotency: If session is already completed, return verified success
+        if (session.status === 'completed') {
+          return res.json({
+            ok: true,
+            isPaid: true,
+            dealId: session.dealId,
+            status: 'paid_deal_room_active',
+            message: 'Live payment already verified. Deal room is active.',
+          });
+        }
+
+        // Check if deal in Firestore is already funded
+        const dealSnap = await adminDb.collection('deals').doc(session.dealId).get();
+        if (dealSnap.exists) {
+          const dealStatus = dealSnap.data()?.status;
+          if (
+            dealStatus === 'paid_deal_room_active' ||
+            dealStatus === 'paid' ||
+            dealStatus === 'settled' ||
+            dealStatus === 'protection_active'
+          ) {
+            session.status = 'completed';
+            storeSessionInMemory(session);
+            return res.json({
+              ok: true,
+              isPaid: true,
+              dealId: session.dealId,
+              status: 'paid_deal_room_active',
+              message: 'Payment is confirmed. Deal room is active.',
+            });
+          }
+        }
+
+        const spConfig = getSecurePayConfig();
+
+        // If mock/sandbox simulation was requested or in test mode:
+        const isSimulate = req.query.mock_gateway === '1' || req.body?.mock_gateway === true || !spConfig.isConfigured;
+        let isVerified = false;
+
+        if (transactionId && spConfig.isConfigured) {
+          // Call official Verify API POST /api/verify with { transaction_id }
+          const verifyResult = await requestSecurePayVerifyApi(transactionId, spConfig);
+          if (verifyResult.ok && verifyResult.status === 'COMPLETED') {
+            isVerified = true;
+          }
+        } else if (isSimulate && (transactionId || req.query.payment_status === 'success')) {
+          transactionId = transactionId || `MOCK_TRX_${Date.now()}`;
+          isVerified = true;
+        }
+
+        if (!isVerified) {
+          return res.json({
+            ok: false,
+            isPaid: false,
+            dealId: session.dealId,
+            status: 'unverified',
+            message: 'Transaction has not been confirmed as COMPLETED by Secure Pay BD.',
+          });
+        }
+
+        // Atomically finalize deal in Firestore
+        const sellerId = String(sessionDocData?.sellerId || dealSnap.data()?.sellerId || '');
+        const sellerName = String(sessionDocData?.sellerName || dealSnap.data()?.sellerName || 'Seller');
+        const platform = String(sessionDocData?.platform || dealSnap.data()?.platform || 'other');
+        const baseAmountMinor = Number(sessionDocData?.baseAmountMinor || dealSnap.data()?.baseAmountMinor) || session.originalAmountMinor;
+        const buyerFeePct = Number(sessionDocData?.buyerFeePct || dealSnap.data()?.buyerFeePct) || 0;
+        const sellerFeePct = Number(sessionDocData?.sellerFeePct || dealSnap.data()?.sellerFeePct) || 0;
+        const buyerFeeMinor = Number(sessionDocData?.buyerFeeMinor || dealSnap.data()?.buyerFeeMinor) || 0;
+        const sellerFeeMinor = Number(sessionDocData?.sellerFeeMinor || dealSnap.data()?.sellerFeeMinor) || 0;
+        const buyerTotalMinor = Number(sessionDocData?.buyerTotalMinor || dealSnap.data()?.buyerTotalMinor) || session.originalAmountMinor;
+        const sellerPayoutMinor = Number(sessionDocData?.sellerPayoutMinor || dealSnap.data()?.sellerPayoutMinor) || baseAmountMinor;
+        const platformCommissionMinor = Number(sessionDocData?.platformCommissionMinor || dealSnap.data()?.platformCommissionMinor) || buyerFeeMinor;
+        const protectionDurationHours = Number(sessionDocData?.protectionDurationHours || dealSnap.data()?.protectionDurationHours) || 48;
+
+        const finalizeResult = await finalizeDealEscrowPaymentInFirestore(adminDb, {
+          dealId: session.dealId,
+          listingId: session.listingId,
+          buyerUid: session.buyerUid,
+          buyerName: session.buyerName,
+          sellerId,
+          sellerName,
+          listingTitle: session.listingTitle,
+          platform,
+          buyerTotalMinor,
+          currency: session.originalCurrency,
+          baseAmountMinor,
+          buyerFeeMinor,
+          buyerFeePct,
+          sellerFeeMinor,
+          sellerFeePct,
+          sellerPayoutMinor,
+          platformCommissionMinor,
+          protectionDurationHours,
+          transactionId,
+          gatewayProvider: 'Secure Pay BD (bKash/Nagad/Rocket/Upay)',
+        });
+
+        session.status = 'completed';
+        session.transactionId = transactionId;
+        session.verifiedAtMs = Date.now();
+        storeSessionInMemory(session);
+
+        await adminDb.collection('paymentSessions').doc(sessionId).update({
+          status: 'completed',
+          transactionId,
+          verifiedAtMs: Date.now(),
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+
+        return res.json({
+          ok: true,
+          isPaid: true,
+          dealId: session.dealId,
+          ledgerId: finalizeResult.ledgerId,
+          status: 'paid_deal_room_active',
+          message: 'Secure Pay BD payment successfully verified. Escrow Deal Room is active!',
+        });
+      } catch (err: unknown) {
+        return res.status(500).json({
+          ok: false,
+          isPaid: false,
+          message: err instanceof Error ? err.message : 'Error verifying payment session.',
+        });
+      }
+    }
+  );
+
+  // 4. Secure Pay BD Webhook Callback Endpoint
+  app.post(
+    '/api/payments/securepay/webhook',
+    makeRateLimitMiddleware('sp_webhook', webhookLimiter),
+    async (req, res) => {
+      res.setHeader('Cache-Control', 'no-store');
+      try {
+        const body = (req.body || {}) as Record<string, unknown>;
+        const query = req.query as Record<string, string>;
+
+        const transactionId = String(body.transactionId || body.transaction_id || query.transaction_id || query.transactionId || '').trim();
+        const sessionId = String(query.session_id || query.order_id || body.session_id || body.order_id || '').trim();
+
+        if (!transactionId && !sessionId) {
+          return res.status(400).json({ ok: false, message: 'Missing transaction or session identifier.' });
+        }
+
+        const cfg = loadVerifiedFirebaseConfig();
+        const adminApp = getOrInitFirebaseAdminApp(cfg.projectId);
+        const adminDb = getAdminFirestore(adminApp);
+        const spConfig = getSecurePayConfig();
+
+        if (transactionId && spConfig.isConfigured) {
+          const verifyResult = await requestSecurePayVerifyApi(transactionId, spConfig);
+          if (verifyResult.ok && verifyResult.status === 'COMPLETED') {
+            let session = sessionId ? getSessionFromMemory(sessionId) : undefined;
+            if (!session && sessionId) {
+              const snap = await adminDb.collection('paymentSessions').doc(sessionId).get();
+              if (snap.exists) {
+                const d = snap.data()!;
+                session = {
+                  sessionId: snap.id,
+                  mode: d.mode,
+                  buyerUid: d.buyerUid,
+                  buyerName: d.buyerName,
+                  buyerEmail: d.buyerEmail,
+                  listingId: d.listingId,
+                  dealId: d.dealId,
+                  listingTitle: d.listingTitle,
+                  amountMinorBdt: d.amountMinorBdt,
+                  amountBdt: d.amountBdt,
+                  originalCurrency: d.originalCurrency,
+                  originalAmountMinor: d.originalAmountMinor,
+                  status: d.status,
+                  createdAtMs: d.createdAtMs,
+                  updatedAtMs: d.updatedAtMs,
+                };
+              }
+            }
+
+            if (session) {
+              await finalizeDealEscrowPaymentInFirestore(adminDb, {
+                dealId: session.dealId,
+                listingId: session.listingId,
+                buyerUid: session.buyerUid,
+                buyerName: session.buyerName,
+                sellerId: '',
+                sellerName: '',
+                listingTitle: session.listingTitle,
+                platform: 'other',
+                buyerTotalMinor: session.originalAmountMinor,
+                currency: session.originalCurrency,
+                baseAmountMinor: session.originalAmountMinor,
+                buyerFeeMinor: 0,
+                buyerFeePct: 0,
+                sellerFeeMinor: 0,
+                sellerFeePct: 0,
+                sellerPayoutMinor: session.originalAmountMinor,
+                platformCommissionMinor: 0,
+                protectionDurationHours: 48,
+                transactionId,
+                gatewayProvider: 'Secure Pay BD (bKash/Nagad/Rocket/Upay)',
+              });
+            }
+          }
+        }
+
+        return res.json({ message: 'Webhook received and processed.' });
+      } catch {
+        return res.json({ message: 'Webhook received and processed.' });
+      }
+    }
+  );
 
   // 5A. Discover active WordPress payment methods (supports multi-gateway WordPress/WooCommerce plugins)
   app.get(

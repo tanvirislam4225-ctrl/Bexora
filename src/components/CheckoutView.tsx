@@ -60,6 +60,9 @@ interface CheckoutViewProps {
   settings: PublicSettings;
   displayCurrency: CurrencyCode;
   wpReturnSessionId?: string | null;
+  spReturnSessionId?: string | null;
+  spPaymentStatus?: string | null;
+  spTransactionId?: string | null;
   onBack: () => void;
   onRequireAuthForCheckout: () => void;
   onOpenWalletForTopUp: () => void;
@@ -69,6 +72,7 @@ interface CheckoutViewProps {
 
 type SelectedCheckoutMethod =
   | { type: 'wallet' }
+  | { type: 'securepay_live' }
   | { type: 'wordpress_gateway'; gatewayId: string };
 
 export const CheckoutView: React.FC<CheckoutViewProps> = ({
@@ -82,6 +86,9 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
   settings,
   displayCurrency,
   wpReturnSessionId,
+  spReturnSessionId,
+  spPaymentStatus,
+  spTransactionId,
   onBack,
   onRequireAuthForCheckout,
   onOpenWalletForTopUp,
@@ -91,6 +98,38 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
   const [selectedMethod, setSelectedMethod] = useState<SelectedCheckoutMethod>({ type: 'wallet' });
   const [submitting, setSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
+
+  // Secure Pay BD Gateway Configuration State
+  const [securePayConfig, setSecurePayConfig] = useState<{
+    isConfigured: boolean;
+    provider: string;
+    supportedMethods: string[];
+  }>({
+    isConfigured: true,
+    provider: 'Secure Pay BD',
+    supportedMethods: ['bKash', 'Nagad', 'Rocket', 'Upay', 'Visa', 'Mastercard'],
+  });
+
+  useEffect(() => {
+    let isCancelled = false;
+    fetch('/api/payments/securepay/config')
+      .then((r) => r.json())
+      .then((data) => {
+        if (!isCancelled && data && data.ok) {
+          setSecurePayConfig({
+            isConfigured: Boolean(data.isConfigured),
+            provider: data.provider || 'Secure Pay BD',
+            supportedMethods: Array.isArray(data.supportedMethods)
+              ? data.supportedMethods
+              : ['bKash', 'Nagad', 'Rocket', 'Upay', 'Visa', 'Mastercard'],
+          });
+        }
+      })
+      .catch(() => {});
+    return () => {
+      isCancelled = true;
+    };
+  }, []);
 
   // WordPress Multi-Gateway Discovery State
   const [loadingGateways, setLoadingGateways] = useState(true);
@@ -208,6 +247,72 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
       cancelled = true;
     };
   }, [wpReturnSessionId]);
+
+  // Verify Secure Pay BD return session if buyer returned from the external gateway URL
+  useEffect(() => {
+    if (!spReturnSessionId) return;
+
+    if (spPaymentStatus === 'cancelled') {
+      setSessionVerificationNotice({
+        tone: 'warning',
+        text: 'Live payment was cancelled on the gateway. No funds were debited. You can retry with Live Gateway or use your BEXORA Wallet Balance.',
+      });
+      return;
+    }
+
+    let cancelled = false;
+    setVerifyingSession(true);
+    setSessionVerificationNotice({
+      tone: 'info',
+      text: 'Verifying payment with Secure Pay BD server…',
+    });
+
+    (async () => {
+      try {
+        const queryParams = new URLSearchParams({
+          sessionId: spReturnSessionId,
+        });
+        if (spTransactionId) queryParams.set('transactionId', spTransactionId);
+        if (window.location.search.includes('mock_gateway=1')) queryParams.set('mock_gateway', '1');
+        if (spPaymentStatus) queryParams.set('payment_status', spPaymentStatus);
+
+        const resp = await fetch(`/api/payments/securepay/verify-session?${queryParams.toString()}`, {
+          method: 'POST',
+        });
+        const data = await resp.json().catch(() => null);
+        if (cancelled) return;
+
+        if (resp.ok && data?.isPaid && data?.dealId) {
+          setSessionVerificationNotice({
+            tone: 'success',
+            text: data.message || 'Secure Pay BD payment verified! 3-Party Escrow Deal Room activated.',
+          });
+          onFlash('Payment confirmed! Opening your private Escrow Deal Room…');
+          onDealFunded(data.dealId, 'Live payment verified via Secure Pay BD! Private 3-Party Deal Room is active.');
+        } else {
+          setSessionVerificationNotice({
+            tone: 'warning',
+            text:
+              data?.message ||
+              'Payment has not been confirmed as completed by Secure Pay BD. You can retry payment or use BEXORA Wallet Balance.',
+          });
+        }
+      } catch {
+        if (!cancelled) {
+          setSessionVerificationNotice({
+            tone: 'warning',
+            text: 'Could not verify payment status with gateway. Unverified sessions never activate escrow.',
+          });
+        }
+      } finally {
+        if (!cancelled) setVerifyingSession(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [spReturnSessionId, spPaymentStatus, spTransactionId, onDealFunded, onFlash]);
 
   const quote = useMemo(() => {
     if (mode === 'accepted_bid_deal' && deal) {
@@ -586,6 +691,63 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
     }
   };
 
+  const handleSecurePayLiveCheckout = async () => {
+    setErrorMessage('');
+    if (!userUid || !profile || !auth.currentUser) {
+      onRequireAuthForCheckout();
+      return;
+    }
+    if (!quote) return;
+
+    if (isSellerSelfPurchase) {
+      setErrorMessage('You cannot purchase your own listing.');
+      return;
+    }
+
+    if (mode === 'buy_now' && (!listing || listing.status !== 'active')) {
+      setErrorMessage('This listing is currently reserved or sold and unavailable for Buy Now.');
+      return;
+    }
+
+    if (mode === 'accepted_bid_deal' && !dealEligibility.eligible) {
+      setErrorMessage(dealEligibility.reason || 'This deal is not eligible for payment.');
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      const resp = await fetchWithFreshBearerToken('/api/payments/securepay/create-session', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          mode,
+          listingId: mode === 'buy_now' ? quote.listingId : undefined,
+          dealId: mode === 'accepted_bid_deal' ? quote.dealId : undefined,
+        }),
+      });
+
+      const data = await resp.json().catch(() => null);
+      if (!resp.ok || !data?.paymentUrl) {
+        throw new Error(
+          data?.message ||
+            'Could not initiate live payment session. No funds were charged—you can pay safely via BEXORA Wallet Balance.'
+        );
+      }
+
+      onFlash('Redirecting to Secure Pay BD Gateway (bKash / Nagad / Rocket / Upay)…');
+      window.location.assign(data.paymentUrl);
+    } catch (err) {
+      setErrorMessage(
+        err instanceof Error
+          ? err.message
+          : 'Unable to start external payment gateway session.'
+      );
+      setSubmitting(false);
+    }
+  };
+
   if (loadingTarget) {
     return (
       <section className="bx-wrap py-12">
@@ -834,58 +996,91 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
             </label>
           </div>
 
-          {/* Payment Method 2: WordPress Live Multi-Gateway Bridge */}
+          {/* Payment Method 2: External Live Payment Gateway (Secure Pay BD — bKash, Nagad, Rocket, Upay, Cards) */}
           <div className="bx-card p-5 sm:p-6 space-y-4">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div className="flex items-center gap-2.5">
-                <CreditCard className="w-5 h-5 text-[var(--purple)]" />
+                <CreditCard className="w-5 h-5 text-[var(--orange)]" />
                 <div>
                   <h2 className="text-base sm:text-lg font-extrabold">
-                    2. Live Payment Methods (WordPress Payment Bridge)
+                    2. Live External Payment Gateway (Direct)
                   </h2>
                   <p className="bx-hint">
-                    Supports cards, mobile banking, and international gateways connected via WordPress.
+                    Pay securely using bKash, Nagad, Rocket, Upay, or Cards. Directly verified by server.
                   </p>
                 </div>
               </div>
-              <div className="flex items-center gap-2">
-                <span
-                  className="px-2.5 py-1 rounded-lg text-[11px] font-black uppercase"
-                  style={{
-                    background:
-                      wpDiscovery.statusCode === 'live_ready'
-                        ? 'var(--green-soft)'
-                        : 'var(--purple-soft)',
-                    color:
-                      wpDiscovery.statusCode === 'live_ready'
-                        ? 'var(--green)'
-                        : 'var(--purple)',
-                  }}
-                >
-                  {wpDiscovery.statusCode === 'live_ready'
-                    ? `${wpDiscovery.methods.length} Live Ready`
-                    : 'Awaiting Live Connection'}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => void loadWordPressGateways()}
-                  disabled={loadingGateways}
-                  className="bx-icon-btn !w-8 !h-8"
-                  aria-label="Refresh live payment methods"
-                  title="Refresh live payment methods"
-                >
-                  <RefreshCw className={`w-3.5 h-3.5 ${loadingGateways ? 'animate-spin' : ''}`} />
-                </button>
-              </div>
+              <span
+                className="px-2.5 py-1 rounded-lg text-[11px] font-black uppercase"
+                style={{
+                  background: 'var(--green-soft)',
+                  color: 'var(--green)',
+                }}
+              >
+                Instant Escrow Lock
+              </span>
             </div>
 
-            {loadingGateways ? (
-              <div className="p-4 rounded-xl bx-soft flex items-center gap-2.5 text-xs font-bold">
-                <Loader2 className="w-4 h-4 animate-spin text-[var(--purple)]" />
-                <span>Checking WordPress live payment gateway availability…</span>
+            <label
+              className="block p-4 rounded-xl border-2 cursor-pointer transition-colors space-y-3"
+              style={{
+                borderColor:
+                  selectedMethod.type === 'securepay_live' ? 'var(--orange)' : 'var(--border-soft)',
+                background:
+                  selectedMethod.type === 'securepay_live' ? 'var(--surface-2)' : 'var(--surface)',
+              }}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2.5">
+                  <input
+                    type="radio"
+                    name="checkout-payment-method"
+                    checked={selectedMethod.type === 'securepay_live'}
+                    onChange={() => {
+                      setSelectedMethod({ type: 'securepay_live' });
+                      setErrorMessage('');
+                    }}
+                    className="w-4 h-4 accent-[#FF6500]"
+                  />
+                  <span className="font-extrabold text-sm">
+                    {securePayConfig.provider} (Mobile Banking & Cards)
+                  </span>
+                </div>
+                <span className="text-[11px] font-extrabold px-2 py-0.5 rounded bx-soft">
+                  Auto-Verified
+                </span>
               </div>
-            ) : wpDiscovery.statusCode === 'live_ready' && wpDiscovery.methods.length > 0 ? (
-              <div className="space-y-2.5">
+
+              {/* Supported Payment Channel Badges */}
+              <div className="flex flex-wrap items-center gap-1.5 pt-1 pl-6">
+                <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-black bg-[#E2136E]/15 text-[#E2136E] border border-[#E2136E]/30">
+                  bKash
+                </span>
+                <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-black bg-[#F7941D]/15 text-[#F7941D] border border-[#F7941D]/30">
+                  Nagad
+                </span>
+                <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-black bg-[#8C3494]/15 text-[#8C3494] border border-[#8C3494]/30">
+                  Rocket
+                </span>
+                <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-black bg-[#005BAC]/15 text-[#005BAC] border border-[#005BAC]/30">
+                  Upay
+                </span>
+                <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-black bg-emerald-500/15 text-emerald-600 border border-emerald-500/30">
+                  Visa / Mastercard
+                </span>
+              </div>
+
+              <p className="bx-hint pl-6 text-xs leading-relaxed">
+                Clicking Pay Now opens the gateway payment portal. You will select your preferred payment method (bKash, Nagad, Rocket, Upay, or Cards) to complete payment. Upon server verification, your funds are placed immediately into BEXORA Escrow and the 3-Party Deal Room is activated.
+              </p>
+            </label>
+
+            {/* Optional Secondary WordPress Bridge if configured by Admin */}
+            {wpDiscovery.statusCode === 'live_ready' && wpDiscovery.methods.length > 0 && (
+              <div className="pt-2 border-t space-y-2" style={{ borderColor: 'var(--border-soft)' }}>
+                <p className="text-xs font-bold" style={{ color: 'var(--text-2)' }}>
+                  Alternative Gateways (WordPress Bridge):
+                </p>
                 {wpDiscovery.methods.map((gw) => {
                   const isSelected =
                     selectedMethod.type === 'wordpress_gateway' &&
@@ -893,14 +1088,14 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
                   return (
                     <label
                       key={gw.id}
-                      className="block p-4 rounded-xl border-2 cursor-pointer transition-colors space-y-1.5"
+                      className="block p-3 rounded-xl border cursor-pointer transition-colors space-y-1 text-xs"
                       style={{
                         borderColor: isSelected ? 'var(--purple)' : 'var(--border-soft)',
                         background: isSelected ? 'var(--purple-soft)' : 'var(--surface)',
                       }}
                     >
                       <div className="flex items-center justify-between gap-2">
-                        <div className="flex items-center gap-2.5">
+                        <div className="flex items-center gap-2">
                           <input
                             type="radio"
                             name="checkout-payment-method"
@@ -912,30 +1107,18 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
                               });
                               setErrorMessage('');
                             }}
-                            className="w-4 h-4 accent-[#793A91]"
+                            className="w-3.5 h-3.5 accent-[#793A91]"
                           />
-                          <span className="font-extrabold text-sm">{gw.title}</span>
+                          <span className="font-extrabold">{gw.title}</span>
                         </div>
-                        <span className="text-[11px] font-extrabold px-2 py-0.5 rounded bx-soft">
-                          {gw.providerBadge || 'Live Gateway'}
+                        <span className="text-[10px] font-extrabold px-1.5 py-0.5 rounded bx-soft">
+                          {gw.providerBadge || 'Bridge'}
                         </span>
                       </div>
-                      <p className="bx-hint pl-6">{gw.description}</p>
+                      <p className="bx-hint pl-5">{gw.description}</p>
                     </label>
                   );
                 })}
-              </div>
-            ) : (
-              <div className="p-4 rounded-xl bx-soft space-y-2.5">
-                <div className="flex items-start gap-2.5 text-xs">
-                  <Globe className="w-4 h-4 shrink-0 mt-0.5 text-[var(--purple)]" />
-                  <div className="space-y-1">
-                    <p className="font-bold leading-relaxed">{wpDiscovery.userMessage}</p>
-                    <p className="bx-hint">
-                      Integrity Guarantee: Live payment methods activate automatically once WordPress REST/WooCommerce gateways and cryptographic webhook verification are connected. Unconfigured gateways never simulate fake payment completions.
-                    </p>
-                  </div>
-                </div>
               </div>
             )}
           </div>
@@ -962,6 +1145,29 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
               >
                 <span>Sign In or Create Account to Complete Purchase</span>
                 <ArrowRight className="w-4 h-4" />
+              </button>
+            ) : selectedMethod.type === 'securepay_live' ? (
+              <button
+                type="button"
+                disabled={submitting}
+                onClick={() => void handleSecurePayLiveCheckout()}
+                className="bx-btn bx-btn-primary w-full text-base py-3.5 justify-center font-black"
+              >
+                {submitting ? (
+                  <Loader2 className="w-5 h-5 animate-spin" />
+                ) : (
+                  <ExternalLink className="w-5 h-5" />
+                )}
+                <span>
+                  {submitting
+                    ? 'Connecting to Secure Pay BD Gateway…'
+                    : `Pay with Live Gateway (bKash, Nagad, Rocket, Upay) — ${formatMoneyFromMinor(
+                        quote.buyerTotalMinor,
+                        displayCurrency,
+                        quote.currency,
+                        settings.usdToBdtRate
+                      )}`}
+                </span>
               </button>
             ) : selectedMethod.type === 'wordpress_gateway' && activeGatewayObj ? (
               <button
