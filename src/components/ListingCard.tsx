@@ -20,6 +20,7 @@ interface ListingCardProps {
   isFavorited?: boolean;
   onToggleFavorite?: (l: MarketplaceListing) => void;
   className?: string;
+  style?: React.CSSProperties;
 }
 
 export const ListingCard: React.FC<ListingCardProps> = ({
@@ -31,6 +32,7 @@ export const ListingCard: React.FC<ListingCardProps> = ({
   isFavorited = false,
   onToggleFavorite,
   className,
+  style,
 }) => {
   const [imgFailed, setImgFailed] = useState(false);
   const platformDef = PLATFORM_CATALOG[listing.platform];
@@ -65,6 +67,7 @@ export const ListingCard: React.FC<ListingCardProps> = ({
   return (
     <article
       data-testid={`listing-card-${listing.id}`}
+      style={style}
       className={`bx-card w-full sm:max-w-[320px] rounded-[16px] sm:rounded-2xl overflow-hidden flex flex-col min-w-0 hover:-translate-y-0.5 transition-transform duration-150${
         className ? ` ${className}` : ''
       }`}

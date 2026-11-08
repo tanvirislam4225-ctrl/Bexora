@@ -80,7 +80,10 @@ import {
   syncProactiveRefreshWithCapabilities,
   testFirestoreConnection,
 } from './lib/firebase';
-import { shouldShowProtectedRouteLoading } from './lib/authDomainAndPersistenceLogic';
+import {
+  resolveNavbarAuthState,
+  shouldShowProtectedRouteLoading,
+} from './lib/authDomainAndPersistenceLogic';
 import {
   DEFAULT_PUBLIC_SETTINGS,
   getProtectionDurationHours,
@@ -2468,6 +2471,14 @@ export default function App() {
 
   const isAdmin = adminRole === 'admin' || adminRole === 'superadmin';
 
+  const navbarAuthStatus = resolveNavbarAuthState({
+    authReady,
+    signingOut,
+    hasFbUser: Boolean(fbUser),
+    hasProfile: Boolean(profile),
+    profileBootstrapped,
+  });
+
   return (
     <div className="min-h-screen w-full flex flex-col bg-[var(--bx-bg)] text-[var(--bx-text)] pb-16 md:pb-0">
       {/* Global Header */}
@@ -2482,6 +2493,7 @@ export default function App() {
         onChangeCurrency={setCurrency}
         userUid={fbUser?.uid ?? null}
         profile={profile}
+        authStatus={navbarAuthStatus}
         isAdmin={isAdmin}
         signingOut={signingOut}
         onOpenAuth={() => {
@@ -2977,7 +2989,24 @@ export default function App() {
                             onToggleFavorite={(l) => void handleToggleFavorite(l)}
                             className={
                               idx === 0
-                                ? 'md:!w-[325px] max-md:!w-full max-md:!max-w-none !rounded-[19px] !border-[6px] !text-[15px] !leading-[14px]'
+                                ? '!w-[313px] !h-[372.438px] !mb-0 !ml-[9px] !pl-[1px] !pt-0 !pb-0 !pr-0 !text-[10px] !leading-[10px] !text-left'
+                                : undefined
+                            }
+                            style={
+                              idx === 0
+                                ? {
+                                    width: '313px',
+                                    height: '372.438px',
+                                    marginBottom: '0px',
+                                    marginLeft: '9px',
+                                    paddingLeft: '1px',
+                                    paddingTop: '0px',
+                                    paddingBottom: '0px',
+                                    paddingRight: '0px',
+                                    fontSize: '10px',
+                                    lineHeight: '10px',
+                                    textAlign: 'left',
+                                  }
                                 : undefined
                             }
                           />

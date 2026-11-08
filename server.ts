@@ -2592,6 +2592,149 @@ async function startServer() {
     }
   });
 
+  // 2C. Admin-Triggered Mass Broadcast Web Push
+  app.post(
+    '/api/fcm/broadcast',
+    makeRateLimitMiddleware('fcm_broadcast', fcmDispatchLimiter),
+    async (req, res) => {
+      res.setHeader('Cache-Control', 'no-store');
+      try {
+        const cfg = loadVerifiedFirebaseConfig();
+        if (!cfg.configValid) {
+          return res.status(503).json({ ok: false, deliveryStatus: 'config_mismatch' });
+        }
+
+        const adminCaller = await verifyAdminCaller(req, cfg);
+        if (!adminCaller) {
+          recordSecurityEvent({
+            type: 'admin_denied',
+            endpoint: '/api/fcm/broadcast',
+            actor: getCallerClientKey(req),
+            summary: 'Non-admin caller blocked from mass push broadcast.',
+          });
+          return res.status(403).json({ ok: false, deliveryStatus: 'admin_required' });
+        }
+
+        const body = (req.body || {}) as Record<string, unknown>;
+        const rawTitle = redactSensitivePreviewServer(body.title || 'BEXORA Announcement').slice(0, 110);
+        const rawBody = redactSensitivePreviewServer(
+          body.body || body.preview || 'Open BEXORA to view official platform update.'
+        ).slice(0, 200);
+        const destination = sanitizeServerPushDestination(body.destination || 'marketplace');
+        const announcementId = String(body.announcementId || `ann_${Date.now()}`).slice(0, 96);
+        const severity = String(body.severity || 'info');
+
+        const cloudToken = await resolveServerCloudAccessToken();
+        if (!cloudToken) {
+          return res.json({
+            ok: false,
+            deliveryStatus: 'fcm_credentials_missing_retryable',
+            deliveredCount: 0,
+          });
+        }
+
+        const adminApp = getOrInitFirebaseAdminApp(cfg.projectId);
+        const adminMessaging = getAdminMessaging(adminApp);
+
+        const firestoreBaseUrl = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+          cfg.projectId
+        )}/databases/${encodeURIComponent(cfg.firestoreDatabaseId)}/documents`;
+
+        const profilesRes = await fetch(`${firestoreBaseUrl}/publicProfiles?pageSize=100`, {
+          headers: { Authorization: `Bearer ${cloudToken}` },
+        }).catch(() => null);
+
+        let userIds: string[] = [];
+        if (profilesRes && profilesRes.ok) {
+          const profilesJson = (await profilesRes.json()) as {
+            documents?: Array<{ name?: string }>;
+          };
+          userIds = (profilesJson.documents || [])
+            .map((d) => d.name?.split('/').pop() || '')
+            .filter((uid) => uid.length > 0);
+        }
+
+        let deliveredCount = 0;
+        let cleanedTokens = 0;
+
+        for (const uid of userIds) {
+          const tokensRes = await fetch(
+            `${firestoreBaseUrl}/privateUsers/${encodeURIComponent(uid)}/pushTokens`,
+            { headers: { Authorization: `Bearer ${cloudToken}` } }
+          ).catch(() => null);
+          if (!tokensRes || !tokensRes.ok) continue;
+
+          const tokensJson = (await tokensRes.json()) as {
+            documents?: Array<{ name?: string; fields?: Record<string, unknown> }>;
+          };
+          const docs = Array.isArray(tokensJson.documents) ? tokensJson.documents : [];
+
+          for (const tDoc of docs) {
+            const enabled = readFirestoreBooleanField(tDoc as Record<string, unknown>, 'enabled');
+            const fcmToken = readFirestoreStringField(tDoc as Record<string, unknown>, 'token');
+            if (!enabled || fcmToken.length < 20) continue;
+
+            try {
+              await adminMessaging.send({
+                token: fcmToken,
+                data: {
+                  notificationId: `ntf_bc_${announcementId}`,
+                  alertKind: severity === 'critical' ? 'critical_security' : 'normal',
+                  destination,
+                  title: rawTitle,
+                  body: rawBody,
+                  vibrationEnabled: severity === 'critical' ? 'true' : 'false',
+                  vibrationStrength: severity === 'critical' ? 'strong' : 'standard',
+                },
+                webpush: {
+                  headers: {
+                    Urgency: severity === 'critical' ? 'high' : 'normal',
+                    TTL: '86400',
+                  },
+                  fcmOptions: {
+                    link: destination ? `/?dest=${encodeURIComponent(destination)}` : '/',
+                  },
+                },
+              });
+              deliveredCount += 1;
+            } catch (err) {
+              const code =
+                err && typeof err === 'object' && 'code' in err
+                  ? String((err as { code?: unknown }).code || '')
+                  : '';
+              if (
+                code === 'messaging/registration-token-not-registered' ||
+                code === 'messaging/invalid-registration-token'
+              ) {
+                if (tDoc.name) {
+                  await fetch(`https://firestore.googleapis.com/v1/${tDoc.name}`, {
+                    method: 'DELETE',
+                    headers: { Authorization: `Bearer ${cloudToken}` },
+                  }).catch(() => {});
+                  cleanedTokens += 1;
+                }
+              }
+            }
+          }
+        }
+
+        return res.json({
+          ok: true,
+          deliveryStatus: 'broadcast_completed',
+          deliveredCount,
+          cleanedTokens,
+        });
+      } catch {
+        return res.json({
+          ok: false,
+          deliveryStatus: 'broadcast_error_non_blocking',
+          deliveredCount: 0,
+        });
+      }
+    }
+  );
+
+
   // 3. Server-Side AI Monetization Evidence Verification Pipeline (Authenticated Sellers & Admins; Emergency-Stop Enforced)
   app.post(
     '/api/ai/verify-evidence',

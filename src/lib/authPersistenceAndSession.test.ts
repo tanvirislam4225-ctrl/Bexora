@@ -9,6 +9,7 @@ import {
   resolveEffectiveFirebaseAuthDomain,
   shouldKeepProactiveTokenRefreshEnabled,
   shouldShowProtectedRouteLoading,
+  resolveNavbarAuthState,
   VERIFIED_FIRST_PARTY_AUTH_DOMAINS,
 } from './authDomainAndPersistenceLogic';
 import {
@@ -345,3 +346,90 @@ test('shouldShowProtectedRouteLoading waits for authReady and profile hydration 
     false
   );
 });
+
+test('resolveNavbarAuthState strictly enforces 3-state auth lifecycle and completely eliminates demo account flash', () => {
+  // State 1: INITIALIZING on boot before onAuthStateChanged fires (authReady === false)
+  // Must return 'initializing' so Navbar renders neutral skeleton — never 'User', never 'btn_login', never demo state
+  assert.equal(
+    resolveNavbarAuthState({
+      authReady: false,
+      signingOut: false,
+      hasFbUser: false,
+      hasProfile: false,
+      profileBootstrapped: false,
+    }),
+    'initializing'
+  );
+
+  // State 1 (Continued): Firebase restored user session u, but Firestore publicProfile is still loading
+  // Must STAY 'initializing' so Navbar NEVER flashes dummy 'User' or initials 'U'
+  assert.equal(
+    resolveNavbarAuthState({
+      authReady: true,
+      signingOut: false,
+      hasFbUser: true,
+      hasProfile: false,
+      profileBootstrapped: false,
+    }),
+    'initializing'
+  );
+
+  assert.equal(
+    resolveNavbarAuthState({
+      authReady: true,
+      signingOut: false,
+      hasFbUser: true,
+      hasProfile: false,
+      profileBootstrapped: true,
+    }),
+    'initializing'
+  );
+
+  assert.equal(
+    resolveNavbarAuthState({
+      authReady: true,
+      signingOut: false,
+      hasFbUser: true,
+      hasProfile: true,
+      profileBootstrapped: false,
+    }),
+    'initializing'
+  );
+
+  // State 2: AUTHENTICATED — Firebase user confirmed AND real profile document loaded
+  assert.equal(
+    resolveNavbarAuthState({
+      authReady: true,
+      signingOut: false,
+      hasFbUser: true,
+      hasProfile: true,
+      profileBootstrapped: true,
+    }),
+    'authenticated'
+  );
+
+  // State 3: UNAUTHENTICATED — Firebase confirms no user is logged in
+  assert.equal(
+    resolveNavbarAuthState({
+      authReady: true,
+      signingOut: false,
+      hasFbUser: false,
+      hasProfile: false,
+      profileBootstrapped: false,
+    }),
+    'unauthenticated'
+  );
+
+  // User explicitly signs out -> immediately unauthenticated
+  assert.equal(
+    resolveNavbarAuthState({
+      authReady: true,
+      signingOut: true,
+      hasFbUser: true,
+      hasProfile: true,
+      profileBootstrapped: true,
+    }),
+    'unauthenticated'
+  );
+});
+

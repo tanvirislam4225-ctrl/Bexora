@@ -409,6 +409,25 @@ export async function publishAdminNotification(
     }
   }
 
+  // Trigger fault-isolated server-side Web Push broadcast to all active device push tokens
+  currentUser.getIdToken().then((idToken) => {
+    fetch('/api/fcm/broadcast', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${idToken}`,
+      },
+      body: JSON.stringify({
+        announcementId,
+        title,
+        body,
+        preview,
+        destination,
+        severity: input.severity,
+      }),
+    }).catch(() => {});
+  }).catch(() => {});
+
   return { announcementId, deliveredCount };
 }
 

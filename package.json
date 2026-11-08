@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "tsx server.ts",
     "start": "tsx server.ts",
+    "start:render": "tsx render-server.ts",
     "build": "node scripts/generate-pwa-assets.mjs && node scripts/generate-notification-sounds.mjs && vite build && node scripts/build-infinityfree-zip.mjs",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",

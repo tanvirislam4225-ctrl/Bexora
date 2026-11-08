@@ -33,6 +33,7 @@ import {
   shouldAutoCloseDrawerOnViewportWidth,
   shouldLockBodyScrollForDrawer,
 } from '../lib/navigationAndProfileMenuLogic';
+import { type AuthStateLifecycle } from '../lib/authDomainAndPersistenceLogic';
 
 export type NavPage = FullScreenPage;
 
@@ -54,6 +55,7 @@ interface NavbarProps {
   onChangeCurrency: (c: CurrencyCode) => void;
   userUid: string | null;
   profile: PublicProfile | null;
+  authStatus?: AuthStateLifecycle;
   isAdmin: boolean;
   signingOut: boolean;
   onOpenAuth: () => void;
@@ -81,6 +83,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onChangeCurrency,
   userUid,
   profile,
+  authStatus,
   isAdmin,
   signingOut,
   onOpenAuth,
@@ -116,12 +119,19 @@ export const Navbar: React.FC<NavbarProps> = ({
     { id: 'deals', label: t(language, 'nav_deals'), icon: <ShieldCheck className="w-4 h-4 shrink-0" /> },
   ];
 
-  const initials = (profile?.displayName || 'User')
-    .split(' ')
-    .map((w) => w[0])
-    .slice(0, 2)
-    .join('')
-    .toUpperCase();
+  const effectiveAuthStatus: AuthStateLifecycle =
+    authStatus ?? (userUid ? 'authenticated' : 'unauthenticated');
+
+  const safeDisplayName = (profile?.displayName || profile?.username || '').trim();
+  const initials = safeDisplayName
+    ? safeDisplayName
+        .split(/\s+/)
+        .map((w) => w[0])
+        .slice(0, 2)
+        .join('')
+        .toUpperCase()
+    : 'ME';
+
 
   const profileMenuItems = buildProfileMenuActions({
     userUid,
@@ -329,7 +339,16 @@ export const Navbar: React.FC<NavbarProps> = ({
               {theme === 'light' ? <Moon className="w-5 h-5" /> : <Sun className="w-5 h-5" />}
             </button>
 
-            {userUid ? (
+            {effectiveAuthStatus === 'initializing' ? (
+              <div
+                data-testid="navbar-auth-initializing"
+                className="h-9 w-9 rounded-lg border-2 border-[var(--border-strong)] bg-[var(--surface-2)] flex items-center justify-center animate-pulse"
+                title="Loading session..."
+                aria-label="Loading authentication..."
+              >
+                <UserIcon className="w-4 h-4 text-[var(--text-3)] opacity-60" />
+              </div>
+            ) : effectiveAuthStatus === 'authenticated' && userUid ? (
               <>
                 <button
                   type="button"
@@ -363,7 +382,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                     aria-label="My Profile"
                     aria-haspopup="menu"
                     aria-expanded={profileMenuOpen}
-                    title={profile?.displayName || 'My Profile'}
+                    title={safeDisplayName || 'My Profile'}
                   >
                     <span>{initials}</span>
                     <ChevronDown
@@ -383,7 +402,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                       {/* Signed-in Identity Summary */}
                       <div className="px-3 py-2.5 border-b border-[var(--border-soft)] mb-1">
                         <div className="text-sm font-black truncate text-[var(--text)]">
-                          {profile?.displayName || 'BEXORA Member'}
+                          {safeDisplayName || 'Verified Member'}
                         </div>
                         {profile?.username && (
                           <div className="text-xs font-bold truncate text-[var(--text-2)]">
@@ -447,7 +466,13 @@ export const Navbar: React.FC<NavbarProps> = ({
                 </div>
               </>
             ) : (
-              <button type="button" onClick={onOpenAuth} className="bx-btn bx-btn-primary bx-btn-sm">
+              <button
+                type="button"
+                onClick={onOpenAuth}
+                className="bx-btn bx-btn-orange bx-btn-sm inline-flex items-center gap-1.5"
+                data-testid="navbar-login-btn"
+              >
+                <UserIcon className="w-4 h-4" />
                 <span>{t(language, 'btn_login')}</span>
               </button>
             )}
@@ -510,7 +535,15 @@ export const Navbar: React.FC<NavbarProps> = ({
                   );
                 })}
 
-                {userUid && (
+                {effectiveAuthStatus === 'initializing' ? (
+                  <div
+                    data-testid="drawer-auth-initializing"
+                    className="flex items-center gap-3 px-3.5 py-3 rounded-xl border-[1.5px] border-[var(--border-strong)] bg-[var(--surface-2)] animate-pulse"
+                  >
+                    <UserIcon className="w-4 h-4 text-[var(--text-3)] opacity-60" />
+                    <div className="h-4 w-28 bg-[var(--border-soft)] rounded" />
+                  </div>
+                ) : effectiveAuthStatus === 'authenticated' && userUid ? (
                   <button
                     type="button"
                     onClick={() => {
@@ -526,7 +559,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                     <UserIcon className="w-4 h-4 shrink-0" />
                     <span>{t(language, 'nav_profile')}</span>
                   </button>
-                )}
+                ) : null}
 
                 {isAdmin && (
                   <button
@@ -612,7 +645,20 @@ export const Navbar: React.FC<NavbarProps> = ({
                   </button>
                 )}
 
-                {userUid && (
+                {effectiveAuthStatus === 'unauthenticated' ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDrawerOpen(false);
+                      onOpenAuth();
+                    }}
+                    className="bx-btn bx-btn-orange w-full shrink-0 flex items-center justify-center gap-2"
+                    data-testid="drawer-login-btn"
+                  >
+                    <UserIcon className="w-4 h-4 shrink-0" />
+                    <span>{t(language, 'btn_login')}</span>
+                  </button>
+                ) : effectiveAuthStatus === 'authenticated' && userUid ? (
                   <button
                     type="button"
                     disabled={signingOut}
@@ -620,12 +666,13 @@ export const Navbar: React.FC<NavbarProps> = ({
                       setDrawerOpen(false);
                       await onLogout();
                     }}
-                    className="bx-btn bx-btn-danger w-full shrink-0"
+                    className="bx-btn bx-btn-danger w-full shrink-0 flex items-center justify-center gap-2"
+                    data-testid="drawer-logout-btn"
                   >
                     <LogOut className="w-4 h-4 shrink-0" />
                     <span>{signingOut ? 'Signing out…' : 'Logout'}</span>
                   </button>
-                )}
+                ) : null}
               </div>
             </div>
           </div>

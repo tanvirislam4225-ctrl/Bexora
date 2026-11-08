@@ -320,3 +320,37 @@ export function shouldShowProtectedRouteLoading(input: ProtectedRouteHydrationIn
   }
   return false;
 }
+
+export type AuthStateLifecycle = 'initializing' | 'authenticated' | 'unauthenticated';
+
+export interface ResolveNavbarAuthStateInput {
+  authReady: boolean;
+  signingOut: boolean;
+  hasFbUser: boolean;
+  hasProfile: boolean;
+  profileBootstrapped: boolean;
+}
+
+/**
+ * Clean 3-state auth lifecycle policy for Navbar & global navigation:
+ * - 'initializing': Firebase is determining auth state, or authenticated UID exists but profile snapshot is hydrating.
+ *   Shows a neutral loading skeleton icon. Zero demo name, fake initials, or placeholder user.
+ * - 'authenticated': Firebase confirms user is signed in AND real profile is loaded. Displays real initials/avatar, username, and actual balance.
+ * - 'unauthenticated': Firebase confirms no user is logged in. Displays Login / Register button.
+ */
+export function resolveNavbarAuthState(input: ResolveNavbarAuthStateInput): AuthStateLifecycle {
+  if (input.signingOut) {
+    return 'unauthenticated';
+  }
+  if (!input.authReady) {
+    return 'initializing';
+  }
+  if (!input.hasFbUser) {
+    return 'unauthenticated';
+  }
+  if (!input.hasProfile || !input.profileBootstrapped) {
+    return 'initializing';
+  }
+  return 'authenticated';
+}
+
