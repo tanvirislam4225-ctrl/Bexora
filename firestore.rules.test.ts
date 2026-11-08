@@ -1,0 +1,286 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+
+const rules = fs.readFileSync('firestore.rules', 'utf8');
+
+test('Firestore Rules: enforces default-deny catch-all at root and zero blanket allow true', () => {
+  assert.match(rules, /match\s+\/\{document=\*\*\}\s*\{\s*allow\s+read,\s*write:\s*if\s+false;\s*\}/);
+  assert.doesNotMatch(rules, /allow\s+read,\s*write:\s*if\s+true/);
+});
+
+test('Firestore Rules: bootstrapped superadmin checks email_verified == true to block email spoofing', () => {
+  assert.match(rules, /request\.auth\.token\.email_verified\s*==\s*true/);
+  assert.match(rules, /request\.auth\.token\.email\s*==\s*'tanvirislam7574@gmail\.com'/);
+});
+
+test('Firestore Rules: isolates PII in privateUsers and identityVerifications to owner or admin, and enforces token verification on emailVerified', () => {
+  assert.match(rules, /match\s+\/privateUsers\/\{userId\}[\s\S]*?request\.auth\.uid\s*==\s*userId\s*\|\|\s*isAdmin\(\)/);
+  assert.match(rules, /match\s+\/identityVerifications\/\{userId\}[\s\S]*?request\.auth\.uid\s*==\s*userId\s*\|\|\s*isAdmin\(\)/);
+  assert.match(rules, /incoming\(\)\.emailVerified\s*==\s*true\s*&&\s*request\.auth\.token\.email_verified\s*==\s*true/);
+});
+
+test('Firestore Rules: bids require active listing, non-self buyer, and buyer-only pending withdrawal preserving history', () => {
+  assert.match(rules, /get\(\/databases\/\$\(database\)\/documents\/listings\/\$\(incoming\(\)\.listingId\)\)\.data\.status\s*==\s*'active'/);
+  assert.match(rules, /existing\(\)\.buyerId\s*==\s*request\.auth\.uid[\s\S]*?incoming\(\)\.status\s*==\s*'withdrawn'/);
+  assert.match(rules, /match\s+\/bids\/\{bidId\}[\s\S]*?allow\s+delete:\s*if\s+false;/);
+});
+
+test('Firestore Rules: locks originalDeadlineMs immutably once set on deals', () => {
+  assert.match(
+    rules,
+    /existing\(\)\.originalDeadlineMs\s*==\s*0\s*\|\|\s*incoming\(\)\.originalDeadlineMs\s*==\s*existing\(\)\.originalDeadlineMs/
+  );
+});
+
+test('Firestore Rules: auditLogs and walletLedger are strictly append-only (no update or delete)', () => {
+  assert.match(rules, /match\s+\/walletLedger\/\{entryId\}[\s\S]*?allow\s+update,\s*delete:\s*if\s+false;/);
+  assert.match(rules, /match\s+\/auditLogs\/\{logId\}[\s\S]*?allow\s+update,\s*delete:\s*if\s+false;/);
+});
+
+test('Firestore Rules: notifications enforce recipient-scoped reads, verified counterparty writes, mark-read-only updates, and forbid delete', () => {
+  assert.match(rules, /match\s+\/notifications\/\{notificationId\}/);
+  assert.match(rules, /resource\.data\.recipientId\s*==\s*request\.auth\.uid/);
+  assert.match(rules, /incoming\(\)\.diff\(existing\(\)\)\.affectedKeys\(\)\.hasOnly\(\['read',\s*'readAt',\s*'updatedAt'\]\)/);
+  assert.match(rules, /existing\(\)\.read\s*==\s*false\s*&&\s*incoming\(\)\.read\s*==\s*true/);
+  assert.match(rules, /match\s+\/notifications\/\{notificationId\}[\s\S]*?allow\s+delete:\s*if\s+false;/);
+});
+
+test('Firestore Rules: pushTokens are strictly owner-only with parent Master Gate and announcements require isAdmin() to write', () => {
+  assert.match(rules, /match\s+\/pushTokens\/\{tokenId\}[\s\S]*?request\.auth\.uid\s*==\s*userId/);
+  assert.match(rules, /exists\(\/databases\/\$\(database\)\/documents\/privateUsers\/\$\(userId\)\)/);
+  assert.match(rules, /match\s+\/announcements\/\{announcementId\}[\s\S]*?allow\s+create:\s*if\s+isAdmin\(\)/);
+});
+
+test('Storage Rules: enforces default-deny catch-all and scopes nid_documents, listing_evidence, and deal_media to owner or superadmin only', () => {
+  const storageRules = fs.readFileSync('storage.rules', 'utf8');
+  assert.match(storageRules, /match\s+\/\{allPaths=\*\*\}\s*\{\s*allow\s+read,\s*write:\s*if\s+false;\s*\}/);
+  assert.doesNotMatch(storageRules, /allow\s+read:\s*if\s+isSignedIn\(\)\s*;/);
+  assert.match(
+    storageRules,
+    /match\s+\/deal_media\/\{dealId\}\/\{userId\}\/\{fileName\}[\s\S]*?allow\s+read:\s*if\s+isSignedIn\(\)[\s\S]*?\(request\.auth\.uid\s*==\s*userId\s*\|\|\s*isBootstrappedSuperAdmin\(\)\)/
+  );
+});
+
+test('Firestore Rules: reserved listings remain visible and accepted_pending_payment bids enforce exact deal baseAmountMinor', () => {
+  assert.match(rules, /resource\.data\.status\s+in\s+\['active',\s*'reserved'\]/);
+  assert.match(rules, /accepted_pending_payment/);
+  assert.match(
+    rules,
+    /getAfter\(\/databases\/\$\(database\)\/documents\/deals\/\$\(incoming\(\)\.dealId\)\)\.data\.baseAmountMinor\s*==\s*existing\(\)\.amountMinor/
+  );
+});
+
+test('Firestore Rules: 3-party deal room transfers enforce 2-3 screenshots, server-clock-bounded timer start, and ledger idempotency for pay/refund/release', () => {
+  assert.match(rules, /data\.screenshots\.size\(\)\s*>=\s*2\s*&&\s*data\.screenshots\.size\(\)\s*<=\s*3/);
+  assert.match(rules, /incoming\(\)\.confirmedAtMs\s*>=\s*request\.time\.toMillis\(\)\s*-\s*300000/);
+  assert.match(rules, /led_pay_/);
+  assert.match(rules, /led_refund_/);
+  assert.match(rules, /led_release_/);
+});
+
+test('Firestore Rules: validates notificationPrefs sound catalog & vibrationStrength enums, blocks private VAPID keys on publicConfig, and gates deal_room_created alertKind behind funded deals', () => {
+  assert.match(rules, /function\s+isValidNotificationPrefs\(prefs\)/);
+  assert.match(rules, /'01_soft_normal',\s*'02_crisp_normal',\s*'03_premium_deal',\s*'04_urgent_deal'/);
+  assert.match(rules, /prefs\.vibrationStrength\s+in\s+\['standard',\s*'strong'\]/);
+  assert.match(rules, /data\.fcmVapidPublicKey\.matches\('\^\$\|\^\[A-Za-z0-9_\\\\-\]\{84,92\}\$'\)/);
+  assert.match(rules, /incoming\(\)\.alertKind\s*!=\s*'deal_room_created'/);
+  assert.match(rules, /'paid_deal_room_active'/);
+});
+
+test('Firestore Rules: validates non-secret WordPress payment bridge fields with strict HTTPS regex and blocks secret keys in publicConfig', () => {
+  assert.match(rules, /data\.wordpressSiteUrl\.matches\('\^\$\|\^https:\/\/\[A-Za-z0-9\.\\\\-\/:_\]\+\$'\)/);
+  assert.match(rules, /data\.wordpressBridgeEndpoint\.matches\('\^\/\[A-Za-z0-9_\/\\\\-\]\+\$'\)/);
+  assert.doesNotMatch(rules, /wordpressWebhookSecret/);
+  assert.doesNotMatch(rules, /wordpressConsumerSecret/);
+});
+
+test('Firestore Rules: locks suspended listings from seller self-unsuspending, resets verifiedOptions on seller edit, allows clean NID resubmission, and enforces HTTPS branding logoUrl', () => {
+  assert.match(
+    rules,
+    /data\.status\s+in\s+\['draft',\s*'pending',\s*'active',\s*'reserved',\s*'sold',\s*'rejected',\s*'suspended',\s*'archived'\]/
+  );
+  assert.match(
+    rules,
+    /existing\(\)\.status\s+in\s+\['draft',\s*'pending',\s*'active',\s*'rejected',\s*'archived'\][\s\S]*?incoming\(\)\.verifiedOptions\.size\(\)\s*==\s*0/
+  );
+  assert.match(rules, /!?\('rejectionReason'\s+in\s+incoming\(\)\)\s*&&\s*!\('reviewedBy'\s+in\s+incoming\(\)\)/);
+  assert.match(rules, /data\.logoUrl\.matches\('\^\$\|\^\\\\\.\/icon\\\\\.svg\$\|\^https:\/\/\[A-Za-z0-9\.\\\\-\/:_\?=&%\]\+\$'\)/);
+});
+
+test('Firestore Rules: enforces owner-private favorites, non-self atomic sellerFollows with followerCount sync, and admin-only firstPublishedAtMs', () => {
+  // Favorites strictly owner-private with deterministic ID
+  assert.match(rules, /match\s+\/favorites\/\{favoriteId\}/);
+  assert.match(rules, /allow\s+list:\s*if\s+isSignedIn\(\)\s*&&\s*resource\.data\.userId\s*==\s*request\.auth\.uid;/);
+  assert.match(rules, /favoriteId\s*==\s*\('fav_'\s*\+\s*request\.auth\.uid\s*\+\s*'_'\s*\+\s*incoming\(\)\.listingId\)/);
+
+  // SellerFollows prevents self-follow and enforces Pillar-7 existsAfter / getAfter followerCount sync
+  assert.match(rules, /match\s+\/sellerFollows\/\{followId\}/);
+  assert.match(rules, /data\.followerId\s*!=\s*data\.sellerId/);
+  assert.match(rules, /followId\s*==\s*\('fol_'\s*\+\s*request\.auth\.uid\s*\+\s*'_'\s*\+\s*incoming\(\)\.sellerId\)/);
+  assert.match(rules, /existsAfter\(\/databases\/\$\(database\)\/documents\/sellerFollows\/\$\('fol_'\s*\+\s*request\.auth\.uid\s*\+\s*'_'\s*\+\s*userId\)\)/);
+  assert.match(rules, /getAfter\(\/databases\/\$\(database\)\/documents\/publicProfiles\/\$\(incoming\(\)\.sellerId\)\)\.data\.followerCount/);
+
+  // Sellers cannot spoof firstPublishedAtMs on listing creation; notificationPrefs validates optional category toggles
+  assert.match(rules, /!\('firstPublishedAtMs'\s+in\s+incoming\(\)\)/);
+  assert.match(rules, /followedSellerListingsEnabled/);
+  assert.match(rules, /bidUpdatesEnabled/);
+});
+
+test('Firestore Rules: locks aiAuditReports, aiConversations, messages subcollection, and aiSystemConfig strictly to isAdmin() with immutability and Master Gate', () => {
+  // Immutable admin-only audit reports
+  assert.match(rules, /match\s+\/aiAuditReports\/\{reportId\}[\s\S]*?allow\s+get:\s*if\s+isAdmin\(\)/);
+  assert.match(rules, /match\s+\/aiAuditReports\/\{reportId\}[\s\S]*?allow\s+update,\s*delete:\s*if\s+false;/);
+  assert.match(rules, /data\.trigger\s+in\s+\['manual',\s*'scheduled_daily'\]/);
+
+  // Admin-only conversations + subcollection parent Master Gate
+  assert.match(rules, /match\s+\/aiConversations\/\{conversationId\}[\s\S]*?allow\s+create:\s*if\s+isAdmin\(\)/);
+  assert.match(rules, /exists\(\/databases\/\$\(database\)\/documents\/aiConversations\/\$\(conversationId\)\)/);
+  assert.match(rules, /match\s+\/messages\/\{messageId\}[\s\S]*?allow\s+update,\s*delete:\s*if\s+false;/);
+
+  // Admin-only daily schedule bounded hour/minute
+  assert.match(rules, /match\s+\/aiSystemConfig\/\{configId\}[\s\S]*?configId\s*==\s*'dailySchedule'/);
+  assert.match(rules, /data\.hour\s*>=\s*0\s*&&\s*data\.hour\s*<=\s*23/);
+  assert.match(rules, /data\.minute\s*>=\s*0\s*&&\s*data\.minute\s*<=\s*59/);
+});
+
+test('Firestore & Storage Rules Security Hardening: enforces atomic wallet debit on deal payment, configured fee math, withdrawal reservation, single-review rating sync, and forbids storage deletes', () => {
+  // 1. Atomic wallet deduction & configured platform fee math on Buy Now & Accepted-Bid funding
+  assert.match(rules, /function\s+hasVerifiedBuyerWalletDebit\(buyerUid,\s*orderTotalMinor,\s*orderCurrency\)/);
+  assert.match(rules, /let\s+debitMinor\s*=\s*beforePriv\.walletBalanceMinor\s*-\s*afterPriv\.walletBalanceMinor/);
+  assert.match(rules, /afterPriv\.walletBalanceMinor\s*>=\s*0/);
+  assert.match(rules, /function\s+matchesConfiguredFees\(data\)/);
+
+  // 2. Atomic withdrawal balance debit + reservedBalanceMinor increment + paired walletLedger guard
+  assert.match(rules, /led_wd_/);
+  assert.match(rules, /reservedBalanceMinor/);
+  assert.match(rules, /existsAfter\(\/databases\/\$\(database\)\/documents\/withdrawals\/\$\(incoming\(\)\.referenceId\)\)/);
+
+  // 3. Anti-manipulation seller rating sync tied to deterministic review rev_{lastReviewDealId}
+  assert.match(rules, /request\.auth\.uid\s*!=\s*userId/);
+  assert.match(rules, /lastReviewDealId/);
+  assert.match(rules, /reviewId\s*==\s*\('rev_'\s*\+\s*incoming\(\)\.dealId\)/);
+
+  // 4. Hardened Storage rules forbid evidence/NID/deal_media deletion and enforce safe path segments
+  const storageRules = fs.readFileSync('storage.rules', 'utf8');
+  assert.match(storageRules, /function\s+isSafePathSegment\(segment\)/);
+  assert.match(storageRules, /allow\s+delete:\s*if\s+false;/);
+});
+
+test('Firestore Rules: enforces HTTPS/raster/audio URI allowlists across all media arrays and prevents buyer/seller/admin role spoofing in chat & Deal Rooms', () => {
+  // Safe URI & media scheme helpers block javascript:, data:image/svg+xml, data:text/html, and http:
+  assert.match(rules, /function\s+isSafeHttpsOrEmptyUrl\(u,\s*maxLen\)/);
+  assert.match(rules, /function\s+isSafeImageOrHttpsNonEmpty\(s,\s*minLen,\s*maxLen\)/);
+  assert.match(rules, /function\s+isSafeChatMedia\(s,\s*maxLen\)/);
+  assert.match(rules, /isSafeHttpsOrEmptyUrl\(data\.accountUrl,\s*300\)/);
+  assert.match(rules, /isSafeImageOrHttpsNonEmpty\(data\.images\[4\],\s*12,\s*250000\)/);
+  assert.match(rules, /isSafeImageOrHttpsNonEmpty\(data\.evidenceImages\[4\],\s*12,\s*250000\)/);
+  assert.match(rules, /isSafeImageOrHttpsNonEmpty\(data\.screenshots\[2\],\s*30,\s*300000\)/);
+
+  // Anti-role-impersonation in conversations & deals subcollections
+  assert.match(
+    rules,
+    /incoming\(\)\.senderRole\s*==\s*'buyer'\s*&&\s*request\.auth\.uid\s*==\s*get\(\/databases\/\$\(database\)\/documents\/deals\/\$\(dealId\)\)\.data\.buyerId/
+  );
+  assert.match(
+    rules,
+    /incoming\(\)\.reporterRole\s*==\s*'buyer'\s*&&\s*request\.auth\.uid\s*==\s*get\(\/databases\/\$\(database\)\/documents\/deals\/\$\(dealId\)\)\.data\.buyerId/
+  );
+  assert.match(
+    rules,
+    /incoming\(\)\.actorRole\s*==\s*'buyer'\s*&&\s*request\.auth\.uid\s*==\s*get\(\/databases\/\$\(database\)\/documents\/deals\/\$\(dealId\)\)\.data\.buyerId/
+  );
+  assert.match(rules, /incoming\(\)\.actorRole\s+in\s+\['admin',\s*'system'\]\s*&&\s*isAdmin\(\)/);
+});
+
+test('Firestore Rules: enforces PII-free admin-only publicActivity projections, owner-only recentSearches with Master Gate, and verified 1x reviewReports', () => {
+  // 1. PublicActivity rejects PII/IDs via strict schema & restricts writes strictly to isAdmin()
+  assert.match(rules, /function\s+isValidPublicActivity\(data\)/);
+  assert.match(rules, /match\s+\/publicActivity\/\{activityId\}[\s\S]*?allow\s+create:\s*if\s+isAdmin\(\)/);
+  assert.doesNotMatch(
+    rules.slice(
+      rules.indexOf('function isValidPublicActivity'),
+      rules.indexOf('function isValidReviewReport')
+    ),
+    /payoutAccount|senderNumber|frontImageData|dealId|withdrawalId/
+  );
+
+  // 2. Owner-private recentSearches with parent privateUsers Master Gate and 0-lookup list rule
+  assert.match(rules, /function\s+isValidRecentSearch\(data,\s*uid\)/);
+  assert.match(rules, /match\s+\/recentSearches\/\{searchId\}[\s\S]*?request\.auth\.uid\s*==\s*userId/);
+
+  // 3. PublicProfile privacy opt-out toggle & Review abuse reports
+  assert.match(rules, /hidePublicActivityName/);
+  assert.match(rules, /function\s+isValidReviewReport\(data\)/);
+  assert.match(
+    rules,
+    /reportId\s*==\s*\('rrep_'\s*\+\s*incoming\(\)\.reviewId\s*\+\s*'_'\s*\+\s*request\.auth\.uid\)/
+  );
+  assert.match(rules, /moderationStatus/);
+});
+
+test('Firestore Rules: enforces Trust & Safety restrictions, blocks self-unban, locks paused conversations until Admin resume, hides reporter identity, and protects moderationAuditLogs', () => {
+  // 1. userRestrictions cannot be created/updated/deleted by users (no self-unban or strike tampering)
+  assert.match(rules, /match\s+\/userRestrictions\/\{userId\}[\s\S]*?allow\s+create:\s*if\s+isAdmin\(\)/);
+  assert.match(rules, /match\s+\/userRestrictions\/\{userId\}[\s\S]*?allow\s+update:\s*if\s+isAdmin\(\)/);
+  assert.match(rules, /match\s+\/userRestrictions\/\{userId\}[\s\S]*?allow\s+delete:\s*if\s+false;/);
+
+  // 2. Suspended or restricted users are blocked at Firestore rules layer across listings, bids, deals, chats, reviews, and withdrawals
+  assert.match(rules, /function\s+isUserModerationSuspended\(uid\)/);
+  assert.match(rules, /function\s+hasActiveRestrictionFlag\(uid,\s*flagKey\)/);
+  assert.match(rules, /!hasActiveRestrictionFlag\(request\.auth\.uid,\s*'restrictListings'\)/);
+  assert.match(rules, /!hasActiveRestrictionFlag\(request\.auth\.uid,\s*'restrictWithdrawals'\)/);
+  assert.match(rules, /!hasActiveRestrictionFlag\(request\.auth\.uid,\s*'financialHoldActive'\)/);
+
+  // 3. One-way conversation & deal room moderationPaused lock: participants can pause -> true, only isAdmin() can resume -> false
+  assert.match(rules, /incoming\(\)\.moderationPaused\s*==\s*true/);
+  assert.match(
+    rules,
+    /!\('moderationPaused'\s+in\s+get\(\/databases\/\$\(database\)\/documents\/conversations\/\$\(convId\)\)\.data\)\s*\|\|\s*get\(\/databases\/\$\(database\)\/documents\/conversations\/\$\(convId\)\)\.data\.moderationPaused\s*!=\s*true/
+  );
+
+  // 4. Reporter identity privacy & immutable moderationAuditLogs
+  assert.match(
+    rules,
+    /match\s+\/userReports\/\{reportId\}[\s\S]*?resource\.data\.reporterId\s*==\s*request\.auth\.uid\s*\|\|\s*isAdmin\(\)/
+  );
+  assert.match(rules, /match\s+\/moderationAuditLogs\/\{logId\}[\s\S]*?allow\s+update,\s*delete:\s*if\s+false;/);
+});
+
+test('Firestore Rules: enforces 10-image gallery validation, OTP phoneVerified reset on unverified phone edit, safe seller listing delete, immutable revisions, and SuperAdmin bannedIdentities', () => {
+  // 1. 10-image gallery size cap & element validation up to index 9
+  assert.match(rules, /data\.images\s+is\s+list\s*&&\s*data\.images\.size\(\)\s*<=\s*10/);
+  assert.match(rules, /isSafeImageOrHttpsNonEmpty\(data\.images\[9\],\s*12,\s*250000\)/);
+
+  // 2. Phone verification anti-bypass: changing phone requires phoneVerified == false unless Auth token phone_number matches incoming().phone
+  assert.match(rules, /phoneCountryCode/);
+  assert.match(
+    rules,
+    /incoming\(\)\.phoneVerified\s*==\s*existing\(\)\.phoneVerified\s*&&\s*incoming\(\)\.phone\s*==\s*existing\(\)\.phone/
+  );
+  assert.match(rules, /request\.auth\.token\.phone_number\s*==\s*incoming\(\)\.phone/);
+
+  // 3. Seller safe listing delete blocks reserved/sold/suspended and activeDealId
+  assert.match(
+    rules,
+    /allow\s+delete:\s*if\s+isSignedIn\(\)\s*&&\s*isValidId\(listingId\)[\s\S]*?existing\(\)\.sellerId\s*==\s*request\.auth\.uid[\s\S]*?existing\(\)\.status\s+in\s+\['draft',\s*'pending',\s*'active',\s*'rejected',\s*'archived'\][\s\S]*?!\('activeDealId'\s+in\s+existing\(\)/
+  );
+
+  // 4. Immutable listing revisions subcollection with Master Gate & 0-lookup list rule
+  assert.match(rules, /function\s+isValidListingRevision\(data,\s*listingId\)/);
+  assert.match(rules, /match\s+\/revisions\/\{revisionId\}[\s\S]*?allow\s+update,\s*delete:\s*if\s+false;/);
+
+  // 5. SuperAdmin-only bannedIdentities
+  assert.match(rules, /match\s+\/bannedIdentities\/\{banId\}[\s\S]*?allow\s+get:\s*if\s+isSuperAdmin\(\)/);
+
+  // 6. OTP-free phoneFormatValidated boolean allowed on privateUsers while keeping phoneVerified strictly gated, plus verified conversation counterparty notifications
+  assert.match(rules, /!\('phoneFormatValidated'\s+in\s+data\)\s*\|\|\s*data\.phoneFormatValidated\s+is\s+bool/);
+  assert.match(rules, /incoming\(\)\.refType\s*==\s*'conversation'/);
+  assert.match(
+    rules,
+    /exists\(\/databases\/\$\(database\)\/documents\/conversations\/\$\(incoming\(\)\.refId\)\)/
+  );
+});
+
+
+
