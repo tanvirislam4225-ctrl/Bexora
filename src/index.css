@@ -146,7 +146,7 @@ button {
 
 .bx-wrap-wide {
   width: 100%;
-  max-width: 1440px;
+  max-width: 1560px;
   margin: 0 auto;
   padding-left: 16px;
   padding-right: 16px;
@@ -429,35 +429,63 @@ button {
 }
 
 /* ============================= COMPACT BOUNDED LISTING GRIDS ============================= */
-/* Mobile: Strictly ONE card per row (360px-767px), 100% width, 20px vertical spacing */
+/* Mobile (< 600px): Strictly ONE card per row, 100% width, 16px vertical spacing */
 .bx-listing-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: 20px;
+  gap: 16px;
   width: 100%;
   align-items: stretch;
 }
 
-/* Tablet (768px - 1023px): Approved 2-column balanced grid */
-@media (min-width: 768px) {
+/* Narrow Tablet (600px - 767px): 2 balanced columns */
+@media (min-width: 600px) {
   .bx-listing-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 16px;
-    justify-content: start;
   }
 }
 
-/* Desktop (1024px+): Approved multi-column grid */
+/* Standard Tablet (768px - 899px): 2 balanced columns with 20px gap */
+@media (min-width: 768px) {
+  .bx-listing-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 20px;
+  }
+}
+
+/* Wider Tablet Landscape (900px - 1023px, sidebar collapsed): 3 balanced columns */
+@media (min-width: 900px) {
+  .bx-listing-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 20px;
+  }
+}
+
+/* Desktop with sidebar (1024px - 1279px): 2 balanced flexible columns (~325px each) */
 @media (min-width: 1024px) {
   .bx-listing-grid {
-    grid-template-columns: repeat(auto-fill, minmax(270px, 320px));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 20px;
-    justify-content: start;
+  }
+}
+
+/* Standard Desktop with sidebar (1280px - 1499px): 3 balanced flexible columns (~295px-330px each) */
+@media (min-width: 1280px) {
+  .bx-listing-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 20px;
+  }
+}
+
+/* Large Desktop (1500px+): 4 balanced flexible columns (~285px each) */
+@media (min-width: 1500px) {
+  .bx-listing-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 20px;
   }
 }
 }
-
-
 
 @keyframes bx-ticker-scroll {
   0% {

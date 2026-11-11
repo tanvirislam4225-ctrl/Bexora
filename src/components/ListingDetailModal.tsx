@@ -446,13 +446,41 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
 
       if (createdBidId) {
         const formattedBid = formatMoneyFromMinor(amountMinor, listing.currency, listing.currency);
+        const prevHighestActiveBid = activeBids.length > 0 ? activeBids[0] : null;
+        const outbidJobs: Promise<unknown>[] = [];
+
+        if (
+          prevHighestActiveBid &&
+          prevHighestActiveBid.buyerId &&
+          prevHighestActiveBid.buyerId !== userUid &&
+          amountMinor > prevHighestActiveBid.amountMinor
+        ) {
+          outbidJobs.push(
+            emitUserNotification({
+              recipientId: prevHighestActiveBid.buyerId,
+              eventKey: `outbid_${listing.id}_${createdBidId}`,
+              category: 'bid',
+              severity: 'warning',
+              alertKind: 'important',
+              title: 'You Have Been Outbid',
+              preview: `A new higher bid of ${formattedBid} was placed on "${listing.title}".`,
+              body: `A new higher bid of ${formattedBid} was placed on "${listing.title}". Place a new bid to regain the top spot.`,
+              refType: 'listing',
+              refId: listing.id,
+              referenceLabel: listing.title.slice(0, 80),
+              destination: `listing:${listing.id}`,
+            })
+          );
+        }
+
         await Promise.all([
           emitUserNotification({
             recipientId: listing.sellerId,
             eventKey: `new_bid_seller_${createdBidId}`,
             category: 'bid',
             severity: 'info',
-            title: `New Bid: ${formattedBid}`,
+            alertKind: 'important',
+            title: 'New Bid Received!',
             preview: `${profile.displayName} placed a ${formattedBid} bid on "${listing.title}".`,
             body: `${profile.displayName} (@${profile.username}) placed a new bid of ${formattedBid} on your listing "${listing.title}". Open the listing to accept or reject this offer.`,
             refType: 'listing',
@@ -473,6 +501,7 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
             referenceLabel: listing.title.slice(0, 80),
             destination: `listing:${listing.id}`,
           }),
+          ...outbidJobs,
         ]);
       }
 
@@ -585,9 +614,10 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
           recipientId: bid.buyerId,
           eventKey: `bid_accepted_buyer_${dealId}`,
           category: 'deal',
-          severity: 'success',
-          title: `Bid Accepted (${acceptedFmt}) — Pay ${totalPayableFmt} in Deal Room`,
-          preview: `Seller accepted your ${acceptedFmt} bid on "${listing.title}". Listing is reserved for you.`,
+          severity: 'warning',
+          alertKind: 'important',
+          title: `Bid Accepted! Action Required — Complete Escrow Payment`,
+          preview: `Seller accepted your ${acceptedFmt} bid on "${listing.title}". Complete payment (${totalPayableFmt}) to activate your Deal Room.`,
           body: `${listing.sellerName} accepted your exact ${acceptedFmt} bid on "${listing.title}"! With the ${bidFinancials.buyerFeePct}% buyer fee, your total escrow payment is ${totalPayableFmt}. Open Deal #${dealId.slice(0, 10)} to complete wallet payment and activate the 3-party Deal Room.`,
           refType: 'deal',
           refId: dealId,

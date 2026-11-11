@@ -2977,7 +2977,7 @@ export default function App() {
                         data-testid="home-latest-listings-grid"
                         className="bx-listing-grid"
                       >
-                        {activeListings.slice(0, 8).map((item, idx) => (
+                        {activeListings.slice(0, 8).map((item) => (
                           <ListingCard
                             key={item.id}
                             listing={item}
@@ -2987,28 +2987,6 @@ export default function App() {
                             onOpenSellerProfile={handleOpenPublicProfile}
                             isFavorited={favoriteListingIds.has(item.id)}
                             onToggleFavorite={(l) => void handleToggleFavorite(l)}
-                            className={
-                              idx === 0
-                                ? '!w-[313px] !h-[372.438px] !mb-0 !ml-[9px] !pl-[1px] !pt-0 !pb-0 !pr-0 !text-[10px] !leading-[10px] !text-left'
-                                : undefined
-                            }
-                            style={
-                              idx === 0
-                                ? {
-                                    width: '313px',
-                                    height: '372.438px',
-                                    marginBottom: '0px',
-                                    marginLeft: '9px',
-                                    paddingLeft: '1px',
-                                    paddingTop: '0px',
-                                    paddingBottom: '0px',
-                                    paddingRight: '0px',
-                                    fontSize: '10px',
-                                    lineHeight: '10px',
-                                    textAlign: 'left',
-                                  }
-                                : undefined
-                            }
                           />
                         ))}
                       </div>
@@ -3192,7 +3170,7 @@ export default function App() {
                         data-testid="marketplace-listings-grid"
                         className="bx-listing-grid"
                       >
-                        {filteredMarketplaceListings.map((item, idx) => (
+                        {filteredMarketplaceListings.map((item) => (
                           <ListingCard
                             key={item.id}
                             listing={item}
@@ -3202,11 +3180,6 @@ export default function App() {
                             onOpenSellerProfile={handleOpenPublicProfile}
                             isFavorited={favoriteListingIds.has(item.id)}
                             onToggleFavorite={(l) => void handleToggleFavorite(l)}
-                            className={
-                              idx === 0
-                                ? 'md:!w-[320px] md:!h-[299.438px] md:!ml-[10px] max-md:!w-full max-md:!h-auto max-md:!ml-0 max-md:!max-w-none !mt-0 !rounded-[14px] !border-[1px] !text-[10px] !leading-[10px] !font-bold !text-left'
-                                : undefined
-                            }
                           />
                         ))}
                       </div>

@@ -187,6 +187,7 @@ export const BidActionConfirmModal: React.FC<BidActionConfirmModalProps> = ({
             eventKey: `bid_rejected_buyer_${bid.id}`,
             category: 'bid',
             severity: 'warning',
+            alertKind: 'important',
             title: SELLER_REJECT_BID_COPY.buyerNotificationTitle,
             preview: `${SELLER_REJECT_BID_COPY.buyerNotificationBody} (${exactOfferFmt} on "${listingTitle}")`,
             body: `${SELLER_REJECT_BID_COPY.buyerNotificationBody} Asset: "${listingTitle}" · Offer: ${exactOfferFmt}. If the listing remains active, you may submit a new offer anytime.`,

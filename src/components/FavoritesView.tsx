@@ -268,8 +268,8 @@ export const FavoritesView: React.FC<FavoritesViewProps> = ({
                   <div>
                     {/* Media Banner */}
                     <div
-                      className="relative aspect-[4/3] w-full overflow-hidden flex items-center justify-center"
-                      style={{ background: PLATFORM_BANNER_BG[item.platform] }}
+                      className="relative aspect-[16/9] w-full overflow-hidden flex items-center justify-center"
+                      style={{ background: hasImg ? 'transparent' : PLATFORM_BANNER_BG[item.platform] }}
                     >
                       {hasImg ? (
                         <img

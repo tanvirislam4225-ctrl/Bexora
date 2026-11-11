@@ -329,17 +329,68 @@ test('detectBrowserPushEnvironment accurately flags iOS Safari vs installed Home
   assert.equal(insecureHttp.isSecureContext, false);
 });
 
-test('resolveNotificationAlertKind classifies deal_room_created, admin critical alerts, and normal updates', () => {
+test('resolveNotificationAlertKind classifies Level 3 deal_room_created, Level 2 important, admin critical, and normal updates', () => {
+  // Level 3 Premium Deal Alerts
   assert.equal(
     resolveNotificationAlertKind({
       alertKind: 'deal_room_created',
       category: 'deal',
       severity: 'success',
       actorRole: 'user',
-      title: 'New Deal Room Created',
+      title: 'Congratulations! Your Listing Has Been Purchased',
     }),
     'deal_room_created'
   );
+  assert.equal(
+    resolveNotificationAlertKind({
+      category: 'deal',
+      severity: 'success',
+      actorRole: 'user',
+      title: 'Payment Successful!',
+    }),
+    'deal_room_created'
+  );
+  assert.equal(
+    resolveNotificationAlertKind({
+      category: 'deal',
+      severity: 'info',
+      actorRole: 'system',
+      title: 'New Marketplace Deal Created',
+    }),
+    'deal_room_created'
+  );
+
+  // Level 2 Important Alerts (Bids, Outbid, Action Required)
+  assert.equal(
+    resolveNotificationAlertKind({
+      alertKind: 'important',
+      category: 'bid',
+      severity: 'info',
+      actorRole: 'user',
+      title: 'New Bid Received!',
+    }),
+    'important'
+  );
+  assert.equal(
+    resolveNotificationAlertKind({
+      category: 'bid',
+      severity: 'warning',
+      actorRole: 'user',
+      title: 'You Have Been Outbid',
+    }),
+    'important'
+  );
+  assert.equal(
+    resolveNotificationAlertKind({
+      category: 'deal',
+      severity: 'warning',
+      actorRole: 'user',
+      title: 'Bid Accepted! Action Required — Complete Escrow Payment',
+    }),
+    'important'
+  );
+
+  // Admin Critical Alert
   assert.equal(
     resolveNotificationAlertKind({
       category: 'security',
@@ -349,12 +400,14 @@ test('resolveNotificationAlertKind classifies deal_room_created, admin critical 
     }),
     'admin_alert'
   );
+
+  // Level 1 Normal Routine Update
   assert.equal(
     resolveNotificationAlertKind({
-      category: 'bid',
+      category: 'account',
       severity: 'info',
       actorRole: 'user',
-      title: 'New Bid Placed',
+      title: 'Profile Updated',
     }),
     'normal'
   );

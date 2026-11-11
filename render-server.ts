@@ -511,7 +511,7 @@ app.post(
             },
             webpush: {
               headers: {
-                Urgency: alertKind === 'deal_room_created' ? 'high' : 'normal',
+                Urgency: alertKind === 'deal_room_created' || alertKind === 'important' ? 'high' : 'normal',
                 TTL: '86400',
               },
               fcmOptions: {

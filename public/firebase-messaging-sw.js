@@ -87,28 +87,43 @@ messaging.onBackgroundMessage((payload) => {
   }
 
   const data = (payload && payload.data) || {};
-  const alertKind = data.alertKind === 'deal_room_created' ? 'deal_room_created' : 'normal';
+  let alertKind = 'normal';
+  if (data.alertKind === 'deal_room_created' || data.alertKind === 'level_3_premium') {
+    alertKind = 'deal_room_created';
+  } else if (data.alertKind === 'important' || data.alertKind === 'level_2_important') {
+    alertKind = 'important';
+  }
+
   const destination = sanitizeSwDestination(data.destination || '');
   const notificationId = String(data.notificationId || data.tag || 'bexora-alert').slice(0, 96);
 
   const notificationTitle =
     data.title ||
-    (alertKind === 'deal_room_created' ? 'New Deal Room Created' : 'BEXORA Notification');
+    (alertKind === 'deal_room_created'
+      ? 'Congratulations! Your Listing Has Been Purchased'
+      : alertKind === 'important'
+      ? 'New Bid Received!'
+      : 'BEXORA Notification');
 
   const notificationBody =
     data.body ||
     data.preview ||
     (alertKind === 'deal_room_created'
-      ? 'Payment confirmed in BEXORA Escrow. Tap to open your private 3-party Deal Room.'
+      ? 'A buyer has successfully paid. Your new deal is ready.'
+      : alertKind === 'important'
+      ? 'A new bid has been placed on your BEXORA listing.'
       : 'Open BEXORA to view your latest marketplace update.');
+
+  const isLevel3 = alertKind === 'deal_room_created';
+  const isLevel2 = alertKind === 'important';
 
   const notificationOptions = {
     body: String(notificationBody).slice(0, 200),
     icon: '/icon-192.png',
     badge: '/favicon-32x32.png',
     tag: notificationId,
-    renotify: alertKind === 'deal_room_created',
-    requireInteraction: alertKind === 'deal_room_created',
+    renotify: isLevel3 || isLevel2,
+    requireInteraction: isLevel3,
     data: {
       destination,
       notificationId,
@@ -116,10 +131,14 @@ messaging.onBackgroundMessage((payload) => {
     },
   };
 
-  // Trigger deal-room tactile vibration pattern on supported mobile OS/browsers (Strong default: [260, 90, 320, 90, 260])
-  if (alertKind === 'deal_room_created' && data.vibrationEnabled !== 'false') {
-    notificationOptions.vibrate =
-      data.vibrationStrength === 'standard' ? [180, 90, 240] : [260, 90, 320, 90, 260];
+  // Tactile vibration patterns: Level 2 = [180, 90, 240], Level 3 = [260, 90, 320, 90, 260]
+  if (data.vibrationEnabled !== 'false') {
+    if (isLevel3) {
+      notificationOptions.vibrate =
+        data.vibrationStrength === 'standard' ? [180, 90, 240] : [260, 90, 320, 90, 260];
+    } else if (isLevel2) {
+      notificationOptions.vibrate = [180, 90, 240];
+    }
   }
 
   return self.registration.showNotification(String(notificationTitle).slice(0, 120), notificationOptions);

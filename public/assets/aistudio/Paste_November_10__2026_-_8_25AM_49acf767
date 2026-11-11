@@ -1,0 +1,863 @@
+# BEXORA — ADVANCED GLOBAL PUSH NOTIFICATION ENGINE
+## COMPLETE USER-TO-USER, OFFLINE DELIVERY, REAL-TIME EVENTS, PRIORITY SOUND, VIBRATION AND MULTI-DEVICE NOTIFICATION SYSTEM
+
+### EXECUTION AUTHORITY
+
+You are working on my existing BEXORA digital marketplace.
+
+You have been granted authorized access to my Google AI Studio project, Firebase project, Firebase Authentication, Firestore, Firebase Cloud Messaging, Google Cloud project, and other connected resources.
+
+I am not a programmer.
+
+I do not want a tutorial, suggestions, sample code, or a list of steps for me to perform.
+
+I want you to inspect the existing application, understand its actual architecture, make the necessary code changes, configure the available Firebase and Google Cloud services, deploy the required backend components where authorized, and test the complete system.
+
+Do not stop after explaining what needs to be done.
+
+Do not ask me to manually implement code.
+
+Do not ask me to configure something that you can configure yourself using the authorized access already available to you.
+
+If a specific action is technically impossible with the current permissions or infrastructure, identify the exact blocker and complete every other possible part.
+
+Do not fabricate successful deployment or testing results.
+
+---
+
+# 1. MY EXACT REQUIREMENT — UNDERSTAND THIS FIRST
+
+BEXORA must have a professional, device-level push notification system.
+
+This is NOT merely an in-website notification bell.
+
+This is NOT merely an in-app notification list.
+
+This is NOT a notification system that works only while the user is browsing BEXORA.
+
+I want notifications to reach the actual recipient's registered phone, tablet, or computer through the operating system's notification system.
+
+The notification should appear in the device notification area, home-screen notification area, or lock screen according to the device and operating-system settings.
+
+It should work when:
+
+- BEXORA is open.
+- BEXORA is running in another browser tab.
+- BEXORA is in the background.
+- The browser tab is closed.
+- The user is using another application.
+- The phone screen is locked.
+- The computer is not currently displaying BEXORA.
+- The recipient is temporarily offline and reconnects later, subject to push-service delivery limits.
+
+The recipient must not need to keep the BEXORA website open.
+
+The recipient must not need to be actively browsing the marketplace.
+
+The notification system must identify the correct recipient from the actual BEXORA event.
+
+## Most important example
+
+Suppose User A sends a private message to User B.
+
+The system must:
+
+1. Identify User B as the recipient.
+2. Find User B's registered notification-enabled devices.
+3. Send a push notification to those devices.
+4. Display the notification outside the BEXORA webpage.
+5. Include a suitable notification sound where supported.
+6. Open the correct conversation when the notification is tapped.
+7. Avoid exposing private message content unnecessarily on a locked screen.
+
+This must work even if User B is not currently viewing BEXORA.
+
+The same architecture must work for bids, purchases, payments, deals, reports, and other important marketplace events.
+
+---
+
+# 2. COMPLETE EXISTING PROJECT AUDIT
+
+Before implementation, inspect the actual project.
+
+Analyze:
+
+- Authentication architecture.
+- Firebase Auth.
+- Firestore database.
+- Existing notification collection.
+- Existing notification bell.
+- Deal chat.
+- Private messaging.
+- Listing creation.
+- Listing ownership.
+- Bidding.
+- Buy Now.
+- Payment processing.
+- Deal creation.
+- Buyer and seller roles.
+- Admin roles.
+- Superadmin permissions.
+- Wallet and escrow.
+- Existing Cloud Functions.
+- Existing server APIs.
+- Firebase Messaging configuration.
+- Existing service workers.
+- PWA configuration.
+- Production hosting.
+- Existing event handlers and database triggers.
+
+Identify why the previous notification implementation did not meet my requirements.
+
+Do not create a separate notification system disconnected from the real marketplace.
+
+Do not replace existing business logic.
+
+Integrate the notification engine directly into the existing BEXORA event architecture.
+
+Preserve all existing data, users, listings, deals, payment records, and wallet balances.
+
+---
+
+# 3. BUILD A CENTRALIZED NOTIFICATION ENGINE
+
+Create one centralized, production-grade notification engine.
+
+Every relevant BEXORA event must be able to generate a notification through this engine.
+
+The architecture should have:
+
+1. Business Event Detection.
+2. Event Validation.
+3. Recipient Identification.
+4. Recipient Device Lookup.
+5. Notification Priority Classification.
+6. Notification Payload Generation.
+7. Server-Side Push Dispatch.
+8. Offline Delivery Handling.
+9. Delivery Error Handling.
+10. Notification History.
+11. Duplicate Prevention.
+12. Notification Click Routing.
+13. Device Token Management.
+
+All notification generation must originate from trusted backend events.
+
+Do not depend on a frontend button click as proof that an event actually occurred.
+
+For example, a bid notification must only be sent after the bid is successfully saved.
+
+A payment notification must only be sent after the payment has been verified.
+
+A deal notification must only be sent after the deal has actually been created.
+
+---
+
+# 4. USER-TO-USER PRIVATE MESSAGE PUSH NOTIFICATIONS
+
+This is one of the highest-priority features.
+
+When User A sends a message to User B:
+
+- Detect the successful message creation.
+- Identify the actual sender UID.
+- Identify the actual recipient UID.
+- Retrieve the recipient's eligible notification devices.
+- Send a push notification to the recipient's registered devices.
+- Display the sender's name or permitted display identity.
+- Show a concise message preview only if the recipient's privacy settings allow it.
+- Include a conversation destination.
+- Ensure the notification is delivered independently of whether the recipient is browsing BEXORA.
+
+Example notification:
+
+Title: New message from Tanvir
+
+Body: You have received a new message.
+
+When tapped, open the exact conversation.
+
+## Important rules
+
+- Never send a notification to the sender's own devices for their own message.
+- Never send duplicate notifications for one message.
+- Never send private messages to unrelated users.
+- Never expose private conversation data to unauthorized recipients.
+- Do not send a notification if the message was not successfully committed.
+- Handle multiple devices belonging to the same recipient.
+- Respect the user's mute/block settings if such functionality exists.
+- Support notification preferences for chat messages.
+- Keep the existing in-app chat functional.
+
+For group conversations, notify eligible members except the sender, subject to their notification preferences.
+
+---
+
+# 5. SPECIAL BID NOTIFICATION SYSTEM
+
+When a user publishes a listing and another user places a valid bid:
+
+The listing owner must receive a special bid notification.
+
+Example:
+
+Title: New Bid Received!
+
+Body: Someone has placed a new bid on your listing.
+
+The notification must:
+
+- Reach the listing owner's registered devices.
+- Work while the owner is offline.
+- Display outside the BEXORA website.
+- Use a special high-importance notification category.
+- Use a distinct notification sound where the platform supports it.
+- Use vibration where supported and permitted.
+- Open the exact listing or bidding section when tapped.
+
+Other bid-related events must also be supported:
+
+- Bid accepted.
+- Bid rejected.
+- Bid cancelled.
+- Seller response.
+- Outbid notification where applicable.
+
+Do not notify the wrong listing owner.
+
+Do not notify the bidder about their own bid as if it were a received bid.
+
+Do not send notifications for failed or rejected database writes.
+
+---
+
+# 6. PREMIUM BUY NOW / SUCCESSFUL PAYMENT / DEAL CREATION NOTIFICATION
+
+This is a critical event.
+
+Example:
+
+User A owns a listing.
+
+User B purchases the listing and successfully completes payment.
+
+BEXORA automatically creates the associated deal involving:
+
+- Buyer.
+- Seller.
+- Admin or authorized deal-management participants, according to the existing deal architecture.
+
+Immediately after the successful verified payment and successful deal creation, the system must send appropriate notifications.
+
+## Seller notification — Highest business priority
+
+The seller must receive a premium purchase notification.
+
+Example:
+
+Title: Congratulations! Your Listing Has Been Purchased
+
+Body: A buyer has successfully paid. Your new deal is ready.
+
+The seller's phone should receive the strongest supported notification presentation:
+
+- Prominent notification.
+- Distinct premium notification category.
+- Special sound where supported.
+- Vibration where supported.
+- Appropriate visual notification.
+- Direct link to the newly created deal.
+
+The seller must not need to open BEXORA to receive this push.
+
+## Buyer notification
+
+The buyer receives:
+
+Title: Payment Successful!
+
+Body: Your purchase is confirmed. Your deal room is ready.
+
+Open the correct deal room when tapped.
+
+## Admin notification
+
+Authorized administrators receive a deal-created notification.
+
+Example:
+
+Title: New Marketplace Deal Created
+
+Body: A new verified purchase has created a deal requiring attention.
+
+Do not send sensitive financial information to unauthorized admins.
+
+## Critical sequencing
+
+The notification must only be sent after:
+
+1. Payment has been verified by the trusted payment backend.
+2. The deal has been successfully committed.
+3. The buyer and seller relationships have been verified.
+4. The notification event has been recorded.
+
+Use a transactional outbox or equivalent reliable event-processing mechanism so that a successfully created deal does not silently lose its notification if the push service temporarily fails.
+
+Do not create duplicate deals or duplicate notifications when payment callbacks are repeated.
+
+---
+
+# 7. COMPLETE BEXORA EVENT NOTIFICATION MATRIX
+
+Connect the notification engine to all actual relevant business events.
+
+## A. Account events
+
+- Registration completed.
+- Email verification completed.
+- Important security alert.
+- Password reset or account security event.
+- Admin announcement.
+- Account status changed.
+
+## B. Listing events
+
+- Listing submitted.
+- Listing approved.
+- Listing rejected.
+- Listing published.
+- Listing edited.
+- Listing paused.
+- Listing removed.
+- Listing sold.
+
+## C. Bid events
+
+- New bid received.
+- Bid accepted.
+- Bid rejected.
+- Bid cancelled.
+- Outbid.
+- Seller response.
+
+## D. Purchase and deal events
+
+- Buy Now initiated.
+- Payment verified.
+- Purchase completed.
+- Deal created.
+- Deal room ready.
+- Seller handover submitted.
+- Buyer confirmation required.
+- Deal deadline approaching.
+- Deal completed.
+- Deal cancelled.
+- Report submitted.
+- Report accepted.
+- Report rejected.
+- Admin decision.
+
+## E. Payment events
+
+- Live payment initiated.
+- Payment verified.
+- Payment failed.
+- Manual payment submitted.
+- Manual payment approved.
+- Manual payment rejected.
+- Deposit credited.
+- Withdrawal requested.
+- Withdrawal approved.
+- Withdrawal rejected.
+
+## F. Chat events
+
+- New private message.
+- New deal-room message.
+- New group message.
+- Important deal update.
+
+## G. Wallet events
+
+- Wallet credited.
+- Wallet debit completed.
+- Withdrawal reserved.
+- Withdrawal completed.
+- Important wallet security event.
+
+Only notify users who are actually associated with the relevant event.
+
+Do not send every marketplace event to every user.
+
+---
+
+# 8. PRIORITY, SOUND AND VIBRATION ARCHITECTURE
+
+I want three notification importance levels.
+
+## LEVEL 1 — NORMAL
+
+Examples:
+
+- General messages.
+- Routine listing updates.
+- Ordinary account updates.
+
+Use normal system notification presentation.
+
+## LEVEL 2 — IMPORTANT
+
+Examples:
+
+- New bid received.
+- Bid accepted.
+- New deal message.
+- Buyer confirmation required.
+- Important seller/buyer action.
+
+Use higher notification importance where supported.
+
+Use a distinct sound or vibration pattern where the platform allows it.
+
+## LEVEL 3 — PREMIUM / CRITICAL
+
+Examples:
+
+- Successful purchase.
+- Verified payment.
+- Deal successfully created.
+- Critical escrow action.
+- Urgent administrative action.
+
+Use the strongest supported presentation available:
+
+- High importance.
+- Distinct sound where supported.
+- Vibration where supported.
+- Clear notification title.
+- Prominent notification display.
+- Direct deal destination.
+
+## Sound requirements
+
+Investigate the actual capabilities of:
+
+- Android Chrome.
+- Android installed PWA.
+- Desktop Chrome.
+- Desktop Edge.
+- Desktop Firefox.
+- Safari where supported.
+- iOS installed web applications where supported.
+
+Implement distinct notification sounds wherever the platform actually permits it.
+
+Do not assume that adding a sound file to a Web Push payload automatically makes the operating system play that sound.
+
+If custom background notification sounds are not supported by a browser or OS, use its supported default notification sound and document the limitation.
+
+Do not use an audio file or JavaScript autoplay as a fake replacement for background push sound.
+
+## Vibration requirements
+
+Use supported notification vibration capabilities where available.
+
+Different importance levels may use different vibration patterns if supported.
+
+Respect device settings and user preferences.
+
+Do not claim vibration works on devices or browsers that do not support it.
+
+---
+
+# 9. OFFLINE AND RECONNECTION DELIVERY
+
+This requirement is extremely important.
+
+A user may be offline when another user sends a message or places a bid.
+
+The system must not simply discard the notification because the recipient is temporarily disconnected.
+
+Implement actual background push delivery using Firebase Cloud Messaging and its supported delivery mechanisms.
+
+Requirements:
+
+1. Store the event reliably.
+2. Identify the intended recipient.
+3. Dispatch the push notification through the trusted backend.
+4. Use an appropriate message time-to-live.
+5. Allow the push service to retain eligible messages temporarily while the device is offline.
+6. Deliver the notification when the device reconnects, subject to FCM and platform delivery rules.
+7. Prevent expired events from being delivered after they are no longer relevant.
+8. Avoid sending duplicate notifications after reconnection.
+9. Preserve the notification in the user's in-app notification history.
+10. Mark notification status accurately.
+
+Use appropriate event-specific expiry rules.
+
+For example:
+
+- A normal message may remain eligible for delivery for a reasonable period.
+- An urgent bid notification may expire when the bidding opportunity is no longer relevant.
+- A deal notification may remain available while the deal is active.
+
+Do not promise unlimited offline storage or guaranteed immediate delivery.
+
+Use FCM TTL and message priority correctly.
+
+Do not use an aggressive polling mechanism as a substitute for push notifications.
+
+---
+
+# 10. MULTI-DEVICE NOTIFICATION REGISTRATION
+
+A single user may use:
+
+- Android phone.
+- Another Android phone.
+- Tablet.
+- Laptop.
+- Desktop browser.
+- Installed PWA.
+
+Register each eligible device separately.
+
+Maintain secure device subscription records.
+
+Each record should contain appropriate fields such as:
+
+- User UID.
+- FCM registration token.
+- Device identifier.
+- Platform.
+- Browser.
+- Created timestamp.
+- Last token refresh.
+- Permission state.
+- Active status.
+- Last successful notification timestamp.
+
+Requirements:
+
+- One user can have multiple active devices.
+- Send notifications to all eligible registered devices for that recipient.
+- Do not send a user's own message to their own devices unless explicitly required by a separate feature.
+- Prevent duplicate token registration.
+- Handle token rotation.
+- Remove invalid tokens.
+- Prevent one user from registering a token under another user's UID.
+- Never expose another user's device tokens.
+- Never store private service-account credentials in Firestore or public code.
+
+---
+
+# 11. LOGIN AND LOGOUT BEHAVIOR
+
+Notifications must be associated with the correct BEXORA user account and device.
+
+When a user logs in:
+
+- Verify the actual Firebase UID.
+- Register or associate the device token securely.
+- Subscribe the device to that user's eligible notification events.
+
+When the same user refreshes or reopens BEXORA:
+
+- Do not create duplicate subscriptions.
+- Preserve valid notification registration.
+
+When a user logs out:
+
+- Apply the configured account privacy policy.
+- Do not deliver private notifications from the previous account to a different account using the same shared device.
+- Ensure account switching cannot leak private messages or deal information.
+- Do not accidentally delete valid device registrations needed for other legitimate notification categories.
+
+When another user logs into the same device:
+
+- Update the device-to-account association safely.
+- Verify ownership.
+- Prevent cross-account notification leakage.
+
+The user's ability to receive notifications must not depend on an active BEXORA browser tab.
+
+---
+
+# 12. SERVICE WORKER AND BACKGROUND PUSH
+
+Inspect the current production service worker.
+
+Implement or update the correct Firebase Messaging service worker.
+
+Requirements:
+
+- Correct Firebase initialization.
+- Correct FCM background message handling.
+- Correct production scope.
+- HTTPS compatibility.
+- Correct notification display.
+- Correct notification click handling.
+- Correct destination routing.
+- Duplicate notification prevention.
+- Token registration integration.
+- Token refresh handling.
+- Safe update lifecycle.
+- No conflicting old service workers.
+
+Do not leave a development-only service worker in production.
+
+Do not assume that a foreground message handler is sufficient for background delivery.
+
+Test the actual production service worker.
+
+---
+
+# 13. NOTIFICATION CLICK ACTIONS
+
+Every notification should open the relevant destination.
+
+Examples:
+
+- Private message → correct conversation.
+- New bid → correct listing and bids section.
+- Bid accepted → relevant bid/deal page.
+- Successful purchase → exact deal room.
+- Payment update → payment history or deal page.
+- Withdrawal update → wallet withdrawal page.
+- Admin announcement → announcement destination.
+
+Use safe URLs.
+
+Validate access after opening.
+
+A notification click must never bypass authentication or authorization.
+
+If a user is logged out, show the login screen and then redirect to the authorized destination after successful login.
+
+---
+
+# 14. NOTIFICATION HISTORY AND PREFERENCES
+
+Preserve or improve the BEXORA in-website notification center.
+
+Users should be able to:
+
+- View notification history.
+- Mark notifications as read.
+- Mark all as read.
+- Open related content.
+- Configure notification preferences.
+- Mute selected categories.
+- Enable or disable sound where supported.
+- Enable or disable vibration where supported.
+
+Important distinction:
+
+Turning off an optional notification category should not silently disable all security-critical notifications.
+
+Browser/OS permission must remain under the user's control.
+
+---
+
+# 15. ADMIN CONTROL
+
+Add notification management to the existing Admin Panel.
+
+Authorized admins should be able to:
+
+- Send announcements.
+- Send notifications to selected users.
+- Send notifications to eligible user groups.
+- View notification event history.
+- View delivery errors.
+- Review registered device counts.
+- Disable abusive notification campaigns.
+- Configure event categories and templates.
+- Review priority settings.
+
+Only authorized roles can perform mass broadcasts.
+
+Every admin action must be verified server-side.
+
+Prevent unauthorized bulk notification sending.
+
+Apply rate limits and abuse protection.
+
+---
+
+# 16. SECURE BACKEND AND RELIABLE EVENT PROCESSING
+
+Use the correct trusted backend for privileged notification sending.
+
+Preferred architecture where supported:
+
+- Firebase Authentication for identity.
+- Firestore for notification records and event state.
+- Firebase Cloud Messaging for push delivery.
+- Firebase Cloud Functions or another secure managed backend for event processing and FCM Admin SDK.
+- Transactional outbox or equivalent reliable dispatch mechanism.
+
+Do not send privileged FCM messages directly from public frontend code.
+
+Do not put Firebase Admin SDK private credentials in the website ZIP.
+
+Do not expose API secrets.
+
+Use server-side authorization and validation.
+
+Implement:
+
+- Idempotency.
+- Event deduplication.
+- Retry policy.
+- Invalid-token cleanup.
+- Error logging.
+- Rate limiting.
+- Notification expiration.
+- Secure recipient validation.
+- Transaction-safe event creation.
+
+If the existing hosting is InfinityFree, do not attempt to run Node.js/Express there.
+
+Use a compatible trusted external backend for the notification engine.
+
+Inspect billing requirements and existing Firebase plan before deploying paid resources.
+
+Do not create unexpected paid infrastructure.
+
+---
+
+# 17. FIX THE EXISTING DEMO ACCOUNT FLASH
+
+This is a separate critical requirement.
+
+The BEXORA profile icon must never briefly display a Demo/Fake account.
+
+Inspect all authentication initialization and profile loading logic.
+
+Implement correct authentication states:
+
+- INITIALIZING.
+- AUTHENTICATED.
+- UNAUTHENTICATED.
+
+During INITIALIZING, display a neutral loading state.
+
+Only display a profile after Firebase confirms the actual authenticated user.
+
+Remove hardcoded demo users, mock fallback accounts, fake profiles, and stale account state.
+
+Preserve legitimate login persistence.
+
+Test first visit, refresh, logout, login, account switching, and slow network conditions.
+
+No Demo account may ever appear, even temporarily.
+
+---
+
+# 18. TESTING — REAL END-TO-END ACCEPTANCE
+
+Do not claim completion based only on code compilation.
+
+Perform actual end-to-end tests with real registered devices and real push messages wherever the available environment permits.
+
+## Test A — User-to-user message
+
+1. Register Device A to User A.
+2. Register Device B to User B.
+3. Log in to BEXORA on both devices.
+4. Close BEXORA on Device B.
+5. From Device A, send a message to User B.
+6. Verify that Device B receives an operating-system push notification.
+7. Tap it.
+8. Verify that the correct conversation opens.
+
+## Test B — Offline recipient
+
+1. Register Device B.
+2. Disconnect Device B from the network.
+3. Send a valid message to User B from Device A.
+4. Reconnect Device B.
+5. Verify eligible notification delivery.
+6. Verify that expired messages are not delivered.
+7. Verify no duplicate notifications appear.
+
+## Test C — New bid
+
+1. User A creates a listing.
+2. User B places a bid.
+3. Confirm the bid is committed.
+4. Verify User A receives the special bid notification.
+5. Verify that User B does not receive a false notification about receiving their own bid.
+6. Verify notification click routing.
+
+## Test D — Premium purchase
+
+1. User A publishes a listing.
+2. User B purchases it.
+3. Verify the payment through the actual payment backend.
+4. Verify the deal is successfully created.
+5. Verify the seller receives the premium purchase notification.
+6. Verify the buyer receives the payment/deal notification.
+7. Verify authorized admins receive the deal notification.
+8. Verify no duplicate deal or notification is generated.
+
+## Test E — Background and lock screen
+
+Test:
+
+- Website open.
+- Website tab in background.
+- Website tab closed.
+- Phone screen locked.
+- Another application open.
+- Desktop browser background.
+- Browser reopened after temporary offline state.
+
+Record actual results by device and browser.
+
+Do not claim a lock-screen test was completed if no physical device was available.
+
+---
+
+# 19. FINAL IMPLEMENTATION REPORT
+
+After completing the work, provide a concise but technically accurate report:
+
+1. Root cause of the previous failure.
+2. Existing files inspected.
+3. Files changed.
+4. Firebase services configured.
+5. Backend functions created or updated.
+6. Firestore schema changes.
+7. Service worker status.
+8. FCM token registration status.
+9. Event notification mapping.
+10. Sound and vibration support by platform.
+11. Offline delivery implementation.
+12. Real device test results.
+13. Remaining limitations, if any.
+
+Do not ask me to manually write code.
+
+Do not stop at recommendations.
+
+Do not create a fake demo notification and claim the system is complete.
+
+Do not destroy existing BEXORA functionality.
+
+---
+
+# FINAL ACCEPTANCE CONDITION
+
+BEXORA must operate as a professional event-driven marketplace notification platform.
+
+When one user messages another user, the recipient must receive a device-level push notification without needing to open BEXORA.
+
+When a user receives a bid, the listing owner must receive a special notification.
+
+When a verified purchase creates a deal, the seller must receive a premium purchase notification, the buyer must receive a purchase confirmation, and authorized administrators must receive the appropriate deal notification.
+
+The system must support background delivery, multiple registered devices, notification history, sound and vibration wherever supported, and eligible offline message delivery after reconnection.
+
+**Implement the actual complete system inside my existing BEXORA project. Do not merely describe how I could build it.**

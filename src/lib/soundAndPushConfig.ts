@@ -68,8 +68,12 @@ export const DEFAULT_NOTIFICATION_PREFERENCES: UserNotificationPreferences = {
   bidUpdatesEnabled: true,
 };
 
-export const STANDARD_DEAL_VIBRATION_PATTERN: number[] = [180, 90, 240];
-export const STRONG_DEAL_VIBRATION_PATTERN: number[] = [260, 90, 320, 90, 260];
+export const LEVEL_1_NORMAL_VIBRATION_PATTERN: number[] = [];
+export const LEVEL_2_IMPORTANT_VIBRATION_PATTERN: number[] = [180, 90, 240];
+export const LEVEL_3_PREMIUM_VIBRATION_PATTERN: number[] = [260, 90, 320, 90, 260];
+
+export const STANDARD_DEAL_VIBRATION_PATTERN: number[] = LEVEL_2_IMPORTANT_VIBRATION_PATTERN;
+export const STRONG_DEAL_VIBRATION_PATTERN: number[] = LEVEL_3_PREMIUM_VIBRATION_PATTERN;
 
 /**
  * Default tactile vibration pattern (Strong, in ms) reserved strictly for
@@ -81,6 +85,10 @@ export function getDealRoomVibrationPattern(strength?: VibrationStrength): numbe
   return strength === 'standard'
     ? STANDARD_DEAL_VIBRATION_PATTERN
     : STRONG_DEAL_VIBRATION_PATTERN;
+}
+
+export function getImportantAlertVibrationPattern(): number[] {
+  return LEVEL_2_IMPORTANT_VIBRATION_PATTERN;
 }
 
 /**
@@ -220,7 +228,23 @@ export function resolveNotificationAlertKind(
 ): NotificationAlertKind {
   if (item.alertKind === 'deal_room_created') return 'deal_room_created';
   if (item.alertKind === 'admin_alert') return 'admin_alert';
-  if (item.title === 'New Deal Room Created') return 'deal_room_created';
+  if (item.alertKind === 'important') return 'important';
+  if (
+    item.title === 'New Deal Room Created' ||
+    item.title === 'Congratulations! Your Listing Has Been Purchased' ||
+    item.title === 'Payment Successful!' ||
+    item.title === 'New Marketplace Deal Created'
+  ) {
+    return 'deal_room_created';
+  }
+  if (
+    item.title === 'New Bid Received!' ||
+    item.title === 'You Have Been Outbid' ||
+    item.title.startsWith('Bid Accepted! Action Required') ||
+    (item.category === 'bid' && (item.severity === 'warning' || item.severity === 'critical'))
+  ) {
+    return 'important';
+  }
   if (
     item.actorRole === 'admin' &&
     (item.severity === 'critical' || item.severity === 'warning' || item.category === 'dispute' || item.category === 'security')
@@ -240,6 +264,14 @@ export function selectSoundForAlertKind(
       enabled: normalized.dealAlertSoundEnabled,
       soundId: normalized.dealAlertSoundId,
       path: getSoundPathById(normalized.dealAlertSoundId),
+      shouldVibrate: normalized.vibrationEnabled,
+    };
+  }
+  if (kind === 'important') {
+    return {
+      enabled: normalized.inAppSoundEnabled,
+      soundId: normalized.dealAlertSoundId || '04_urgent_deal',
+      path: getSoundPathById(normalized.dealAlertSoundId || '04_urgent_deal'),
       shouldVibrate: normalized.vibrationEnabled,
     };
   }
@@ -315,8 +347,9 @@ export class NotificationArrivalTracker {
     }
 
     const rank: Record<NotificationAlertKind, number> = {
-      deal_room_created: 3,
-      admin_alert: 2,
+      deal_room_created: 4,
+      admin_alert: 3,
+      important: 2,
       normal: 1,
     };
 
@@ -379,9 +412,10 @@ export function buildPrivacySafePushPayload(
   const tag = truncateNotificationField(input.notificationId || `bx_${Date.now()}`, 96);
 
   if (input.alertKind === 'deal_room_created') {
+    const resolvedTitle = input.title || 'New Deal Room Created';
     if (input.privacyMode === 'minimal') {
       return {
-        title: 'New Deal Room Created',
+        title: resolvedTitle,
         body: 'Payment confirmed in BEXORA Escrow. Tap to open your private 3-party Deal Room.',
         tag,
         alertKind: 'deal_room_created',
@@ -390,13 +424,36 @@ export function buildPrivacySafePushPayload(
     }
     const cleanRef = sanitizeSensitiveTokensFromPreview(input.referenceLabel || input.preview);
     return {
-      title: 'New Deal Room Created',
+      title: resolvedTitle,
       body: truncateNotificationField(
         cleanRef || 'Payment confirmed in BEXORA Escrow. Open your private 3-party Deal Room.',
         160
       ),
       tag,
       alertKind: 'deal_room_created',
+      destination,
+    };
+  }
+
+  if (input.alertKind === 'important') {
+    const resolvedTitle = input.title || 'BEXORA Important Alert';
+    if (input.privacyMode === 'minimal') {
+      return {
+        title: resolvedTitle,
+        body: 'Important marketplace activity on your listing or bid. Tap to review.',
+        tag,
+        alertKind: 'important',
+        destination,
+      };
+    }
+    return {
+      title: truncateNotificationField(sanitizeSensitiveTokensFromPreview(resolvedTitle), 110),
+      body: truncateNotificationField(
+        sanitizeSensitiveTokensFromPreview(input.preview || 'Open BEXORA to review your update.'),
+        180
+      ),
+      tag,
+      alertKind: 'important',
       destination,
     };
   }
@@ -772,6 +829,19 @@ export function triggerDealRoomVibration(prefs: UserNotificationPreferences): bo
   }
 }
 
+export function triggerImportantAlertVibration(prefs: UserNotificationPreferences): boolean {
+  const normalized = normalizeNotificationPreferences(prefs);
+  if (!normalized.vibrationEnabled) return false;
+  if (typeof navigator === 'undefined' || typeof navigator.vibrate !== 'function') {
+    return false;
+  }
+  try {
+    return navigator.vibrate(LEVEL_2_IMPORTANT_VIBRATION_PATTERN);
+  } catch {
+    return false;
+  }
+}
+
 export async function dispatchForegroundNotificationAlert(
   alertKind: NotificationAlertKind,
   prefs?: Partial<UserNotificationPreferences> | null
@@ -785,8 +855,12 @@ export async function dispatchForegroundNotificationAlert(
   };
   const selection = selectSoundForAlertKind(alertKind, effectivePrefs);
   let vibrated = false;
-  if (selection.shouldVibrate && alertKind === 'deal_room_created') {
-    vibrated = triggerDealRoomVibration(effectivePrefs);
+  if (selection.shouldVibrate) {
+    if (alertKind === 'deal_room_created') {
+      vibrated = triggerDealRoomVibration(effectivePrefs);
+    } else if (alertKind === 'important') {
+      vibrated = triggerImportantAlertVibration(effectivePrefs);
+    }
   }
   const res = await playNotificationSoundById(selection.soundId);
   return { soundPlayed: res.played, vibrated };

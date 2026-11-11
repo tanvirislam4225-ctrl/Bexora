@@ -461,7 +461,11 @@ export type NotificationSoundId =
   | '03_premium_deal'
   | '04_urgent_deal';
 
-export type NotificationAlertKind = 'normal' | 'deal_room_created' | 'admin_alert';
+export type NotificationAlertKind =
+  | 'normal'
+  | 'important'
+  | 'deal_room_created'
+  | 'admin_alert';
 
 export type VibrationStrength = 'standard' | 'strong';
 

@@ -2166,7 +2166,12 @@ async function startServer() {
       const dealId = String(body.dealId || '').trim();
       const listingId = String(body.listingId || '').trim();
       const conversationId = String(body.conversationId || '').trim();
-      const alertKind = body.alertKind === 'deal_room_created' ? 'deal_room_created' : 'normal';
+      const alertKind =
+        body.alertKind === 'deal_room_created'
+          ? 'deal_room_created'
+          : body.alertKind === 'important'
+          ? 'important'
+          : 'normal';
       const destination = sanitizeServerPushDestination(body.destination);
 
       if (!/^[a-zA-Z0-9_-]{1,128}$/.test(recipientId) || !/^[a-zA-Z0-9_-]{1,128}$/.test(notificationId)) {
@@ -2358,14 +2363,24 @@ async function startServer() {
       // Omitting top-level `notification` and `webpush.notification` guarantees:
       // - Zero duplicate notifications when foreground `onMessage` and Firestore `onSnapshot` are active.
       // - Deterministic single-notification rendering + `data.destination` click routing in `firebase-messaging-sw.js`.
+      const rawTitle = String(body.title || '').trim();
       const safeTitle =
-        alertKind === 'deal_room_created'
+        rawTitle &&
+        (rawTitle === 'Congratulations! Your Listing Has Been Purchased' ||
+          rawTitle === 'Payment Successful!' ||
+          rawTitle === 'New Marketplace Deal Created' ||
+          rawTitle === 'New Bid Received!' ||
+          rawTitle === 'You Have Been Outbid')
+          ? rawTitle
+          : alertKind === 'deal_room_created'
           ? 'New Deal Room Created'
-          : redactSensitivePreviewServer(body.title || 'BEXORA Notification').slice(0, 110);
+          : redactSensitivePreviewServer(rawTitle || 'BEXORA Notification').slice(0, 110);
 
       const safeBody =
         alertKind === 'deal_room_created'
-          ? 'Payment confirmed in BEXORA Escrow. Tap to open your private 3-party Deal Room.'
+          ? redactSensitivePreviewServer(
+              body.preview || 'Payment confirmed in BEXORA Escrow. Tap to open your private 3-party Deal Room.'
+            ).slice(0, 160)
           : redactSensitivePreviewServer(body.preview || 'Open BEXORA to view your latest update.').slice(0, 160);
 
       const adminMessaging = getAdminMessaging(adminApp);
@@ -2389,7 +2404,7 @@ async function startServer() {
             },
             webpush: {
               headers: {
-                Urgency: alertKind === 'deal_room_created' ? 'high' : 'normal',
+                Urgency: alertKind === 'deal_room_created' || alertKind === 'important' ? 'high' : 'normal',
                 TTL: alertKind === 'deal_room_created' ? '86400' : '43200',
               },
               fcmOptions: {
