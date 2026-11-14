@@ -74,6 +74,8 @@ import {
 } from '../lib/notificationService';
 import { ImageLightboxModal, LightboxImageItem } from './ImageLightboxModal';
 import { SellerAssetTransferBox } from './SellerAssetTransferBox';
+import { UserPresenceBadge } from './UserPresenceBadge';
+import { ActiveStatus } from './ActiveStatus';
 
 const ProtectionCountdown: React.FC<{
   originalDeadlineMs: number;
@@ -1245,11 +1247,19 @@ export const DealsView: React.FC<DealsViewProps> = ({
                     <span>Private 3-Party Room</span>
                   </div>
                   <h2 className="text-lg sm:text-xl font-extrabold">{activeDeal.listingTitle}</h2>
-                  <p className="bx-hint">
-                    Buyer: <strong>{activeDeal.buyerName}</strong> {isBuyer ? '(You)' : ''} · Seller:{' '}
-                    <strong>{activeDeal.sellerName}</strong> {isSeller ? '(You)' : ''} · Oversight:{' '}
-                    <strong>BEXORA Admin</strong>
-                  </p>
+                  <div className="bx-hint flex flex-wrap items-center gap-x-2 gap-y-1">
+                    <span className="inline-flex items-center gap-1.5">
+                      Buyer: <strong>{activeDeal.buyerName}</strong> {isBuyer ? '(You)' : ''}
+                      <ActiveStatus userId={activeDeal.buyerId} viewerUserId={userUid} mode="full" />
+                    </span>
+                    <span aria-hidden="true">·</span>
+                    <span className="inline-flex items-center gap-1.5">
+                      Seller: <strong>{activeDeal.sellerName}</strong> {isSeller ? '(You)' : ''}
+                      <ActiveStatus userId={activeDeal.sellerId} viewerUserId={userUid} mode="full" />
+                    </span>
+                    <span aria-hidden="true">·</span>
+                    <span>Oversight: <strong>BEXORA Admin</strong></span>
+                  </div>
                 </div>
                 <div className="flex flex-wrap items-center justify-end gap-2">
                   {onReportDealCounterparty && (isBuyer || isSeller) && (

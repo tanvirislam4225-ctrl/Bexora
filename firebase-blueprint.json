@@ -1039,6 +1039,34 @@
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["identityHash", "kind", "reason", "enforcedBy", "createdAtMs", "createdAt"]
+    },
+    "UserPresence": {
+      "title": "UserPresence",
+      "description": "Publicly readable real-time user online status and last-seen activity timestamps.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "state": { "type": "string", "enum": ["online", "offline"] },
+        "lastSeenMs": { "type": "integer" },
+        "activeSessions": { "type": "integer" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "state", "lastSeenMs", "activeSessions", "updatedAt"]
+    },
+    "UserPresenceSession": {
+      "title": "UserPresenceSession",
+      "description": "Individual tab or device active session presence registration.",
+      "type": "object",
+      "properties": {
+        "sessionId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "deviceType": { "type": "string", "enum": ["desktop", "mobile", "tablet"] },
+        "state": { "type": "string", "enum": ["online", "offline"] },
+        "lastHeartbeatAtMs": { "type": "integer" },
+        "createdAtMs": { "type": "integer" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["sessionId", "uid", "deviceType", "state", "lastHeartbeatAtMs", "createdAtMs", "updatedAt"]
     }
   },
   "firestore": {
@@ -1205,6 +1233,14 @@
     "/bannedIdentities/{banId}": {
       "schema": "BannedIdentity",
       "description": "Superadmin-only fraud/security identity blocklist."
+    },
+    "/userPresence/{userId}": {
+      "schema": "UserPresence",
+      "description": "Publicly visible real-time online state and last seen timestamps."
+    },
+    "/userPresence/{userId}/sessions/{sessionId}": {
+      "schema": "UserPresenceSession",
+      "description": "Per-session presence heartbeats and connection monitoring."
     }
   }
 }

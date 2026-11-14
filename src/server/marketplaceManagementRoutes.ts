@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import type express from 'express';
 import type { App as AdminApp } from 'firebase-admin/app';
 import { getAuth as getAdminAuth } from 'firebase-admin/auth';
-import { FieldValue, getFirestore as getAdminFirestore } from 'firebase-admin/firestore';
+import { FieldPath, FieldValue, getFirestore as getAdminFirestore } from 'firebase-admin/firestore';
 import { getStorage as getAdminStorage } from 'firebase-admin/storage';
 import {
   validateAccountAge,
@@ -2461,6 +2461,215 @@ export function registerMarketplaceManagementRoutes<
         counted: false,
         reason: 'server_credentials_unavailable',
         message: 'Client-side Firestore rules update will be used.',
+      });
+    }
+  });
+
+  /**
+   * POST /api/admin/migrate-listing-images
+   * Superadmin-only, idempotent batch migration that converts up to 10 existing listings
+   * with legacy base64 `data:image/` URLs into Firebase Storage HTTPS download URLs while
+   * preserving `imagesLegacy` in `listingImageBackups/{listingId}`.
+   */
+  app.post('/api/admin/migrate-listing-images', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const cfg = loadVerifiedFirebaseConfig();
+    if (!cfg.configValid) {
+      return res.status(503).json({ ok: false, error: 'Firebase configuration is unavailable.' });
+    }
+
+    const adminCaller = await verifyAdminCaller(req, cfg);
+    if (!adminCaller || adminCaller.role !== 'superadmin') {
+      return res.status(403).json({
+        ok: false,
+        error: 'Only a verified Superadmin can run the listing image storage migration.',
+      });
+    }
+
+    const body = (req.body || {}) as { limit?: unknown; cursor?: unknown };
+    const rawLimit = Number(body.limit ?? 10);
+    const batchLimit = Math.max(1, Math.min(10, Number.isFinite(rawLimit) ? Math.floor(rawLimit) : 10));
+    const initialCursor = typeof body.cursor === 'string' ? body.cursor.trim() : '';
+    const bucketName = cfg.storageBucket || `${cfg.projectId}.firebasestorage.app`;
+
+    try {
+      const adminApp = getOrInitFirebaseAdminApp(cfg.projectId);
+      const db = getAdminFirestore(adminApp, cfg.firestoreDatabaseId);
+      const bucket = getAdminStorage(adminApp).bucket(bucketName);
+
+      const scanPageSize = 50;
+      let pageCursor = initialCursor;
+      let processed = 0;
+      let skipped = 0;
+      let failed = 0;
+      let nextCursor = '';
+      let exhausted = false;
+      const migratedListingIds: string[] = [];
+
+      while (processed < batchLimit && !exhausted) {
+        let q = db.collection('listings').orderBy(FieldPath.documentId()).limit(scanPageSize);
+        if (pageCursor) {
+          q = q.startAfter(pageCursor);
+        }
+        const snap = await q.get();
+        if (snap.empty) {
+          exhausted = true;
+          nextCursor = '';
+          break;
+        }
+
+        let brokeMidPage = false;
+        for (const docSnap of snap.docs) {
+          pageCursor = docSnap.id;
+          nextCursor = docSnap.id;
+
+          const data = docSnap.data() || {};
+          const originalImages = Array.isArray(data.images)
+            ? data.images.map((item) => String(item || '').trim()).filter(Boolean)
+            : [];
+
+          const hasLegacyDataUrl = originalImages.some((src) => src.startsWith('data:image/'));
+          if (!hasLegacyDataUrl) {
+            skipped += 1;
+            continue;
+          }
+
+          const sellerId = String(data.sellerId || 'unknown')
+            .replace(/[^a-zA-Z0-9._-]/g, '_')
+            .slice(0, 128);
+          const safeListingId = docSnap.id.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 128);
+
+          try {
+            await db
+              .collection('listingImageBackups')
+              .doc(docSnap.id)
+              .set(
+                {
+                  listingId: docSnap.id,
+                  sellerId: String(data.sellerId || ''),
+                  imagesLegacy: originalImages,
+                  migratedBy: adminCaller.uid,
+                  migratedAt: FieldValue.serverTimestamp(),
+                },
+                { merge: true }
+              );
+
+            // Note: sharp is not a project dependency, so keep each original image in order (index 0 first)
+            // without duplicating index 0, and deduplicate before capping at MAX_LISTING_IMAGES.
+            const migratedUrls: string[] = [];
+            const seenUrls = new Set<string>();
+            const ts = Date.now();
+            for (let idx = 0; idx < Math.min(originalImages.length, MAX_LISTING_IMAGES); idx++) {
+              const src = originalImages[idx];
+              if (src.startsWith('https://')) {
+                if (!seenUrls.has(src)) {
+                  seenUrls.add(src);
+                  migratedUrls.push(src);
+                }
+                continue;
+              }
+              const match = src.match(/^data:(image\/(?:jpeg|jpg|png|webp));base64,([A-Za-z0-9+/=\s]+)$/i);
+              if (!match) {
+                continue;
+              }
+              const rawMime = match[1].toLowerCase();
+              const contentType = rawMime === 'image/jpg' ? 'image/jpeg' : rawMime;
+              const ext = contentType === 'image/png' ? 'png' : contentType === 'image/webp' ? 'webp' : 'jpg';
+              const buf = Buffer.from(match[2].replace(/\s+/g, ''), 'base64');
+              if (buf.length === 0) continue;
+
+              const token = crypto.randomUUID();
+              const filePrefix = idx === 0 ? 'cover' : `migrated_${idx}`;
+              const storagePath = `listing_images/${sellerId}/${safeListingId}/${filePrefix}_${ts}.${ext}`;
+              await bucket.file(storagePath).save(buf, {
+                resumable: false,
+                metadata: {
+                  contentType,
+                  cacheControl: 'public, max-age=31536000, immutable',
+                  metadata: {
+                    firebaseStorageDownloadTokens: token,
+                  },
+                },
+              });
+              const downloadUrl = `https://firebasestorage.googleapis.com/v0/b/${encodeURIComponent(
+                bucket.name
+              )}/o/${encodeURIComponent(storagePath)}?alt=media&token=${encodeURIComponent(token)}`;
+              if (!seenUrls.has(downloadUrl)) {
+                seenUrls.add(downloadUrl);
+                migratedUrls.push(downloadUrl);
+              }
+            }
+
+            if (migratedUrls.length === 0) {
+              failed += 1;
+              continue;
+            }
+
+            await docSnap.ref.update({
+              images: migratedUrls.slice(0, MAX_LISTING_IMAGES),
+              updatedAt: FieldValue.serverTimestamp(),
+            });
+
+            processed += 1;
+            migratedListingIds.push(docSnap.id);
+
+            if (processed >= batchLimit) {
+              brokeMidPage = true;
+              break;
+            }
+          } catch {
+            failed += 1;
+          }
+        }
+
+        if (!brokeMidPage && snap.size < scanPageSize) {
+          exhausted = true;
+          nextCursor = '';
+        }
+      }
+
+      let remainingEstimate = 0;
+      if (nextCursor) {
+        try {
+          const countSnap = await db
+            .collection('listings')
+            .orderBy(FieldPath.documentId())
+            .startAfter(nextCursor)
+            .count()
+            .get();
+          remainingEstimate = Number(countSnap.data().count || 0);
+          if (remainingEstimate === 0) {
+            nextCursor = '';
+          }
+        } catch {
+          remainingEstimate = 1;
+        }
+      }
+
+      if (processed > 0) {
+        await appendAuditLog(cfg, adminCaller.idToken, {
+          actorId: adminCaller.uid,
+          action: 'LISTING_IMAGES_MIGRATED_TO_STORAGE',
+          targetType: 'system',
+          targetId: 'listing_images',
+          details: `Migrated ${processed} listing(s) from base64 data URLs to Firebase Storage (${migratedListingIds.join(', ')}).`,
+        });
+      }
+
+      return res.json({
+        ok: true,
+        processed,
+        skipped,
+        failed,
+        batchLimit,
+        nextCursor,
+        remainingEstimate,
+        migratedListingIds,
+      });
+    } catch (err) {
+      return res.status(500).json({
+        ok: false,
+        error: err instanceof Error ? err.message : 'Failed to migrate listing images.',
       });
     }
   });

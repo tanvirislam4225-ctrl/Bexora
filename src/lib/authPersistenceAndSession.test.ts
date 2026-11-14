@@ -19,7 +19,7 @@ import {
 
 const LEGACY_FIREBASE_HOST = 'responsive-dragon-tmn89' + '.firebaseapp.com';
 
-test('resolveEffectiveFirebaseAuthDomain replaces legacy firebaseapp host across ALL verified BEXORA HTTPS origins including mobile preview and custom domains', () => {
+test('resolveEffectiveFirebaseAuthDomain routes HTTPS verified first-party origins through same-origin relay instead of firebaseapp.com', () => {
   assert.equal(PRIMARY_VERIFIED_BEXORA_AUTH_DOMAIN, 'bexora.ai.studio');
   assert.deepEqual(BEXORA_BRAND_AUTH_DOMAIN_PRIORITY, [
     'auth.bexora.com',
@@ -48,7 +48,7 @@ test('resolveEffectiveFirebaseAuthDomain replaces legacy firebaseapp host across
   }
 });
 
-test('resolveEffectiveFirebaseAuthDomain promotes verified centralized BEXORA brand domain across Cloud Run and AI Studio preview origins', () => {
+test('resolveEffectiveFirebaseAuthDomain prefers verifiedBrandAuthDomain on HTTPS verified hosts and respects DIRECT_BEXORA_BRAND_HOSTS', () => {
   assert.equal(
     resolveEffectiveFirebaseAuthDomain({
       configuredAuthDomain: LEGACY_FIREBASE_HOST,
@@ -69,6 +69,17 @@ test('resolveEffectiveFirebaseAuthDomain promotes verified centralized BEXORA br
       verifiedBrandAuthDomain: 'auth.bexora.com',
     }),
     'auth.bexora.com'
+  );
+
+  assert.equal(
+    resolveEffectiveFirebaseAuthDomain({
+      configuredAuthDomain: LEGACY_FIREBASE_HOST,
+      windowHostname: 'bexora.com',
+      windowProtocol: 'https:',
+      envCustomAuthDomain: '',
+      verifiedBrandAuthDomain: 'bexora.ai.studio',
+    }),
+    'bexora.com'
   );
 });
 

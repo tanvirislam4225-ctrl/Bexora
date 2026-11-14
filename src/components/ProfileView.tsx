@@ -87,6 +87,9 @@ import type { CountryCode } from 'libphonenumber-js';
 import { ListingCard } from './ListingCard';
 import { DeleteListingModal } from './DeleteListingModal';
 import { PhoneCountryInput } from './PhoneCountryInput';
+import { UserPresenceBadge } from './UserPresenceBadge';
+import { ActiveStatus } from './ActiveStatus';
+import { saveUserActiveStatusPrivacy } from '../lib/presenceService';
 import { canSellerEditListingStatus } from '../lib/listingAndBidManagementLogic';
 import {
   getSupportedCountryMeta,
@@ -352,21 +355,25 @@ const VisitorProfileSection: React.FC<VisitorProfileProps> = ({
         <div className="h-28 bg-gradient-to-r from-[#FF6500] via-[#FF8533] to-[#793A91] border-b-2 border-[var(--bx-border)]" />
         <div className="p-6 sm:p-8 -mt-12 flex flex-col sm:flex-row sm:items-end justify-between gap-6">
           <div className="flex flex-col sm:flex-row sm:items-end gap-4">
-            <div className="w-24 h-24 rounded-xl border-2 border-[var(--bx-border)] bg-[var(--bx-surface)] overflow-hidden flex items-center justify-center text-2xl font-black shadow-[3px_3px_0_var(--bx-shadow)]">
-              {sanitizeSafeImageSrc(pubProfile.avatarUrl) ? (
-                <img
-                  src={sanitizeSafeImageSrc(pubProfile.avatarUrl)}
-                  alt={pubProfile.displayName}
-                  referrerPolicy="no-referrer"
-                  className="w-full h-full object-cover"
-                />
-              ) : (
-                <span>{initials}</span>
-              )}
+            <div className="relative shrink-0">
+              <div className="w-24 h-24 rounded-xl border-2 border-[var(--bx-border)] bg-[var(--bx-surface)] overflow-hidden flex items-center justify-center text-2xl font-black shadow-[3px_3px_0_var(--bx-shadow)]">
+                {sanitizeSafeImageSrc(pubProfile.avatarUrl) ? (
+                  <img
+                    src={sanitizeSafeImageSrc(pubProfile.avatarUrl)}
+                    alt={pubProfile.displayName}
+                    referrerPolicy="no-referrer"
+                    className="w-full h-full object-cover"
+                  />
+                ) : (
+                  <span>{initials}</span>
+                )}
+              </div>
+              <ActiveStatus userId={pubProfile.uid} viewerUserId={viewerUid} mode="dot" className="absolute -bottom-1 -right-1" />
             </div>
             <div className="space-y-1">
               <div className="flex flex-wrap items-center gap-2">
                 <h1 className="text-2xl font-black tracking-tight">{pubProfile.displayName}</h1>
+                <ActiveStatus userId={pubProfile.uid} viewerUserId={viewerUid} mode="full" />
                 {pubProfile.nidVerified && (
                   <span className="inline-flex items-center gap-1 text-xs font-extrabold px-2 py-0.5 bg-emerald-600 text-white border border-black">
                     <ShieldCheck className="w-3.5 h-3.5" />
@@ -622,6 +629,52 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
   const [savingContactPhone, setSavingContactPhone] = useState(false);
   const [phoneMsg, setPhoneMsg] = useState('');
   const [phoneErr, setPhoneErr] = useState('');
+
+  // Real-Time Active Status Privacy Setting
+  const [showActiveStatus, setShowActiveStatus] = useState<boolean>(true);
+  const [savingPrivacyStatus, setSavingPrivacyStatus] = useState<boolean>(false);
+  const [privacyStatusMsg, setPrivacyStatusMsg] = useState<string>('');
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadPrivacy = async () => {
+      try {
+        const snap = await getDoc(doc(db, 'presence', userUid));
+        if (snap.exists() && !cancelled) {
+          const d = snap.data();
+          if (typeof d.showStatus === 'boolean') {
+            setShowActiveStatus(d.showStatus);
+          }
+        }
+      } catch {
+        // Non-fatal
+      }
+    };
+    void loadPrivacy();
+    return () => {
+      cancelled = true;
+    };
+  }, [userUid]);
+
+  const handleToggleActiveStatusPrivacy = async () => {
+    const nextVal = !showActiveStatus;
+    setShowActiveStatus(nextVal);
+    setSavingPrivacyStatus(true);
+    setPrivacyStatusMsg('');
+    try {
+      await saveUserActiveStatusPrivacy(userUid, nextVal);
+      setPrivacyStatusMsg(
+        nextVal
+          ? 'Active status is now visible to other BEXORA members.'
+          : 'Active status is now hidden from other members.'
+      );
+    } catch {
+      setShowActiveStatus(!nextVal);
+      setPrivacyStatusMsg('Failed to update privacy setting. Please try again.');
+    } finally {
+      setSavingPrivacyStatus(false);
+    }
+  };
 
   useEffect(() => {
     const split = splitSavedPhoneForCountryInput(
@@ -1162,21 +1215,25 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
       {/* Top Owner Profile Banner */}
       <section className="bx-card p-6 sm:p-8 flex flex-col lg:flex-row lg:items-center justify-between gap-6">
         <div className="flex items-center gap-4">
-          <div className="w-20 h-20 rounded-xl border-2 border-[var(--bx-border)] bg-[var(--bx-surface-alt)] overflow-hidden flex items-center justify-center text-2xl font-black shrink-0">
-            {sanitizeSafeImageSrc(profile.avatarUrl) ? (
-              <img
-                src={sanitizeSafeImageSrc(profile.avatarUrl)}
-                alt={profile.displayName}
-                referrerPolicy="no-referrer"
-                className="w-full h-full object-cover"
-              />
-            ) : (
-              <span>{profile.displayName.slice(0, 2).toUpperCase()}</span>
-            )}
+          <div className="relative shrink-0">
+            <div className="w-20 h-20 rounded-xl border-2 border-[var(--bx-border)] bg-[var(--bx-surface-alt)] overflow-hidden flex items-center justify-center text-2xl font-black shrink-0">
+              {sanitizeSafeImageSrc(profile.avatarUrl) ? (
+                <img
+                  src={sanitizeSafeImageSrc(profile.avatarUrl)}
+                  alt={profile.displayName}
+                  referrerPolicy="no-referrer"
+                  className="w-full h-full object-cover"
+                />
+              ) : (
+                <span>{profile.displayName.slice(0, 2).toUpperCase()}</span>
+              )}
+            </div>
+            <ActiveStatus userId={profile.uid} viewerUserId={userUid} mode="dot" className="absolute -bottom-1 -right-1" />
           </div>
           <div className="space-y-1">
             <div className="flex flex-wrap items-center gap-2">
               <h1 className="text-2xl font-black tracking-tight">{profile.displayName}</h1>
+              <ActiveStatus userId={profile.uid} viewerUserId={userUid} mode="full" />
               {profile.nidVerified && (
                 <span className="inline-flex items-center gap-1 text-xs font-extrabold px-2 py-0.5 bg-emerald-600 text-white border border-black">
                   <ShieldCheck className="w-3.5 h-3.5" />
@@ -1885,6 +1942,55 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
                 {phoneMsg && <p className="text-xs font-bold text-emerald-600">{phoneMsg}</p>}
               </div>
             )}
+          </div>
+
+          {/* Activity & Presence Privacy Card */}
+          <div className="bx-card p-6 space-y-4 md:col-span-2">
+            <div className="flex items-center justify-between flex-wrap gap-3">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <span className="w-2.5 h-2.5 rounded-full bg-emerald-500" aria-hidden="true" />
+                  <h2 className="text-base font-black">Activity &amp; Presence Privacy</h2>
+                </div>
+                <p className="text-xs opacity-75 max-w-xl">
+                  Control whether other BEXORA buyers and sellers can see your real-time activity status (&quot;Active now&quot;, &quot;Active 5 min ago&quot;, or &quot;Offline&quot;). You can always see your own active status.
+                </p>
+              </div>
+
+              <div className="flex items-center gap-3 shrink-0">
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={showActiveStatus}
+                  aria-label="Show my active status"
+                  disabled={savingPrivacyStatus}
+                  onClick={() => void handleToggleActiveStatusPrivacy()}
+                  className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                    showActiveStatus ? 'bg-emerald-600' : 'bg-slate-300 dark:bg-slate-700'
+                  }`}
+                >
+                  <span
+                    aria-hidden="true"
+                    className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-lg ring-0 transition duration-200 ease-in-out ${
+                      showActiveStatus ? 'translate-x-5' : 'translate-x-0'
+                    }`}
+                  />
+                </button>
+                <span className="text-xs font-extrabold">
+                  {showActiveStatus ? 'Enabled' : 'Disabled'}
+                </span>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between pt-2 border-t border-[var(--bx-border)] text-xs font-bold opacity-80 flex-wrap gap-2">
+              <span className="inline-flex items-center gap-1.5">
+                Current status preview:
+                <ActiveStatus userId={userUid} viewerUserId={userUid} mode="full" />
+              </span>
+              {privacyStatusMsg && (
+                <span className="text-emerald-600 font-extrabold">{privacyStatusMsg}</span>
+              )}
+            </div>
           </div>
         </div>
       )}

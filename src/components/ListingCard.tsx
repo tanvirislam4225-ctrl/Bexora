@@ -10,6 +10,8 @@ import {
 } from '../lib/marketplaceLogic';
 import { formatListingPublishedTime, formatViewCount } from '../lib/viewCountLogic';
 import { PLATFORM_BANNER_BG, PlatformIcon } from './Icons';
+import { UserPresenceBadge } from './UserPresenceBadge';
+import { ActiveStatus } from './ActiveStatus';
 
 interface ListingCardProps {
   listing: MarketplaceListing;
@@ -19,6 +21,7 @@ interface ListingCardProps {
   onOpenSellerProfile?: (sellerId: string) => void;
   isFavorited?: boolean;
   onToggleFavorite?: (l: MarketplaceListing) => void;
+  priority?: boolean;
   className?: string;
   style?: React.CSSProperties;
 }
@@ -31,6 +34,7 @@ export const ListingCard: React.FC<ListingCardProps> = ({
   onOpenSellerProfile,
   isFavorited = false,
   onToggleFavorite,
+  priority = false,
   className,
   style,
 }) => {
@@ -87,7 +91,11 @@ export const ListingCard: React.FC<ListingCardProps> = ({
             <img
               src={safeCoverSrc}
               alt={listing.title}
-              loading="lazy"
+              width={480}
+              height={270}
+              decoding="async"
+              loading={priority ? 'eager' : 'lazy'}
+              fetchPriority={priority ? 'high' : undefined}
               referrerPolicy="no-referrer"
               onError={() => setImgFailed(true)}
               className="w-full h-full object-cover object-center transition-transform duration-200 group-hover/thumb:scale-[1.03]"
@@ -261,11 +269,14 @@ export const ListingCard: React.FC<ListingCardProps> = ({
             className="inline-flex items-center gap-1.5 min-w-0 text-left hover:underline shrink-0 max-w-[130px]"
             aria-label={`View seller ${listing.sellerName}`}
           >
-            <span
-              className="w-5.5 h-5.5 sm:w-5.5 sm:h-5.5 rounded-full grid place-items-center text-[10px] font-extrabold text-white shrink-0"
-              style={{ background: 'var(--purple)' }}
-            >
-              {initials}
+            <span className="relative shrink-0 inline-flex">
+              <span
+                className="w-5.5 h-5.5 sm:w-5.5 sm:h-5.5 rounded-full grid place-items-center text-[10px] font-extrabold text-white shrink-0"
+                style={{ background: 'var(--purple)' }}
+              >
+                {initials}
+              </span>
+              <ActiveStatus userId={listing.sellerId} mode="dot" className="absolute -bottom-0.5 -right-0.5" />
             </span>
             <span className="text-xs sm:text-[12px] font-bold truncate" style={{ color: 'var(--text)' }}>
               {listing.sellerName}

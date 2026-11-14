@@ -1159,6 +1159,37 @@ service cloud.firestore {
         && data.createdAt is timestamp;
     }
 
+    function isValidUserPresence(data, uid) {
+      return data.keys().hasAll(['uid', 'state', 'lastSeenMs', 'activeSessions', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'state', 'lastSeenMs', 'activeSessions', 'updatedAt'])
+        && data.uid == uid
+        && data.state in ['online', 'offline']
+        && data.lastSeenMs is int && data.lastSeenMs > 0
+        && data.activeSessions is int && data.activeSessions >= 0
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidUserPresenceSession(data, uid, sessionId) {
+      return data.keys().hasAll(['sessionId', 'uid', 'deviceType', 'state', 'lastHeartbeatAtMs', 'createdAtMs', 'updatedAt'])
+        && data.keys().hasOnly(['sessionId', 'uid', 'deviceType', 'state', 'lastHeartbeatAtMs', 'createdAtMs', 'updatedAt'])
+        && data.sessionId == sessionId
+        && data.uid == uid
+        && data.deviceType in ['desktop', 'mobile', 'tablet']
+        && data.state in ['online', 'offline']
+        && data.lastHeartbeatAtMs is int
+        && data.createdAtMs is int
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidPresenceNode(data) {
+      return data.keys().hasAll(['state', 'lastActiveAt'])
+        && data.keys().hasOnly(['state', 'lastActiveAt', 'showStatus', 'updatedAt'])
+        && data.state in ['online', 'offline']
+        && (data.lastActiveAt is int || data.lastActiveAt is float)
+        && data.lastActiveAt > 0
+        && (!('showStatus' in data) || data.showStatus is bool);
+    }
+
     // 0. Health Connection Test Path (Read-only doc lookup)
     match /test/{docId} {
       allow get: if docId == 'connection';
@@ -2804,6 +2835,63 @@ service cloud.firestore {
         && incoming().createdAt == existing().createdAt
         && incoming().diff(existing()).affectedKeys().hasOnly(['reason', 'enforcedBy']);
       allow delete: if isSuperAdmin() && isValidId(banId);
+    }
+
+    // 33. Live User Presence & Connection Monitoring (WhatsApp/Messenger-style real-time presence)
+    match /userPresence/{userId} {
+      allow get: if isValidId(userId);
+      allow list: if resource.data.uid is string || (request.query.limit != null && request.query.limit <= 100);
+      allow create: if isSignedIn()
+        && isValidId(userId)
+        && (request.auth.uid == userId || isAdmin())
+        && isValidUserPresence(incoming(), userId)
+        && incoming().updatedAt == request.time;
+      allow update: if isSignedIn()
+        && isValidId(userId)
+        && (request.auth.uid == userId || isAdmin())
+        && isValidUserPresence(incoming(), userId)
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['state', 'lastSeenMs', 'activeSessions', 'updatedAt']);
+      allow delete: if isAdmin();
+
+      match /sessions/{sessionId} {
+        allow get: if isValidId(userId) && isValidId(sessionId) && (request.auth.uid == userId || isAdmin());
+        allow list: if isValidId(userId) && (request.auth.uid == userId || isAdmin());
+        allow create: if isSignedIn()
+          && isValidId(userId)
+          && isValidId(sessionId)
+          && (request.auth.uid == userId || isAdmin())
+          && isValidUserPresenceSession(incoming(), userId, sessionId)
+          && incoming().updatedAt == request.time;
+        allow update: if isSignedIn()
+          && isValidId(userId)
+          && isValidId(sessionId)
+          && (request.auth.uid == userId || isAdmin())
+          && isValidUserPresenceSession(incoming(), userId, sessionId)
+          && incoming().createdAtMs == existing().createdAtMs
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['state', 'lastHeartbeatAtMs', 'updatedAt']);
+        allow delete: if isSignedIn()
+          && isValidId(userId)
+          && isValidId(sessionId)
+          && (request.auth.uid == userId || isAdmin());
+      }
+    }
+
+    // 34. Real-Time Active Status Presence (RTDB / Firestore Resilience)
+    match /presence/{userId} {
+      allow get: if isValidId(userId);
+      allow list: if isSignedIn();
+      allow create, update: if isSignedIn()
+        && isValidId(userId)
+        && (request.auth.uid == userId || isAdmin())
+        && isValidPresenceNode(incoming());
+      allow delete: if isAdmin();
+
+      match /connections/{connectionId} {
+        allow get, list: if isSignedIn() && isValidId(userId) && (request.auth.uid == userId || isAdmin());
+        allow create, update, delete: if isSignedIn() && isValidId(userId) && (request.auth.uid == userId || isAdmin());
+      }
     }
   }
 }

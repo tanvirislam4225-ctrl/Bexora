@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import express from 'express';
+import compression from 'compression';
 import http from 'node:http';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -114,19 +115,21 @@ function parseOptionalServiceAccountJson(): ServiceAccount | null {
 
 async function startServer() {
   const app = express();
+  app.use(compression());
   app.disable('x-powered-by');
-  app.set('trust proxy', 1);
+  const trustProxyHops = Number(process.env.TRUST_PROXY_HOPS || 1);
+  app.set('trust proxy', Number.isFinite(trustProxyHops) && trustProxyHops >= 0 ? trustProxyHops : 1);
   const webhookReplayCache = new Map<string, number>();
+  const distPath =
+    [path.join(__dirname, 'dist'), path.join(process.cwd(), 'dist')].find((candidate) =>
+      fs.existsSync(path.join(candidate, 'index.html'))
+    ) || path.join(__dirname, 'dist');
   const isProdRuntime =
-    process.env.NODE_ENV === 'production' &&
-    fs.existsSync(path.join(__dirname, 'dist', 'index.html'));
+    process.env.NODE_ENV === 'production' ||
+    fs.existsSync(path.join(distPath, 'index.html'));
 
   function getCallerClientKey(req: express.Request): string {
     return extractClientIpKey({
-      xForwardedFor:
-        typeof req.headers['x-forwarded-for'] === 'string'
-          ? req.headers['x-forwarded-for']
-          : undefined,
       reqIp: req.ip,
       remoteAddress: req.socket?.remoteAddress,
     });
@@ -344,6 +347,11 @@ async function startServer() {
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
+  if (isProdRuntime && configuredAllowedOrigins.length === 0) {
+    console.warn(
+      '[BEXORA] ALLOWED_ORIGINS is empty in production. If a reverse proxy rewrites Host, set ALLOWED_ORIGINS (e.g. https://yourdomain.com,https://www.yourdomain.com).'
+    );
+  }
 
   app.use('/api', (req, res, next) => {
     const fullPath = req.originalUrl.split('?')[0] || req.path;
@@ -424,35 +432,9 @@ async function startServer() {
 
   app.use('/api/admin', makeRateLimitMiddleware('admin_api', adminApiLimiter));
 
-  // 1. Health & Runtime Capabilities Endpoint
+  // 1. Minimal Public Health Check Endpoint (detailed telemetry remains on /api/admin/system-health)
   app.get('/api/health', (_req, res) => {
-    const aiConfigured = Boolean(getGeminiClient());
-    const cfg = loadVerifiedFirebaseConfig();
-    const explicitSa = parseOptionalServiceAccountJson();
-    let firebaseAdminInitialized = false;
-    try {
-      if (cfg.configValid) {
-        const adminApp = getOrInitFirebaseAdminApp(cfg.projectId);
-        firebaseAdminInitialized = Boolean(adminApp?.options?.projectId === cfg.projectId);
-      }
-    } catch {
-      firebaseAdminInitialized = false;
-    }
-    res.json({
-      status: 'ok',
-      service: 'bexora-backend',
-      timestamp: new Date().toISOString(),
-      aiVerificationConfigured: aiConfigured,
-      firebaseAdminInitialized,
-      credentialMode: explicitSa ? 'service_account_json' : 'managed_adc',
-      manualPaymentEnv: {
-        bkash: Boolean(process.env.BKASH_PAYMENT_NUMBER?.trim()),
-        nagad: Boolean(process.env.NAGAD_PAYMENT_NUMBER?.trim()),
-        rocket: Boolean(process.env.ROCKET_PAYMENT_NUMBER?.trim()),
-      },
-      liveGatewaysEnabled: Boolean(process.env.WORDPRESS_WEBHOOK_SECRET && process.env.WORDPRESS_WEBHOOK_SECRET.trim().length >= 16),
-      twilioRequired: false,
-    });
+    res.json({ status: 'ok' });
   });
 
   // 2. Safe Manual Payment Destination Endpoint (No secrets exposed)
@@ -1217,8 +1199,11 @@ async function startServer() {
   });
 
   // 2C. Server-Side Firebase Admin & Cloud Messaging (Managed ADC, Official FCM Public VAPID & FCM HTTP v1 Delivery)
-  const BOOTSTRAPPED_SUPERADMIN_UID = 'FFiOzaXKxBMuCzoQXM68sy3aPax2';
-  const BOOTSTRAPPED_SUPERADMIN_EMAIL = 'tanvirislam7574@gmail.com';
+  const BOOTSTRAPPED_SUPERADMIN_UID =
+    String(process.env.BOOTSTRAPPED_SUPERADMIN_UID || '').trim() || 'FFiOzaXKxBMuCzoQXM68sy3aPax2';
+  const BOOTSTRAPPED_SUPERADMIN_EMAIL =
+    String(process.env.BOOTSTRAPPED_SUPERADMIN_EMAIL || '').trim().toLowerCase() ||
+    'tanvirislam7574@gmail.com';
   const FCM_OFFICIAL_DEFAULT_VAPID_PUBLIC_KEY =
     'BDOU99-h67HcA6JeFXHbSNMu7e2yNNu3RzoMj8TM4W88jITfq7ZmPvIM1Iv-4_l2LxQcYwhqby2xGpWwzjfAnG4';
 
@@ -3056,6 +3041,50 @@ Current system snapshot: ${typeof systemContext === 'string' ? systemContext.sli
   }
   void runContinuousHealthProbe().catch(() => {});
 
+  // 4B-2. Automated Background Real-Time Stale User Presence Sweeper (marks crashed/closed sessions offline after 75s)
+  async function runStalePresenceSweeper(): Promise<number> {
+    const cfg = loadVerifiedFirebaseConfig();
+    if (!cfg.configValid) return 0;
+    let swept = 0;
+    try {
+      const adminApp = getOrInitFirebaseAdminApp(cfg.projectId);
+      const adminDb = getAdminFirestore(adminApp);
+      const staleThresholdMs = Date.now() - 75_000;
+
+      const onlineSnap = await adminDb
+        .collection('userPresence')
+        .where('state', '==', 'online')
+        .where('lastActiveMs', '<', staleThresholdMs)
+        .limit(50)
+        .get();
+
+      if (!onlineSnap.empty) {
+        const batch = adminDb.batch();
+        for (const doc of onlineSnap.docs) {
+          const data = doc.data();
+          batch.update(doc.ref, {
+            state: 'offline',
+            lastSeenMs: data.lastActiveMs || Date.now(),
+            activeSessionCount: 0,
+            updatedAt: FieldValue.serverTimestamp(),
+          });
+          swept++;
+        }
+        await batch.commit();
+      }
+    } catch {
+      // Quiet failover if admin credentials unavailable or collections not created yet
+    }
+    return swept;
+  }
+
+  const presenceSweepTimer = setInterval(() => {
+    void runStalePresenceSweeper().catch(() => {});
+  }, 60 * 1000);
+  if (typeof presenceSweepTimer.unref === 'function') {
+    presenceSweepTimer.unref();
+  }
+
   app.get('/api/admin/system-health', async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     const cfg = loadVerifiedFirebaseConfig();
@@ -3286,35 +3315,6 @@ Current system snapshot: ${typeof systemContext === 'string' ? systemContext.sli
     }
     aiAdminEngine.markStagedProposalSynced(String(req.params.proposalId || ''));
     return res.json({ ok: true });
-  });
-
-  // Authenticated Admin-Only Deployment Archive Download (prevents unauthenticated public bundle zip scraping)
-  app.get('/api/admin/deployment-archive', async (req, res) => {
-    res.setHeader('Cache-Control', 'no-store');
-    const cfg = loadVerifiedFirebaseConfig();
-    const adminCaller = await verifyAdminCaller(req, cfg);
-    if (!adminCaller) {
-      recordSecurityEvent({
-        type: 'admin_denied',
-        endpoint: '/api/admin/deployment-archive',
-        actor: getCallerClientKey(req),
-        summary: 'Blocked unauthenticated or non-admin deployment archive download attempt.',
-      });
-      return res.status(403).json({ error: 'Administrator authentication is required.' });
-    }
-    const zipPath = path.join(__dirname, 'BEXORA_INFINITYFREE_PRODUCTION.zip');
-    if (!fs.existsSync(zipPath)) {
-      return res.status(404).json({ error: 'Deployment archive has not been generated yet. Run npm run build first.' });
-    }
-    recordSecurityEvent({
-      type: 'admin_action',
-      endpoint: '/api/admin/deployment-archive',
-      actor: adminCaller.uid,
-      summary: 'Administrator downloaded BEXORA_INFINITYFREE_PRODUCTION.zip deployment archive.',
-    });
-    res.setHeader('Content-Type', 'application/zip');
-    res.setHeader('Content-Disposition', 'attachment; filename="BEXORA_INFINITYFREE_PRODUCTION.zip"');
-    return res.sendFile(zipPath);
   });
 
   // 4E. 24/7 Autonomous AI Trust & Safety Monitor, Multilingual Moderation, Strike Ledger, User Reporting & Account Appeals
@@ -4881,9 +4881,27 @@ Current system snapshot: ${typeof systemContext === 'string' ? systemContext.sli
   const httpServer = http.createServer(app);
   const isProd = isProdRuntime;
   if (isProd) {
-    const distPath = path.join(__dirname, 'dist');
-    app.use(express.static(distPath, { dotfiles: 'deny', index: false }));
+    app.use(
+      '/assets',
+      express.static(path.join(distPath, 'assets'), {
+        maxAge: '1y',
+        immutable: true,
+        dotfiles: 'deny',
+      })
+    );
+    app.use(
+      express.static(distPath, {
+        dotfiles: 'deny',
+        index: false,
+        setHeaders(res, filePath) {
+          if (filePath.endsWith('index.html') || filePath.endsWith('sw.js')) {
+            res.setHeader('Cache-Control', 'no-cache');
+          }
+        },
+      })
+    );
     app.get('*', (_req, res) => {
+      res.setHeader('Cache-Control', 'no-cache');
       res.sendFile(path.join(distPath, 'index.html'));
     });
   } else {

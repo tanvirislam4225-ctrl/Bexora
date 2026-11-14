@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import {
   auth,
+  browserPopupRedirectResolver,
   clearPendingSignupProfile,
   db,
   detectFirebaseAuthCapabilities,
@@ -38,13 +39,14 @@ import {
   syncProactiveRefreshWithCapabilities,
 } from '../lib/firebase';
 import { BexoraLogo } from './Icons';
+import { markPendingOAuthRedirect } from '../lib/cachedUser';
 import {
   isPrivacySafeResetError,
   validateLoginInput,
   validatePasswordResetInput,
-  validateRegistrationInput,
   validateStrongPassword,
 } from '../lib/marketplaceLogic';
+import { validateRegistrationInput } from '../lib/registrationValidation';
 import {
   describePendingAuthIntent,
   PendingAuthIntent,
@@ -391,7 +393,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           : '';
       if (code === 'auth/popup-blocked') {
         try {
-          await signInWithRedirect(auth, googleProvider);
+          markPendingOAuthRedirect();
+          await signInWithRedirect(auth, googleProvider, browserPopupRedirectResolver);
           return;
         } catch (redirectErr) {
           setError(formatFirebaseAuthError(redirectErr));

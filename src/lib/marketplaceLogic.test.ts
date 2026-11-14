@@ -26,7 +26,6 @@ import {
   classifyEmailPasswordProbe,
   classifyGoogleProviderProbe,
   validateLoginInput,
-  validateRegistrationInput,
   validatePasswordResetInput,
   sanitizeCustomerAuthMessage,
   getListingStatusBadgeMeta,
@@ -41,6 +40,7 @@ import {
   computeWordPressWebhookSignatures,
   verifyWordPressWebhookRequest,
 } from './serverWebhookSecurity';
+import { validateRegistrationInput } from './registrationValidation';
 
 test('Commission Engine: ৳100 accepted deal with 5% buyer fee and 5% seller fee', () => {
   // ৳100 = 10,000 paisa (minor units)

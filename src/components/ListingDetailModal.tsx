@@ -83,6 +83,8 @@ import { BidActionConfirmModal } from './BidActionConfirmModal';
 import { DeleteListingModal } from './DeleteListingModal';
 import { PLATFORM_BANNER_BG, PlatformIcon } from './Icons';
 import { ImageLightboxModal } from './ImageLightboxModal';
+import { UserPresenceBadge } from './UserPresenceBadge';
+import { ActiveStatus } from './ActiveStatus';
 
 interface ListingDetailModalProps {
   listing: MarketplaceListing;
@@ -1187,18 +1189,22 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
                 onClick={() => onOpenPublicProfile(listing.sellerId)}
                 className="flex items-center gap-3 text-left hover:underline"
               >
-                <div
-                  className="w-10 h-10 rounded-full grid place-items-center font-extrabold text-sm text-white shrink-0"
-                  style={{ background: 'var(--purple)' }}
-                >
-                  {(listing.sellerName || 'S').slice(0, 2).toUpperCase()}
+                <div className="relative shrink-0">
+                  <div
+                    className="w-10 h-10 rounded-full grid place-items-center font-extrabold text-sm text-white shrink-0"
+                    style={{ background: 'var(--purple)' }}
+                  >
+                    {(listing.sellerName || 'S').slice(0, 2).toUpperCase()}
+                  </div>
+                  <ActiveStatus userId={listing.sellerId} viewerUserId={userUid} mode="dot" className="absolute -bottom-0.5 -right-0.5" />
                 </div>
                 <div>
-                  <div className="flex items-center gap-1.5 font-extrabold text-sm">
+                  <div className="flex items-center gap-1.5 font-extrabold text-sm flex-wrap">
                     <span>{listing.sellerName}</span>
                     {listing.sellerVerified && (
                       <ShieldCheck className="w-4 h-4" style={{ color: 'var(--green)' }} />
                     )}
+                    <ActiveStatus userId={listing.sellerId} viewerUserId={userUid} mode="full" className="ml-1" />
                   </div>
                   <span className="bx-hint">
                     @{listing.sellerUsername}

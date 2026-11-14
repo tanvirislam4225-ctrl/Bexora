@@ -606,3 +606,22 @@ export type InfoTopicId =
 
 export * from './types/moderation';
 
+export type UserPresenceState = 'online' | 'offline';
+
+export interface UserPresence {
+  uid: string;
+  state: UserPresenceState;
+  lastSeenMs: number;
+  activeSessions: number;
+  updatedAtMs?: number;
+}
+
+export interface UserPresenceSession {
+  sessionId: string;
+  uid: string;
+  deviceType: 'desktop' | 'mobile' | 'tablet';
+  state: UserPresenceState;
+  lastHeartbeatAtMs: number;
+  createdAtMs: number;
+  updatedAtMs?: number;
+}

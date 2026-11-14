@@ -66,6 +66,10 @@ import {
   setGalleryCoverImage,
   validateGalleryBatchAdd,
 } from '../lib/listingAndBidManagementLogic';
+import {
+  hasPendingDataUrlImages,
+  uploadListingImagesToStorage,
+} from '../lib/listingStorage';
 import { PlatformIcon } from './Icons';
 
 interface CreateListingModalProps {
@@ -428,6 +432,18 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
           ? Math.round(Number(monthlyRevenue) * 100)
           : 0;
 
+      const reservedDraftRef = editingListing?.id
+        ? doc(db, 'listings', editingListing.id)
+        : doc(collection(db, 'listings'));
+      let draftId = reservedDraftRef.id;
+      const uploadedImages = hasPendingDataUrlImages(listingImages)
+        ? await uploadListingImagesToStorage({
+            userId: userUid,
+            listingId: draftId,
+            images: listingImages,
+          })
+        : listingImages.slice(0, MAX_LISTING_IMAGES);
+
       const baseFields: Record<string, unknown> = {
         subcategory: normalized.subcategory,
         title: normalized.title,
@@ -452,7 +468,7 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
             : accountUrl.trim().slice(0, 300),
         urlValidationStatus:
           platform === 'gaming' || !urlRes.valid ? 'not_applicable' : urlRes.status,
-        images: listingImages,
+        images: uploadedImages,
         status: 'draft',
         updatedAt: serverTimestamp(),
       };
@@ -463,10 +479,9 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
         baseFields.gameLevel = Math.max(0, Math.min(10000, Math.round(Number(gameLevel) || 1)));
       }
 
-      let draftId = editingListing?.id || '';
       if (editingListing?.id) {
         try {
-          await updateDoc(doc(db, 'listings', editingListing.id), {
+          await updateDoc(reservedDraftRef, {
             ...baseFields,
             verifiedOptions: [],
             rejectionReason: deleteField(),
@@ -476,7 +491,7 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
         }
       } else {
         try {
-          const ref = await addDoc(collection(db, 'listings'), {
+          await setDoc(reservedDraftRef, {
             ...baseFields,
             sellerId: userUid,
             sellerName: profile.displayName,
@@ -488,7 +503,6 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
             views: 0,
             createdAt: serverTimestamp(),
           });
-          draftId = ref.id;
         } catch (e) {
           handleFirestoreError(e, OperationType.CREATE, 'listings');
         }
@@ -609,6 +623,19 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
 
       const finalClaimed = finalMonStatus === 'monetized' ? claimedOptions : [];
 
+      const reservedListingRef = editingListing?.id
+        ? doc(db, 'listings', editingListing.id)
+        : doc(collection(db, 'listings'));
+      let targetListingId = reservedListingRef.id;
+
+      const uploadedImages = hasPendingDataUrlImages(listingImages)
+        ? await uploadListingImagesToStorage({
+            userId: userUid,
+            listingId: targetListingId,
+            images: listingImages,
+          })
+        : listingImages.slice(0, MAX_LISTING_IMAGES);
+
       const mutableFields: Record<string, unknown> = {
         subcategory,
         title: title.trim(),
@@ -627,7 +654,7 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
         monthlyRevenueMinor: revMinor,
         accountUrl: platform === 'gaming' ? '' : urlRes.normalizedUrl,
         urlValidationStatus: platform === 'gaming' ? 'not_applicable' : urlRes.status,
-        images: listingImages,
+        images: uploadedImages,
         status: 'pending',
         updatedAt: serverTimestamp(),
       };
@@ -638,7 +665,6 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
         mutableFields.gameLevel = Math.round(Number(gameLevel) || 1);
       }
 
-      let targetListingId = editingListing?.id || '';
       if (editingListing?.id) {
         let updatedViaServer = false;
         const idToken = auth.currentUser ? await auth.currentUser.getIdToken().catch(() => '') : '';
@@ -670,7 +696,7 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
                   monthlyRevenueMinor: revMinor,
                   accountUrl: platform === 'gaming' ? '' : urlRes.normalizedUrl,
                   urlValidationStatus: platform === 'gaming' ? 'not_applicable' : urlRes.status,
-                  images: listingImages.slice(0, MAX_LISTING_IMAGES),
+                  images: uploadedImages.slice(0, MAX_LISTING_IMAGES),
                   ...(platform === 'gaming'
                     ? {
                         gameName,
@@ -709,7 +735,7 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
             if (editingListing.description !== description.trim()) changedFields.push('description');
             if (editingListing.priceMinor !== priceMinor) changedFields.push('priceMinor');
             if (editingListing.subcategory !== subcategory) changedFields.push('subcategory');
-            if (JSON.stringify(editingListing.images || []) !== JSON.stringify(listingImages)) {
+            if (JSON.stringify(editingListing.images || []) !== JSON.stringify(uploadedImages)) {
               changedFields.push('images');
             }
             if (changedFields.length === 0) changedFields.push('resubmitted');
@@ -728,7 +754,7 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
               createdAt: serverTimestamp(),
             }).catch(() => {});
 
-            await updateDoc(doc(db, 'listings', editingListing.id), {
+            await updateDoc(reservedListingRef, {
               ...mutableFields,
               currency,
               verifiedOptions: [],
@@ -740,7 +766,7 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
         }
       } else {
         try {
-          const ref = await addDoc(collection(db, 'listings'), {
+          await setDoc(reservedListingRef, {
             ...mutableFields,
             sellerId: userUid,
             sellerName: profile.displayName,
@@ -752,7 +778,6 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
             views: 0,
             createdAt: serverTimestamp(),
           });
-          targetListingId = ref.id;
         } catch (e) {
           handleFirestoreError(e, OperationType.CREATE, 'listings');
         }

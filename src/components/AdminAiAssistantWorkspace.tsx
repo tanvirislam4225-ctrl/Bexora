@@ -84,11 +84,9 @@ export interface AdminAiAssistantWorkspaceProps {
   reportedDealsCount: number;
   healthSnapshot: Record<string, unknown> | null;
   enablingCloudService: 'token_service' | 'fcm_apis' | null;
-  downloadingInfinityZip: boolean;
   onToggleEmergencyStop: () => Promise<void>;
   onRefreshSystemHealth: () => Promise<void>;
   onEnableCloudService: (target: 'token_service' | 'fcm_apis') => Promise<void>;
-  onDownloadInfinityZip: () => Promise<void>;
   onExportJsonBackup: () => void;
   onWriteAuditLog: (
     actorId: string,
@@ -192,11 +190,9 @@ export const AdminAiAssistantWorkspace: React.FC<AdminAiAssistantWorkspaceProps>
   reportedDealsCount,
   healthSnapshot,
   enablingCloudService,
-  downloadingInfinityZip,
   onToggleEmergencyStop,
   onRefreshSystemHealth,
   onEnableCloudService,
-  onDownloadInfinityZip,
   onExportJsonBackup,
   onWriteAuditLog,
   onFlash,
@@ -2170,15 +2166,6 @@ export const AdminAiAssistantWorkspace: React.FC<AdminAiAssistantWorkspaceProps>
                     Export a static frontend bundle or non-secret configuration checkpoint before applying major platform updates.
                   </p>
                   <div className="flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      disabled={downloadingInfinityZip || settings.aiEmergencyStop}
-                      onClick={() => void onDownloadInfinityZip()}
-                      className="bx-btn bx-btn-primary px-3.5 py-2 text-xs font-extrabold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
-                    >
-                      <Download className="w-3.5 h-3.5" />
-                      {downloadingInfinityZip ? 'Packaging .zip…' : 'Download InfinityFree .zip'}
-                    </button>
                     <button
                       type="button"
                       onClick={onExportJsonBackup}

@@ -37,6 +37,8 @@ import {
   type ReportModalTarget,
 } from '../lib/moderationClient';
 import { emitUserNotification } from '../lib/notificationService';
+import { UserPresenceBadge } from './UserPresenceBadge';
+import { ActiveStatus } from './ActiveStatus';
 
 interface ChatViewProps {
   userUid: string | null;
@@ -379,6 +381,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
           ) : (
             conversations.map((conv) => {
               const peerName = conv.buyerId === userUid ? conv.sellerName : conv.buyerName;
+              const peerUid = conv.buyerId === userUid ? conv.sellerId : conv.buyerId;
               const isSelected = conv.id === selectedId;
               return (
                 <button
@@ -394,14 +397,20 @@ export const ChatView: React.FC<ChatViewProps> = ({
                     border: isSelected ? '1.5px solid var(--border-strong)' : '1.5px solid transparent',
                   }}
                 >
-                  <div
-                    className="w-10 h-10 rounded-full grid place-items-center font-extrabold text-xs text-white shrink-0"
-                    style={{ background: 'var(--purple)' }}
-                  >
-                    {peerName.slice(0, 2).toUpperCase()}
+                  <div className="relative shrink-0">
+                    <div
+                      className="w-10 h-10 rounded-full grid place-items-center font-extrabold text-xs text-white shrink-0"
+                      style={{ background: 'var(--purple)' }}
+                    >
+                      {peerName.slice(0, 2).toUpperCase()}
+                    </div>
+                    <ActiveStatus userId={peerUid} viewerUserId={userUid} mode="dot" className="absolute -bottom-0.5 -right-0.5" />
                   </div>
                   <div className="min-w-0 flex-1">
-                    <div className="font-extrabold text-sm truncate">{peerName}</div>
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="font-extrabold text-sm truncate">{peerName}</span>
+                      <UserPresenceBadge uid={peerUid} mode="compact" className="text-[10px]" />
+                    </div>
                     <div className="text-xs truncate font-semibold" style={{ color: 'var(--orange)' }}>
                       {conv.listingTitle}
                     </div>
@@ -436,10 +445,19 @@ export const ChatView: React.FC<ChatViewProps> = ({
                     <ArrowLeft className="w-4 h-4" />
                   </button>
                   <div className="min-w-0">
-                    <h3 className="font-extrabold text-sm truncate">
-                      {activeConv.buyerId === userUid ? activeConv.sellerName : activeConv.buyerName}
-                    </h3>
-                    <p className="bx-hint truncate">Asset: {activeConv.listingTitle}</p>
+                    <div className="flex items-center gap-2">
+                      <h3 className="font-extrabold text-sm truncate">
+                        {activeConv.buyerId === userUid ? activeConv.sellerName : activeConv.buyerName}
+                      </h3>
+                      <ActiveStatus
+                        userId={activeConv.buyerId === userUid ? activeConv.sellerId : activeConv.buyerId}
+                        viewerUserId={userUid}
+                        mode="full"
+                      />
+                    </div>
+                    <div className="flex items-center gap-2 text-xs truncate">
+                      <span className="bx-hint truncate">Asset: {activeConv.listingTitle}</span>
+                    </div>
                   </div>
                 </div>
                 {onReportConversation && (

@@ -350,18 +350,20 @@ test('Security Event Logger: redacts Bearer tokens, API keys, private keys, and 
   assert.ok(getRecentSecurityEvents(5).some((e) => e.id === evt.id));
 });
 
-test('Rate Limit IP Spoof Defense & CSRF Header Hardening: uses rightmost X-Forwarded-For hop and blocks X-Forwarded-Host spoofing & cross-origin Referer', () => {
-  // Attacker prepends forged IPs in X-Forwarded-For; ingress appends real client IP 203.0.113.45 at the end
+test('Rate Limit IP Spoof Defense & CSRF Header Hardening: uses Express reqIp (trust proxy) and blocks X-Forwarded-Host spoofing & cross-origin Referer', () => {
+  // Express req.ip (derived via TRUST_PROXY_HOPS) is used directly and ignores forged/proxy X-Forwarded-For hops
   assert.equal(
     extractClientIpKey({
-      xForwardedFor: '1.1.1.1, 8.8.8.8, 203.0.113.45',
+      xForwardedFor: '1.1.1.1, 8.8.8.8, 172.16.0.10',
+      reqIp: '::ffff:203.0.113.45',
       remoteAddress: '10.0.0.2',
     }),
     '203.0.113.45'
   );
   assert.equal(
     extractClientIpKey({
-      xForwardedFor: 'not-an-ip, ::ffff:198.51.100.77',
+      xForwardedFor: '1.1.1.1, 8.8.8.8',
+      remoteAddress: '::ffff:198.51.100.77',
     }),
     '198.51.100.77'
   );

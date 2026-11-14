@@ -74,11 +74,10 @@ function normalizeCandidateHostname(raw: string | null | undefined): string {
 /**
  * Safely resolves the effective Firebase `authDomain`:
  * 1. Explicit `VITE_FIREBASE_CUSTOM_AUTH_DOMAIN` override if valid and non-placeholder.
- * 2. Current browser HTTPS hostname when already on a direct BEXORA brand domain (`bexora.com`, `auth.bexora.com`, `bexora.ai.studio`).
- * 3. Live-verified centralized BEXORA brand domain (`auth.bexora.com` -> `bexora.com` -> `bexora.ai.studio`) when
- *    confirmed cross-origin embeddable on a verified HTTPS origin.
- * 4. Current browser HTTPS hostname when in `VERIFIED_FIRST_PARTY_AUTH_DOMAINS` (including `ais-mob-*`, `ais-dev-*`, `ais-pre-*`).
- * 5. `configuredAuthDomain` fallback on `http://localhost`, SSR/Node tests, or unverified hosts so OAuth never hits `redirect_uri_mismatch`.
+ * 2. When served over HTTPS on a direct BEXORA brand host, use `windowHostname` directly.
+ * 3. When served over HTTPS on a verified first-party host (`server.ts` proxying `/__/auth/*`),
+ *    use `verifiedBrandAuthDomain` if provided, otherwise use `windowHostname`.
+ * 4. Otherwise fall back to `configuredAuthDomain` (localhost, HTTP, or unverified origins).
  */
 export function resolveEffectiveFirebaseAuthDomain(input: ResolveAuthDomainInput): string {
   const fallback = String(input.configuredAuthDomain || '').trim();
@@ -87,24 +86,22 @@ export function resolveEffectiveFirebaseAuthDomain(input: ResolveAuthDomainInput
     return explicitEnv;
   }
 
-  const host = String(input.windowHostname || '').trim().toLowerCase();
-  const proto = String(input.windowProtocol || '').trim().toLowerCase();
+  const host = normalizeCandidateHostname(input.windowHostname);
+  const protocol = String(input.windowProtocol || '').trim().toLowerCase();
+  const isHttps = protocol === 'https:';
+  if (!isHttps || !host) {
+    return fallback;
+  }
 
-  if (proto === 'https:' && host && DIRECT_BEXORA_BRAND_HOSTS.has(host)) {
+  if (DIRECT_BEXORA_BRAND_HOSTS.has(host)) {
     return host;
   }
 
-  const verifiedBrand = normalizeCandidateHostname(input.verifiedBrandAuthDomain);
-  if (
-    proto === 'https:' &&
-    host &&
-    verifiedBrand &&
-    VERIFIED_FIRST_PARTY_AUTH_DOMAINS.has(host)
-  ) {
-    return verifiedBrand;
-  }
-
-  if (proto === 'https:' && host && VERIFIED_FIRST_PARTY_AUTH_DOMAINS.has(host)) {
+  if (VERIFIED_FIRST_PARTY_AUTH_DOMAINS.has(host)) {
+    const verifiedBrand = normalizeCandidateHostname(input.verifiedBrandAuthDomain);
+    if (verifiedBrand) {
+      return verifiedBrand;
+    }
     return host;
   }
 
@@ -329,17 +326,29 @@ export interface ResolveNavbarAuthStateInput {
   hasFbUser: boolean;
   hasProfile: boolean;
   profileBootstrapped: boolean;
+  hasCachedUser?: boolean;
+  hasFirebaseAuthKey?: boolean;
 }
 
 /**
  * Clean 3-state auth lifecycle policy for Navbar & global navigation:
- * - 'initializing': Firebase is determining auth state, or authenticated UID exists but profile snapshot is hydrating.
- *   Shows a neutral loading skeleton icon. Zero demo name, fake initials, or placeholder user.
- * - 'authenticated': Firebase confirms user is signed in AND real profile is loaded. Displays real initials/avatar, username, and actual balance.
- * - 'unauthenticated': Firebase confirms no user is logged in. Displays Login / Register button.
+ * - When hasCachedUser is true (and not explicitly signing out), immediately returns 'authenticated'
+ *   so the Navbar displays the user without layout shift or skeleton flash.
+ * - When hasFirebaseAuthKey is explicitly false before authReady resolves, immediately returns
+ *   'unauthenticated' so visitors see Sign In with zero delay.
+ * - 'initializing': Only when authReady is false (with a persisted key but no cached user yet) or
+ *   authenticated UID exists without cached or loaded profile.
+ * - 'authenticated': User is confirmed signed in (or present in cached storage) with profile available.
+ * - 'unauthenticated': Confirmed signed out or explicitly signing out.
  */
 export function resolveNavbarAuthState(input: ResolveNavbarAuthStateInput): AuthStateLifecycle {
   if (input.signingOut) {
+    return 'unauthenticated';
+  }
+  if (input.hasCachedUser) {
+    return 'authenticated';
+  }
+  if (input.hasFirebaseAuthKey === false && !input.authReady) {
     return 'unauthenticated';
   }
   if (!input.authReady) {
@@ -353,4 +362,5 @@ export function resolveNavbarAuthState(input: ResolveNavbarAuthStateInput): Auth
   }
   return 'authenticated';
 }
+
 

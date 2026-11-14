@@ -4,6 +4,8 @@ import { ShieldCheck, Star, Trophy, UserCheck, UserPlus } from 'lucide-react';
 import { PublicProfile } from '../types';
 import { db } from '../lib/firebase';
 import { canUserFollowSeller } from '../lib/engagementLogic';
+import { UserPresenceBadge } from './UserPresenceBadge';
+import { ActiveStatus } from './ActiveStatus';
 
 interface TopSellersViewProps {
   onOpenPublicProfile: (uid: string) => void;
@@ -121,22 +123,26 @@ export const TopSellersView: React.FC<TopSellersViewProps> = ({
                       onClick={() => onOpenPublicProfile(s.uid)}
                       className="flex items-center gap-3 text-left min-w-0 hover:underline"
                     >
-                      <div className="w-12 h-12 rounded-lg border-2 border-[var(--bx-border)] bg-[var(--bx-surface-alt)] overflow-hidden flex items-center justify-center font-black shrink-0">
-                        {s.avatarUrl ? (
-                          <img
-                            src={s.avatarUrl}
-                            alt={s.displayName}
-                            referrerPolicy="no-referrer"
-                            className="w-full h-full object-cover"
-                          />
-                        ) : (
-                          <span>{s.displayName.slice(0, 2).toUpperCase()}</span>
-                        )}
+                      <div className="relative shrink-0">
+                        <div className="w-12 h-12 rounded-lg border-2 border-[var(--bx-border)] bg-[var(--bx-surface-alt)] overflow-hidden flex items-center justify-center font-black shrink-0">
+                          {s.avatarUrl ? (
+                            <img
+                              src={s.avatarUrl}
+                              alt={s.displayName}
+                              referrerPolicy="no-referrer"
+                              className="w-full h-full object-cover"
+                            />
+                          ) : (
+                            <span>{s.displayName.slice(0, 2).toUpperCase()}</span>
+                          )}
+                        </div>
+                        <ActiveStatus userId={s.uid} viewerUserId={viewerUid} mode="dot" className="absolute -bottom-1 -right-1" />
                       </div>
                       <div className="min-w-0">
                         <h2 className="font-black text-base leading-tight truncate">{s.displayName}</h2>
                         <div className="flex items-center gap-1.5 text-xs font-bold opacity-70 min-w-0">
                           <span className="truncate">@{s.username}</span>
+                          <ActiveStatus userId={s.uid} viewerUserId={viewerUid} mode="full" />
                           <span aria-hidden="true" className="shrink-0">·</span>
                           <span className="shrink-0 whitespace-nowrap tabular-nums">
                             {followerTotal.toLocaleString('en-US')} follower

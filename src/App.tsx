@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { onAuthStateChanged, signOut, User } from 'firebase/auth';
 import {
   collection,
@@ -63,7 +63,6 @@ import {
   db,
   detectFirebaseAuthCapabilities,
   dismissRecoverableSessionPrompt,
-  ensureFirestoreBootReady,
   ensureUserProfileInitialized,
   extendCurrentUserSessionInteractive,
   extractUserFacingFirestoreError,
@@ -84,6 +83,14 @@ import {
   resolveNavbarAuthState,
   shouldShowProtectedRouteLoading,
 } from './lib/authDomainAndPersistenceLogic';
+import {
+  clearCachedUser,
+  hasFirebaseAuthUserKey,
+  readCachedUser,
+  shouldCheckAuthRedirectResult,
+  writeCachedUser,
+  type CachedUser,
+} from './lib/cachedUser';
 import {
   DEFAULT_PUBLIC_SETTINGS,
   getProtectionDurationHours,
@@ -137,33 +144,17 @@ import { isRtlLanguage, t } from './lib/i18n';
 import { usePWAInstall } from './hooks/usePWAInstall';
 import { BexoraLogo, PlatformIcon } from './components/Icons';
 import { BottomNav, Navbar } from './components/Navbar';
-import { AuthModal } from './components/AuthModal';
-import {
-  FirebaseAuthActionModal,
-  FirebaseAuthActionParams,
-} from './components/FirebaseAuthActionModal';
+import type { FirebaseAuthActionParams } from './components/FirebaseAuthActionModal';
 import { ListingCard } from './components/ListingCard';
 import {
   EMPTY_FILTERS,
   FilterPanel,
   MarketplaceFilterState,
 } from './components/FilterPanel';
-import { CreateListingModal } from './components/CreateListingModal';
-import { ListingDetailModal } from './components/ListingDetailModal';
-import { CheckoutView } from './components/CheckoutView';
-import { ChatView } from './components/ChatView';
-import { DealsView } from './components/DealsView';
-import { WalletModal } from './components/WalletModal';
-import { ProfileView } from './components/ProfileView';
-import { TopSellersView } from './components/TopSellersView';
-import { FavoritesView } from './components/FavoritesView';
-import { MyBidsView } from './components/MyBidsView';
-import { FollowingView } from './components/FollowingView';
-import { AdminDashboard } from './components/AdminDashboard';
-import { FloatingSupportWidget } from './components/FloatingSupportWidget';
-import { PWAInstallBanner } from './components/PWAInstallBanner';
 import { NotificationCenter } from './components/NotificationCenter';
-import { NotificationPermissionOnboarding } from './components/NotificationPermissionOnboarding';
+import { MarketplaceFooter } from './components/MarketplaceFooter';
+import { initializeUserPresenceSession } from './lib/userPresenceService';
+import { usePresence } from './lib/presenceService';
 import { canUserFollowSeller, resolveSellerFollowerCount } from './lib/engagementLogic';
 import {
   FollowTargetSellerSummary,
@@ -180,19 +171,88 @@ import {
   saveGuestRecentSearches,
   upsertRecentSearchList,
 } from './lib/recentSearchLogic';
-import { LiveActivityTickers } from './components/LiveActivityTickers';
-import { RecentSearchesView } from './components/RecentSearchesView';
-import { ReviewsView } from './components/ReviewsView';
-import { InfoCenterView } from './components/InfoCenterView';
-import { MarketplaceFooter } from './components/MarketplaceFooter';
-import { ModerationStatusBannerAndAppealModal } from './components/ModerationStatusBannerAndAppealModal';
-import { ReportUserModal } from './components/ReportUserModal';
 import {
   fetchMyModerationStatus,
   type MyModerationStatusResponse,
   type ReportModalTarget,
 } from './lib/moderationClient';
 import type { UserRestrictionRecord } from './types/moderation';
+
+const AuthModal = lazy(() =>
+  import('./components/AuthModal').then((m) => ({ default: m.AuthModal })),
+);
+const FirebaseAuthActionModal = lazy(() =>
+  import('./components/FirebaseAuthActionModal').then((m) => ({
+    default: m.FirebaseAuthActionModal,
+  })),
+);
+const CreateListingModal = lazy(() =>
+  import('./components/CreateListingModal').then((m) => ({ default: m.CreateListingModal })),
+);
+const ListingDetailModal = lazy(() =>
+  import('./components/ListingDetailModal').then((m) => ({ default: m.ListingDetailModal })),
+);
+const CheckoutView = lazy(() =>
+  import('./components/CheckoutView').then((m) => ({ default: m.CheckoutView })),
+);
+const ChatView = lazy(() =>
+  import('./components/ChatView').then((m) => ({ default: m.ChatView })),
+);
+const DealsView = lazy(() =>
+  import('./components/DealsView').then((m) => ({ default: m.DealsView })),
+);
+const WalletModal = lazy(() =>
+  import('./components/WalletModal').then((m) => ({ default: m.WalletModal })),
+);
+const ProfileView = lazy(() =>
+  import('./components/ProfileView').then((m) => ({ default: m.ProfileView })),
+);
+const TopSellersView = lazy(() =>
+  import('./components/TopSellersView').then((m) => ({ default: m.TopSellersView })),
+);
+const FavoritesView = lazy(() =>
+  import('./components/FavoritesView').then((m) => ({ default: m.FavoritesView })),
+);
+const MyBidsView = lazy(() =>
+  import('./components/MyBidsView').then((m) => ({ default: m.MyBidsView })),
+);
+const FollowingView = lazy(() =>
+  import('./components/FollowingView').then((m) => ({ default: m.FollowingView })),
+);
+const AdminDashboard = lazy(() =>
+  import('./components/AdminDashboard').then((m) => ({ default: m.AdminDashboard })),
+);
+const FloatingSupportWidget = lazy(() =>
+  import('./components/FloatingSupportWidget').then((m) => ({ default: m.FloatingSupportWidget })),
+);
+const PWAInstallBanner = lazy(() =>
+  import('./components/PWAInstallBanner').then((m) => ({ default: m.PWAInstallBanner })),
+);
+const NotificationPermissionOnboarding = lazy(() =>
+  import('./components/NotificationPermissionOnboarding').then((m) => ({
+    default: m.NotificationPermissionOnboarding,
+  })),
+);
+const LiveActivityTickers = lazy(() =>
+  import('./components/LiveActivityTickers').then((m) => ({ default: m.LiveActivityTickers })),
+);
+const RecentSearchesView = lazy(() =>
+  import('./components/RecentSearchesView').then((m) => ({ default: m.RecentSearchesView })),
+);
+const ReviewsView = lazy(() =>
+  import('./components/ReviewsView').then((m) => ({ default: m.ReviewsView })),
+);
+const InfoCenterView = lazy(() =>
+  import('./components/InfoCenterView').then((m) => ({ default: m.InfoCenterView })),
+);
+const ModerationStatusBannerAndAppealModal = lazy(() =>
+  import('./components/ModerationStatusBannerAndAppealModal').then((m) => ({
+    default: m.ModerationStatusBannerAndAppealModal,
+  })),
+);
+const ReportUserModal = lazy(() =>
+  import('./components/ReportUserModal').then((m) => ({ default: m.ReportUserModal })),
+);
 
 const PENDING_AUTH_INTENT_STORAGE_KEY = 'bx_pending_auth_intent';
 
@@ -237,6 +297,83 @@ function mapListingDocument(id: string, ld: Record<string, unknown>): Marketplac
       ? (ld.createdAt as { toMillis: () => number }).toMillis()
       : Date.now(),
   };
+}
+
+const LISTINGS_CACHE_KEY = 'bx_listings_v1';
+const LISTINGS_CACHE_MAX_BYTES = 200 * 1024;
+const INITIAL_LISTINGS_PAGE_SIZE = 24;
+
+function readCachedListings(): MarketplaceListing[] {
+  if (typeof window === 'undefined' || !window.localStorage) return [];
+  try {
+    const raw = window.localStorage.getItem(LISTINGS_CACHE_KEY);
+    if (!raw || raw.length > LISTINGS_CACHE_MAX_BYTES) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (item): item is MarketplaceListing =>
+        Boolean(item && typeof item === 'object' && typeof item.id === 'string' && typeof item.title === 'string')
+    );
+  } catch {
+    return [];
+  }
+}
+
+function writeCachedListings(listings: MarketplaceListing[]): void {
+  if (typeof window === 'undefined' || !window.localStorage) return;
+  try {
+    const slim = listings.slice(0, INITIAL_LISTINGS_PAGE_SIZE).map((item) => {
+      const firstImg = Array.isArray(item.images) && item.images[0] ? String(item.images[0]) : '';
+      const safeCachedImg =
+        firstImg.startsWith('https://') || (firstImg.startsWith('data:image/') && firstImg.length <= 24_000)
+          ? [firstImg]
+          : [];
+      return {
+        id: item.id,
+        sellerId: item.sellerId,
+        sellerName: item.sellerName,
+        sellerUsername: item.sellerUsername,
+        sellerVerified: item.sellerVerified,
+        platform: item.platform,
+        subcategory: item.subcategory,
+        title: item.title,
+        description: '',
+        priceMinor: item.priceMinor,
+        currency: item.currency,
+        monetizationStatus: item.monetizationStatus,
+        claimedOptions: item.claimedOptions.slice(0, 6),
+        verifiedOptions: item.verifiedOptions.slice(0, 6),
+        verificationState: item.verificationState,
+        ageYears: item.ageYears,
+        ageMonths: item.ageMonths,
+        metricValue: item.metricValue,
+        monthlyRevenueMinor: item.monthlyRevenueMinor,
+        accountUrl: '',
+        urlValidationStatus: item.urlValidationStatus,
+        gameName: item.gameName,
+        gameUid: item.gameUid,
+        gameLevel: item.gameLevel,
+        images: safeCachedImg,
+        acceptedBidAmountMinor: item.acceptedBidAmountMinor,
+        status: item.status,
+        views: item.views,
+        firstPublishedAtMs: item.firstPublishedAtMs,
+        createdAtMs: item.createdAtMs,
+      } satisfies MarketplaceListing;
+    });
+
+    while (slim.length > 0) {
+      const json = JSON.stringify(slim);
+      if (json.length <= LISTINGS_CACHE_MAX_BYTES) {
+        window.localStorage.setItem(LISTINGS_CACHE_KEY, json);
+        return;
+      }
+      slim.pop();
+    }
+    window.localStorage.removeItem(LISTINGS_CACHE_KEY);
+  } catch {
+    // Non-fatal if storage quota is restricted
+  }
 }
 
 function mapDealDocument(id: string, dl: Record<string, unknown>): DealRecord {
@@ -497,6 +634,8 @@ export default function App() {
   }, []);
 
   // Auth & User State
+  const [cachedUser, setCachedUser] = useState<CachedUser | null>(() => readCachedUser());
+  const [hasFbAuthKey, setHasFbAuthKey] = useState<boolean>(() => hasFirebaseAuthUserKey());
   const [fbUser, setFbUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const [profileBootstrapped, setProfileBootstrapped] = useState(false);
@@ -508,7 +647,10 @@ export default function App() {
 
   // Public & Authenticated Data State
   const [settings, setSettings] = useState<PublicSettings>(DEFAULT_PUBLIC_SETTINGS);
-  const [activeListings, setActiveListings] = useState<MarketplaceListing[]>([]);
+  const [listingLimit, setListingLimit] = useState<number>(INITIAL_LISTINGS_PAGE_SIZE);
+  const [activeListings, setActiveListings] = useState<MarketplaceListing[]>(() =>
+    readCachedListings()
+  );
   const [myListings, setMyListings] = useState<MarketplaceListing[]>([]);
   const [myBids, setMyBids] = useState<BidRecord[]>([]);
   const [favorites, setFavorites] = useState<FavoriteRecord[]>([]);
@@ -615,7 +757,20 @@ export default function App() {
 
   useEffect(() => {
     if (!fbUser || !profileBootstrapped || signingOut) return;
-    void syncActiveWebPushTokenForSession(fbUser.uid, settings.fcmVapidPublicKey);
+    const winWithIdle = window as unknown as {
+      requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
+      cancelIdleCallback?: (id: number) => void;
+    };
+    let idleId: number | null = null;
+    let timeoutId: number | null = null;
+    const runInitialPushSync = () => {
+      void syncActiveWebPushTokenForSession(fbUser.uid, settings.fcmVapidPublicKey);
+    };
+    if (typeof winWithIdle.requestIdleCallback === 'function') {
+      idleId = winWithIdle.requestIdleCallback(runInitialPushSync, { timeout: 3000 });
+    } else {
+      timeoutId = window.setTimeout(runInitialPushSync, 3000);
+    }
     const onWindowFocusOrVisible = () => {
       if (typeof document === 'undefined' || document.visibilityState === 'visible') {
         void syncActiveWebPushTokenForSession(fbUser.uid, settings.fcmVapidPublicKey);
@@ -636,11 +791,86 @@ export default function App() {
       void dispatchForegroundNotificationAlert(kind, notificationPrefsRef.current);
     }, settings.fcmVapidPublicKey);
     return () => {
+      if (idleId !== null && typeof winWithIdle.cancelIdleCallback === 'function') {
+        winWithIdle.cancelIdleCallback(idleId);
+      }
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
+      }
       window.removeEventListener('focus', onWindowFocusOrVisible);
       document.removeEventListener('visibilitychange', onWindowFocusOrVisible);
       unsubFg();
     };
   }, [fbUser, profileBootstrapped, signingOut, settings.fcmVapidPublicKey, showFlash]);
+
+  const [idleUiReady, setIdleUiReady] = useState(false);
+  const prefetchAuthModal = useCallback(() => {
+    void import('./components/AuthModal');
+  }, []);
+
+  useEffect(() => {
+    const winWithIdle = window as unknown as {
+      requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
+      cancelIdleCallback?: (id: number) => void;
+    };
+    let idleId: number | null = null;
+    let timeoutId: number | null = null;
+    const activateIdleUi = () => {
+      setIdleUiReady(true);
+      prefetchAuthModal();
+    };
+    if (typeof winWithIdle.requestIdleCallback === 'function') {
+      idleId = winWithIdle.requestIdleCallback(activateIdleUi, { timeout: 2500 });
+    } else {
+      timeoutId = window.setTimeout(activateIdleUi, 2500);
+    }
+    return () => {
+      if (idleId !== null && typeof winWithIdle.cancelIdleCallback === 'function') {
+        winWithIdle.cancelIdleCallback(idleId);
+      }
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
+      }
+    };
+  }, [prefetchAuthModal]);
+
+  // Defer real-time presence tracking until after first paint (logged-in users only)
+  const [presenceReady, setPresenceReady] = useState(false);
+  useEffect(() => {
+    if (!fbUser || signingOut) {
+      setPresenceReady(false);
+      return;
+    }
+    const winWithIdle = window as unknown as {
+      requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
+      cancelIdleCallback?: (id: number) => void;
+    };
+    let idleId: number | null = null;
+    let timeoutId: number | null = null;
+    const activate = () => setPresenceReady(true);
+    if (typeof winWithIdle.requestIdleCallback === 'function') {
+      idleId = winWithIdle.requestIdleCallback(activate, { timeout: 3000 });
+    } else {
+      timeoutId = window.setTimeout(activate, 3000);
+    }
+    return () => {
+      if (idleId !== null && typeof winWithIdle.cancelIdleCallback === 'function') {
+        winWithIdle.cancelIdleCallback(idleId);
+      }
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
+      }
+    };
+  }, [fbUser?.uid, signingOut]);
+
+  usePresence(presenceReady && fbUser && !signingOut ? fbUser.uid : null);
+  useEffect(() => {
+    if (!presenceReady || !fbUser || signingOut) return;
+    const unsubPresence = initializeUserPresenceSession(fbUser.uid);
+    return () => {
+      unsubPresence();
+    };
+  }, [presenceReady, fbUser?.uid, signingOut]);
 
   const handleReconnectSession = useCallback(async () => {
     setReconnectingSession(true);
@@ -662,21 +892,103 @@ export default function App() {
     }
   }, [showFlash, navigateRoute]);
 
-  // Startup Auth Session Sanitization -> Firestore Connectivity Check -> Public Listeners
+  // Public Firestore Listeners (Immediate) & Deferred Idle Diagnostics
   useEffect(() => {
     let cancelled = false;
-    let unsubSettings: (() => void) | null = null;
-    let unsubListings: (() => void) | null = null;
-    let unsubAnnouncements: (() => void) | null = null;
 
-    detectFirebaseAuthCapabilities().then((caps) => {
-      if (!cancelled) setAuthCaps(caps);
-    });
+    const unsubSettings = onSnapshot(
+      doc(db, 'publicConfig', 'settings'),
+      (snap) => {
+        if (snap.exists()) {
+          const d = snap.data();
+          setSettings({
+            buyerFeeEnabled: d.buyerFeeEnabled !== undefined ? Boolean(d.buyerFeeEnabled) : true,
+            buyerFeePct: Number(d.buyerFeePct ?? 5),
+            sellerFeeEnabled: Boolean(d.sellerFeeEnabled),
+            sellerFeePct: Number(d.sellerFeePct ?? 0),
+            usdToBdtRate: Number(d.usdToBdtRate ?? d.usdtToBdtRate ?? DEFAULT_PUBLIC_SETTINGS.usdToBdtRate),
+            usdtToBdtRate: Number(d.usdtToBdtRate ?? d.usdToBdtRate ?? DEFAULT_PUBLIC_SETTINGS.usdToBdtRate),
+            activeCountryCode: String(d.activeCountryCode ?? 'BD'),
+            countryRates: d.countryRates && typeof d.countryRates === 'object' ? d.countryRates : DEFAULT_PUBLIC_SETTINGS.countryRates,
+            withdrawalMethods: Array.isArray(d.withdrawalMethods) ? d.withdrawalMethods : DEFAULT_PUBLIC_SETTINGS.withdrawalMethods,
+            manualPaymentConfig: Array.isArray(d.manualPaymentConfig) ? d.manualPaymentConfig : DEFAULT_PUBLIC_SETTINGS.manualPaymentConfig,
+            supportWhatsapp: String(d.supportWhatsapp ?? ''),
+            supportTelegram: String(d.supportTelegram ?? ''),
+            supportEmail: String(d.supportEmail ?? ''),
+            bkashNumber: String(d.bkashNumber ?? ''),
+            nagadNumber: String(d.nagadNumber ?? ''),
+            rocketNumber: String(d.rocketNumber ?? ''),
+            aiEmergencyStop: Boolean(d.aiEmergencyStop),
+            disabledMonetizationIds: Array.isArray(d.disabledMonetizationIds) ? d.disabledMonetizationIds : [],
+            gamingTitles:
+              Array.isArray(d.gamingTitles) && d.gamingTitles.length > 0
+                ? d.gamingTitles
+                : DEFAULT_PUBLIC_SETTINGS.gamingTitles,
+            protectionHoursYoutube: Number(d.protectionHoursYoutube ?? 168),
+            protectionHoursFacebook: Number(d.protectionHoursFacebook ?? 40),
+            protectionHoursDefault: Number(d.protectionHoursDefault ?? 40),
+            customProtectionWindowsEnabled: Boolean(d.customProtectionWindowsEnabled),
+            fcmVapidPublicKey: d.fcmVapidPublicKey ? String(d.fcmVapidPublicKey) : '',
+            wordpressPaymentEnabled: Boolean(d.wordpressPaymentEnabled),
+            wordpressSiteUrl: d.wordpressSiteUrl ? String(d.wordpressSiteUrl) : '',
+            wordpressBridgeEndpoint: d.wordpressBridgeEndpoint
+              ? String(d.wordpressBridgeEndpoint)
+              : '/wp-json/bexora/v1',
+            siteName: d.siteName ? String(d.siteName) : 'BEXORA',
+            brandTagline: d.brandTagline
+              ? String(d.brandTagline)
+              : 'Buy & Sell Verifiable Digital Assets',
+            logoUrl: d.logoUrl ? String(d.logoUrl) : '',
+            noticeBannerEnabled: Boolean(d.noticeBannerEnabled),
+            noticeBannerText: d.noticeBannerText ? String(d.noticeBannerText) : '',
+            enabledLanguages:
+              Array.isArray(d.enabledLanguages) && d.enabledLanguages.length > 0
+                ? (d.enabledLanguages as LanguageCode[])
+                : DEFAULT_PUBLIC_SETTINGS.enabledLanguages,
+          });
+          setRuntimeFallbackVapidPublicKey(d.fcmVapidPublicKey ? String(d.fcmVapidPublicKey) : '');
+        }
+      },
+      (err) => {
+        if (isTokenServiceDisabledError(err)) {
+          void recoverFirestoreFromTokenServiceError();
+        }
+      }
+    );
 
-    (async () => {
-      await ensureFirestoreBootReady();
+    const unsubAnnouncements = onSnapshot(
+      query(collection(db, 'announcements'), where('active', '==', true), limit(30)),
+      (snap) => {
+        const items: AnnouncementRecord[] = snap.docs
+          .map((docSnap) => {
+            const ad = docSnap.data();
+            return {
+              id: docSnap.id,
+              title: String(ad.title || ''),
+              preview: String(ad.preview || ad.title || ''),
+              body: String(ad.body || ''),
+              severity: (ad.severity || 'info') as AnnouncementRecord['severity'],
+              destination: String(ad.destination || ''),
+              active: Boolean(ad.active),
+              authorId: String(ad.authorId || ''),
+              createdAtMs: Number(
+                ad.createdAtMs || (ad.createdAt?.toMillis ? ad.createdAt.toMillis() : Date.now())
+              ),
+            };
+          })
+          .sort((a, b) => b.createdAtMs - a.createdAtMs);
+        setActiveAnnouncements(items);
+      },
+      () => {
+        // Non-fatal if offline
+      }
+    );
+
+    const runIdleChecks = () => {
       if (cancelled) return;
-
+      void detectFirebaseAuthCapabilities().then((caps) => {
+        if (!cancelled) setAuthCaps(caps);
+      });
       void prepareFirestoreAuthSession().then(() => {
         if (cancelled) return;
         const clearedMsg = consumeStaleTokenSessionClearedNotice();
@@ -684,149 +996,119 @@ export default function App() {
           setStaleSessionNotice(clearedMsg);
         }
       });
-
       void testFirestoreConnection();
+    };
 
-      unsubSettings = onSnapshot(
-        doc(db, 'publicConfig', 'settings'),
-        (snap) => {
-          if (snap.exists()) {
-            const d = snap.data();
-            setSettings({
-              buyerFeeEnabled: d.buyerFeeEnabled !== undefined ? Boolean(d.buyerFeeEnabled) : true,
-              buyerFeePct: Number(d.buyerFeePct ?? 5),
-              sellerFeeEnabled: Boolean(d.sellerFeeEnabled),
-              sellerFeePct: Number(d.sellerFeePct ?? 0),
-              usdToBdtRate: Number(d.usdToBdtRate ?? d.usdtToBdtRate ?? DEFAULT_PUBLIC_SETTINGS.usdToBdtRate),
-              usdtToBdtRate: Number(d.usdtToBdtRate ?? d.usdToBdtRate ?? DEFAULT_PUBLIC_SETTINGS.usdToBdtRate),
-              activeCountryCode: String(d.activeCountryCode ?? 'BD'),
-              countryRates: d.countryRates && typeof d.countryRates === 'object' ? d.countryRates : DEFAULT_PUBLIC_SETTINGS.countryRates,
-              withdrawalMethods: Array.isArray(d.withdrawalMethods) ? d.withdrawalMethods : DEFAULT_PUBLIC_SETTINGS.withdrawalMethods,
-              manualPaymentConfig: Array.isArray(d.manualPaymentConfig) ? d.manualPaymentConfig : DEFAULT_PUBLIC_SETTINGS.manualPaymentConfig,
-              supportWhatsapp: String(d.supportWhatsapp ?? ''),
-              supportTelegram: String(d.supportTelegram ?? ''),
-              supportEmail: String(d.supportEmail ?? ''),
-              bkashNumber: String(d.bkashNumber ?? ''),
-              nagadNumber: String(d.nagadNumber ?? ''),
-              rocketNumber: String(d.rocketNumber ?? ''),
-              aiEmergencyStop: Boolean(d.aiEmergencyStop),
-              disabledMonetizationIds: Array.isArray(d.disabledMonetizationIds) ? d.disabledMonetizationIds : [],
-              gamingTitles:
-                Array.isArray(d.gamingTitles) && d.gamingTitles.length > 0
-                  ? d.gamingTitles
-                  : DEFAULT_PUBLIC_SETTINGS.gamingTitles,
-              protectionHoursYoutube: Number(d.protectionHoursYoutube ?? 168),
-              protectionHoursFacebook: Number(d.protectionHoursFacebook ?? 40),
-              protectionHoursDefault: Number(d.protectionHoursDefault ?? 40),
-              customProtectionWindowsEnabled: Boolean(d.customProtectionWindowsEnabled),
-              fcmVapidPublicKey: d.fcmVapidPublicKey ? String(d.fcmVapidPublicKey) : '',
-              wordpressPaymentEnabled: Boolean(d.wordpressPaymentEnabled),
-              wordpressSiteUrl: d.wordpressSiteUrl ? String(d.wordpressSiteUrl) : '',
-              wordpressBridgeEndpoint: d.wordpressBridgeEndpoint
-                ? String(d.wordpressBridgeEndpoint)
-                : '/wp-json/bexora/v1',
-              siteName: d.siteName ? String(d.siteName) : 'BEXORA',
-              brandTagline: d.brandTagline
-                ? String(d.brandTagline)
-                : 'Buy & Sell Verifiable Digital Assets',
-              logoUrl: d.logoUrl ? String(d.logoUrl) : '',
-              noticeBannerEnabled: Boolean(d.noticeBannerEnabled),
-              noticeBannerText: d.noticeBannerText ? String(d.noticeBannerText) : '',
-              enabledLanguages:
-                Array.isArray(d.enabledLanguages) && d.enabledLanguages.length > 0
-                  ? (d.enabledLanguages as LanguageCode[])
-                  : DEFAULT_PUBLIC_SETTINGS.enabledLanguages,
-            });
-            setRuntimeFallbackVapidPublicKey(d.fcmVapidPublicKey ? String(d.fcmVapidPublicKey) : '');
-          }
-        },
-        (err) => {
-          if (isTokenServiceDisabledError(err)) {
-            void recoverFirestoreFromTokenServiceError();
-          }
-        }
-      );
-
-      unsubListings = onSnapshot(
-        query(collection(db, 'listings'), where('status', 'in', ['active', 'reserved']), limit(120)),
-        (snap) => {
-          const list: MarketplaceListing[] = snap.docs.map((docSnap) =>
-            mapListingDocument(docSnap.id, docSnap.data())
-          );
-          list.sort((a, b) => b.createdAtMs - a.createdAtMs);
-          setActiveListings(list);
-        },
-        (err) => {
-          if (isTokenServiceDisabledError(err)) {
-            void recoverFirestoreFromTokenServiceError();
-            return;
-          }
-          console.error('Active listings subscription error:', err);
-        }
-      );
-      unsubAnnouncements = onSnapshot(
-        query(collection(db, 'announcements'), where('active', '==', true), limit(30)),
-        (snap) => {
-          const items: AnnouncementRecord[] = snap.docs
-            .map((docSnap) => {
-              const ad = docSnap.data();
-              return {
-                id: docSnap.id,
-                title: String(ad.title || ''),
-                preview: String(ad.preview || ad.title || ''),
-                body: String(ad.body || ''),
-                severity: (ad.severity || 'info') as AnnouncementRecord['severity'],
-                destination: String(ad.destination || ''),
-                active: Boolean(ad.active),
-                authorId: String(ad.authorId || ''),
-                createdAtMs: Number(
-                  ad.createdAtMs || (ad.createdAt?.toMillis ? ad.createdAt.toMillis() : Date.now())
-                ),
-              };
-            })
-            .sort((a, b) => b.createdAtMs - a.createdAtMs);
-          setActiveAnnouncements(items);
-        },
-        () => {
-          // Non-fatal if offline
-        }
-      );
-    })();
+    const winWithIdle = window as unknown as {
+      requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
+      cancelIdleCallback?: (id: number) => void;
+    };
+    let idleId: number | null = null;
+    let timeoutId: number | null = null;
+    if (typeof winWithIdle.requestIdleCallback === 'function') {
+      idleId = winWithIdle.requestIdleCallback(runIdleChecks, { timeout: 3000 });
+    } else {
+      timeoutId = window.setTimeout(runIdleChecks, 3000);
+    }
 
     return () => {
       cancelled = true;
-      unsubSettings?.();
-      unsubListings?.();
-      unsubAnnouncements?.();
+      unsubSettings();
+      unsubAnnouncements();
+      if (idleId !== null && typeof winWithIdle.cancelIdleCallback === 'function') {
+        winWithIdle.cancelIdleCallback(idleId);
+      }
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
+      }
     };
   }, []);
 
-  // Auth Session Listener & Deduplicated User Profile Initialization
+  // Paginated Public Active Listings Listener (Immediate, 24 per page)
   useEffect(() => {
-    let active = true;
-    const unsubAuth = onAuthStateChanged(auth, async (u) => {
-      if (!u) {
-        const redirectedUser = await consumePendingAuthRedirectResult();
-        if (!active) return;
-        if (redirectedUser || auth.currentUser) {
-          // Returning OAuth redirect completed; onAuthStateChanged will immediately fire with the authenticated user
+    const unsubListings = onSnapshot(
+      query(
+        collection(db, 'listings'),
+        where('status', 'in', ['active', 'reserved']),
+        limit(listingLimit)
+      ),
+      (snap) => {
+        const list: MarketplaceListing[] = snap.docs.map((docSnap) =>
+          mapListingDocument(docSnap.id, docSnap.data())
+        );
+        list.sort((a, b) => b.createdAtMs - a.createdAtMs);
+        setActiveListings(list);
+        writeCachedListings(list);
+      },
+      (err) => {
+        if (isTokenServiceDisabledError(err)) {
+          void recoverFirestoreFromTokenServiceError();
           return;
         }
-        if (hasPendingRecoverableSession()) {
-          const caps = await detectFirebaseAuthCapabilities();
-          if (!active) return;
-          if (caps.tokenServiceStatus === 'disabled') {
-            await prepareFirestoreAuthSession();
+        console.error('Active listings subscription error:', err);
+      }
+    );
+    return () => unsubListings();
+  }, [listingLimit]);
+
+  // Auth Session Listener & Non-Blocking Background Profile Initialization
+  useEffect(() => {
+    let active = true;
+    const unsubAuth = onAuthStateChanged(auth, (u) => {
+      if (!u) {
+        const shouldCheckRedirect = shouldCheckAuthRedirectResult();
+        if (shouldCheckRedirect) {
+          void (async () => {
+            const redirectedUser = await consumePendingAuthRedirectResult();
             if (!active) return;
-            if (auth.currentUser) {
+            if (redirectedUser || auth.currentUser) {
               return;
             }
-          }
-          const fallbackMsg = consumeStaleTokenSessionClearedNotice();
-          if (fallbackMsg) {
-            setStaleSessionNotice(fallbackMsg);
-          }
+            if (hasPendingRecoverableSession()) {
+              const caps = await detectFirebaseAuthCapabilities();
+              if (!active) return;
+              if (caps.tokenServiceStatus === 'disabled') {
+                await prepareFirestoreAuthSession();
+                if (!active) return;
+                if (auth.currentUser) {
+                  return;
+                }
+              }
+              const fallbackMsg = consumeStaleTokenSessionClearedNotice();
+              if (fallbackMsg) {
+                setStaleSessionNotice(fallbackMsg);
+              }
+            }
+            clearCachedUser();
+            setCachedUser(null);
+            setHasFbAuthKey(false);
+            arrivalTrackerRef.current.reset();
+            setProfileBootstrapped(false);
+            setFbUser(null);
+            setAuthReady(true);
+            setProfile(null);
+            setPrivateUser(null);
+            setAdminRole('none');
+            setMyListings([]);
+            setMyBids([]);
+            setFavorites([]);
+            setFollowedSellers([]);
+            setConversations([]);
+            setDeals([]);
+            setDeposits([]);
+            setWithdrawals([]);
+            setPersonalNotifications([]);
+            setNotificationsLoading(false);
+            setNotificationsError(null);
+            setFirestoreRestriction(null);
+            setModerationStatus(null);
+          })();
+          return;
         }
+
+        clearCachedUser();
+        setCachedUser(null);
+        setHasFbAuthKey(false);
         arrivalTrackerRef.current.reset();
         setProfileBootstrapped(false);
         setFbUser(null);
@@ -850,40 +1132,39 @@ export default function App() {
         return;
       }
 
+      // Immediately confirm auth state so UI & listeners never block on token/profile network checks
       markAuthenticatedSessionActive(u);
-
-      // Keep Firebase's native ProactiveRefresh active unless Token Service is conclusively disabled
-      void detectFirebaseAuthCapabilities().then((caps) => {
-        syncProactiveRefreshWithCapabilities(u, caps.tokenServiceStatus);
-      });
-
-      // Validate/refresh the ID token via persisted refreshToken; sign out ONLY if account was genuinely revoked/disabled
-      await getValidFirebaseIdToken(false);
-      if (!active) return;
-      if (!auth.currentUser) {
-        const fallbackMsg = consumeStaleTokenSessionClearedNotice();
-        if (fallbackMsg) {
-          setStaleSessionNotice(fallbackMsg);
-          setTokenBannerDismissed(false);
-        }
-        return;
-      }
-
-      const activeUser = auth.currentUser || u;
+      setHasFbAuthKey(true);
       setStaleSessionNotice(null);
       setSessionExtendPromptVisible(false);
-      setFbUser(activeUser);
+      setFbUser(u);
       setAuthReady(true);
+      syncProactiveRefreshWithCapabilities(u, authCaps?.tokenServiceStatus);
 
-      try {
-        await ensureUserProfileInitialized(activeUser);
-      } catch (err) {
-        console.warn('Profile bootstrap notice:', err);
-      } finally {
-        if (active) {
-          setProfileBootstrapped(true);
+      void Promise.allSettled([
+        getValidFirebaseIdToken(false),
+        ensureUserProfileInitialized(u),
+      ]).then((results) => {
+        if (!active) return;
+        const profileResult = results[1];
+        if (profileResult.status === 'rejected') {
+          console.warn('Profile bootstrap notice:', profileResult.reason);
         }
-      }
+        if (!auth.currentUser) {
+          clearCachedUser();
+          setCachedUser(null);
+          setHasFbAuthKey(false);
+          const fallbackMsg = consumeStaleTokenSessionClearedNotice();
+          if (fallbackMsg) {
+            setStaleSessionNotice(fallbackMsg);
+            setTokenBannerDismissed(false);
+          }
+          setFbUser(null);
+          setProfileBootstrapped(false);
+          return;
+        }
+        setProfileBootstrapped(true);
+      });
     });
 
     return () => {
@@ -1023,9 +1304,9 @@ export default function App() {
     }
   }, [showFlash]);
 
-  // Authenticated User Real-Time Subscriptions (gated until profile bootstrap & detached cleanly on logout)
+  // Authenticated User Real-Time Subscriptions (start immediately once fbUser exists; detached cleanly on logout)
   useEffect(() => {
-    if (!fbUser || !profileBootstrapped || signingOut) return;
+    if (!fbUser || signingOut) return;
     const uid = fbUser.uid;
     const unsubs: (() => void)[] = [];
 
@@ -1058,7 +1339,7 @@ export default function App() {
         (snap) => {
           if (snap.exists()) {
             const d = snap.data();
-            setProfile({
+            const nextProfile: PublicProfile = {
               uid: d.uid,
               displayName: d.displayName,
               username: d.username,
@@ -1077,6 +1358,14 @@ export default function App() {
                   ? Math.max(0, Math.floor(d.followerCount))
                   : 0,
               hidePublicActivityName: Boolean(d.hidePublicActivityName),
+            };
+            setProfile(nextProfile);
+            writeCachedUser(nextProfile);
+            setCachedUser({
+              uid: String(nextProfile.uid || uid),
+              displayName: String(nextProfile.displayName || ''),
+              username: String(nextProfile.username || ''),
+              avatarUrl: String(nextProfile.avatarUrl || ''),
             });
           }
         },
@@ -1427,7 +1716,7 @@ export default function App() {
     setNotificationsError(null);
     unsubs.push(
       onSnapshot(
-        query(collection(db, 'notifications'), where('recipientId', '==', uid), limit(150)),
+        query(collection(db, 'notifications'), where('recipientId', '==', uid), limit(50)),
         (snap) => {
           const parsed: NotificationRecord[] = snap.docs.map((d) => {
             const nd = d.data();
@@ -1479,7 +1768,7 @@ export default function App() {
     );
 
     return () => unsubs.forEach((u) => u());
-  }, [fbUser?.uid, profileBootstrapped, signingOut, notifReloadEpoch]);
+  }, [fbUser?.uid, signingOut, notifReloadEpoch]);
 
   // Idempotent Escrow Protection Deadline Reminder Check (expiring within 6h & expired)
   useEffect(() => {
@@ -1847,6 +2136,9 @@ export default function App() {
   const handleLogout = useCallback(async () => {
     const outgoingUid = fbUser?.uid ?? auth.currentUser?.uid ?? null;
     setSigningOut(true);
+    clearCachedUser();
+    setCachedUser(null);
+    setHasFbAuthKey(false);
     clearRecoverableSessionOnLogout();
     setStaleSessionNotice(null);
     setSessionExtendPromptVisible(false);
@@ -1874,6 +2166,9 @@ export default function App() {
       await unlinkCurrentDevicePushTokenOnLogout(outgoingUid);
       await new Promise((resolve) => window.setTimeout(resolve, 20));
       await signOut(auth);
+      clearCachedUser();
+      setCachedUser(null);
+      setHasFbAuthKey(false);
       clearRecoverableSessionOnLogout();
       setProfile(null);
       setPrivateUser(null);
@@ -2477,6 +2772,8 @@ export default function App() {
     hasFbUser: Boolean(fbUser),
     hasProfile: Boolean(profile),
     profileBootstrapped,
+    hasCachedUser: Boolean(cachedUser),
+    hasFirebaseAuthKey: hasFbAuthKey,
   });
 
   return (
@@ -2493,6 +2790,8 @@ export default function App() {
         onChangeCurrency={setCurrency}
         userUid={fbUser?.uid ?? null}
         profile={profile}
+        cachedUser={cachedUser}
+        hasCachedUser={Boolean(cachedUser)}
         authStatus={navbarAuthStatus}
         isAdmin={isAdmin}
         signingOut={signingOut}
@@ -2500,6 +2799,7 @@ export default function App() {
           setAndPersistPendingIntent(null);
           navigateRoute({ page: 'auth', authMode: 'login' });
         }}
+        onPrefetchAuth={prefetchAuthModal}
         onOpenCreateListing={() => {
           if (!fbUser) {
             requireAuthWithIntent({
@@ -2566,10 +2866,14 @@ export default function App() {
       />
 
       {/* Automatic Browser Notification Permission Onboarding (Case A: default permission) */}
-      <NotificationPermissionOnboarding
-        fallbackVapidKey={settings.fcmVapidPublicKey}
-        onFlash={showFlash}
-      />
+      {idleUiReady && (
+        <Suspense fallback={null}>
+          <NotificationPermissionOnboarding
+            fallbackVapidKey={settings.fcmVapidPublicKey}
+            onFlash={showFlash}
+          />
+        </Suspense>
+      )}
 
       {/* Optional Admin-Configured Top Platform Notice Banner */}
       {settings.noticeBannerEnabled && settings.noticeBannerText?.trim() && (
@@ -2699,29 +3003,32 @@ export default function App() {
 
       {/* Trust & Safety Standing, Warnings & Account Appeal Center */}
       {fbUser && (
-        <ModerationStatusBannerAndAppealModal
-          currentUser={
-            profile || {
-              uid: fbUser.uid,
-              displayName: fbUser.displayName,
+        <Suspense fallback={null}>
+          <ModerationStatusBannerAndAppealModal
+            currentUser={
+              profile || {
+                uid: fbUser.uid,
+                displayName: fbUser.displayName,
+              }
             }
-          }
-          restriction={moderationStatus?.restriction || firestoreRestriction}
-          activeStrikes={moderationStatus?.activeStrikes || []}
-          appeals={moderationStatus?.appeals || []}
-          myReports={moderationStatus?.myReports || []}
-          modalOpen={safetyAppealsModalOpen}
-          onOpenModal={() => {
-            void refreshModerationStatus();
-            setSafetyAppealsModalOpen(true);
-          }}
-          onCloseModal={() => setSafetyAppealsModalOpen(false)}
-          onRefreshStatus={refreshModerationStatus}
-        />
+            restriction={moderationStatus?.restriction || firestoreRestriction}
+            activeStrikes={moderationStatus?.activeStrikes || []}
+            appeals={moderationStatus?.appeals || []}
+            myReports={moderationStatus?.myReports || []}
+            modalOpen={safetyAppealsModalOpen}
+            onOpenModal={() => {
+              void refreshModerationStatus();
+              setSafetyAppealsModalOpen(true);
+            }}
+            onCloseModal={() => setSafetyAppealsModalOpen(false)}
+            onRefreshStatus={refreshModerationStatus}
+          />
+        </Suspense>
       )}
 
       {/* Main Content Area — All Pages Render as Full-Screen Website Views */}
       <main className="flex-1 w-full">
+        <Suspense fallback={null}>
         {authAction ? (
           <FirebaseAuthActionModal
             action={authAction}
@@ -2977,7 +3284,7 @@ export default function App() {
                         data-testid="home-latest-listings-grid"
                         className="bx-listing-grid"
                       >
-                        {activeListings.slice(0, 8).map((item) => (
+                        {activeListings.slice(0, 8).map((item, idx) => (
                           <ListingCard
                             key={item.id}
                             listing={item}
@@ -2987,6 +3294,7 @@ export default function App() {
                             onOpenSellerProfile={handleOpenPublicProfile}
                             isFavorited={favoriteListingIds.has(item.id)}
                             onToggleFavorite={(l) => void handleToggleFavorite(l)}
+                            priority={idx < 2}
                           />
                         ))}
                       </div>
@@ -3166,23 +3474,37 @@ export default function App() {
                         </div>
                       </div>
                     ) : (
-                      <div
-                        data-testid="marketplace-listings-grid"
-                        className="bx-listing-grid"
-                      >
-                        {filteredMarketplaceListings.map((item) => (
-                          <ListingCard
-                            key={item.id}
-                            listing={item}
-                            displayCurrency={currency}
-                            usdToBdtRate={settings.usdToBdtRate}
-                            onOpen={handleOpenListingDetail}
-                            onOpenSellerProfile={handleOpenPublicProfile}
-                            isFavorited={favoriteListingIds.has(item.id)}
-                            onToggleFavorite={(l) => void handleToggleFavorite(l)}
-                          />
-                        ))}
-                      </div>
+                      <>
+                        <div
+                          data-testid="marketplace-listings-grid"
+                          className="bx-listing-grid"
+                        >
+                          {filteredMarketplaceListings.map((item, idx) => (
+                            <ListingCard
+                              key={item.id}
+                              listing={item}
+                              displayCurrency={currency}
+                              usdToBdtRate={settings.usdToBdtRate}
+                              onOpen={handleOpenListingDetail}
+                              onOpenSellerProfile={handleOpenPublicProfile}
+                              isFavorited={favoriteListingIds.has(item.id)}
+                              onToggleFavorite={(l) => void handleToggleFavorite(l)}
+                              priority={idx < 2}
+                            />
+                          ))}
+                        </div>
+                        {activeListings.length >= listingLimit && (
+                          <div className="pt-6 flex justify-center">
+                            <button
+                              type="button"
+                              onClick={() => setListingLimit((n) => n + INITIAL_LISTINGS_PAGE_SIZE)}
+                              className="bx-btn bx-btn-ghost px-6 py-2.5 text-xs font-extrabold"
+                            >
+                              Load more listings
+                            </button>
+                          </div>
+                        )}
+                      </>
                     )}
                   </div>
                 </div>
@@ -3988,6 +4310,7 @@ export default function App() {
             )}
           </>
         )}
+        </Suspense>
       </main>
 
       {/* Complete Data-Driven Marketplace Footer */}
@@ -4043,43 +4366,56 @@ export default function App() {
         page={page}
         onNavigate={navigatePage}
         language={language}
+        cachedUser={cachedUser}
+        hasCachedUser={Boolean(cachedUser)}
+        authStatus={navbarAuthStatus}
       />
 
       {/* Floating Support Widget */}
-      <FloatingSupportWidget settings={settings} />
+      {idleUiReady && (
+        <Suspense fallback={null}>
+          <FloatingSupportWidget settings={settings} />
+        </Suspense>
+      )}
 
       {/* Smart PWA Install Banner & Guide */}
-      <PWAInstallBanner
-        showBanner={pwa.showDelayedBanner}
-        showManualGuide={pwa.showManualGuide}
-        isIOS={pwa.isIOS}
-        onInstall={() => pwa.triggerInstall()}
-        onDismissBanner={pwa.dismissBanner}
-        onCloseManualGuide={() => pwa.setShowManualGuide(false)}
-      />
+      {idleUiReady && (
+        <Suspense fallback={null}>
+          <PWAInstallBanner
+            showBanner={pwa.showDelayedBanner}
+            showManualGuide={pwa.showManualGuide}
+            isIOS={pwa.isIOS}
+            onInstall={() => pwa.triggerInstall()}
+            onDismissBanner={pwa.dismissBanner}
+            onCloseManualGuide={() => pwa.setShowManualGuide(false)}
+          />
+        </Suspense>
+      )}
 
       {/* Confidential User-to-User Trust & Safety Report Modal */}
       {reportModalTarget && (
-        <ReportUserModal
-          target={reportModalTarget}
-          currentUser={
-            fbUser
-              ? profile || {
-                  uid: fbUser.uid,
-                  displayName: fbUser.displayName,
-                }
-              : null
-          }
-          onClose={() => setReportModalTarget(null)}
-          onRequireAuth={() => {
-            setReportModalTarget(null);
-            navigateRoute({ page: 'auth', authMode: 'login' });
-          }}
-          onSubmitted={(referenceCode) => {
-            void refreshModerationStatus();
-            showFlash(`Confidential report submitted (${referenceCode}).`);
-          }}
-        />
+        <Suspense fallback={null}>
+          <ReportUserModal
+            target={reportModalTarget}
+            currentUser={
+              fbUser
+                ? profile || {
+                    uid: fbUser.uid,
+                    displayName: fbUser.displayName,
+                  }
+                : null
+            }
+            onClose={() => setReportModalTarget(null)}
+            onRequireAuth={() => {
+              setReportModalTarget(null);
+              navigateRoute({ page: 'auth', authMode: 'login' });
+            }}
+            onSubmitted={(referenceCode) => {
+              void refreshModerationStatus();
+              showFlash(`Confidential report submitted (${referenceCode}).`);
+            }}
+          />
+        </Suspense>
       )}
     </div>
   );

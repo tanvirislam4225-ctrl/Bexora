@@ -140,34 +140,20 @@ export const auth =
   typeof window !== 'undefined'
     ? initializeAuth(app, {
         persistence: browserLocalPersistence,
-        popupRedirectResolver: browserPopupRedirectResolver,
       })
     : getAuth(app);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 export const storage = getStorage(app);
 export const googleProvider = new GoogleAuthProvider();
-export { signInWithRedirect };
+export { browserPopupRedirectResolver, signInWithRedirect };
 
 /**
  * Dynamically promotes `auth.config.authDomain` to the highest-priority live-verified BEXORA brand domain
  * (`auth.bexora.com` -> `bexora.com` -> `bexora.ai.studio`) when the backend confirms its `/__/auth/iframe`
  * relay allows cross-origin framing and the current HTTPS origin is authorized.
  */
-export function applyPreferredFirebaseAuthDomain(preferredDomain?: string | null): string {
-  const resolved = resolveEffectiveFirebaseAuthDomain({
-    configuredAuthDomain: EFFECTIVE_FIREBASE_AUTH_DOMAIN,
-    windowHostname: typeof window !== 'undefined' ? window.location?.hostname : null,
-    windowProtocol: typeof window !== 'undefined' ? window.location?.protocol : null,
-    envCustomAuthDomain,
-    verifiedBrandAuthDomain: preferredDomain || null,
-  });
-  if (resolved && typeof auth === 'object' && auth && 'config' in auth) {
-    const cfg = (auth as unknown as { config?: { authDomain?: string } }).config;
-    if (cfg && cfg.authDomain !== resolved) {
-      cfg.authDomain = resolved;
-    }
-  }
-  return resolved;
+export function applyPreferredFirebaseAuthDomain(_preferredDomain?: string | null): string {
+  return EFFECTIVE_FIREBASE_AUTH_DOMAIN;
 }
 
 /**
@@ -179,7 +165,7 @@ export function applyPreferredFirebaseAuthDomain(preferredDomain?: string | null
 export async function signInWithGoogleResilient(customProvider?: GoogleAuthProvider) {
   const providerToUse = customProvider || googleProvider;
   try {
-    return await signInWithPopup(auth, providerToUse);
+    return await signInWithPopup(auth, providerToUse, browserPopupRedirectResolver);
   } catch (err) {
     const code =
       err && typeof err === 'object' && 'code' in err
@@ -192,7 +178,7 @@ export async function signInWithGoogleResilient(customProvider?: GoogleAuthProvi
       cfg.authDomain !== EFFECTIVE_FIREBASE_AUTH_DOMAIN
     ) {
       cfg.authDomain = EFFECTIVE_FIREBASE_AUTH_DOMAIN;
-      return signInWithPopup(auth, providerToUse);
+      return signInWithPopup(auth, providerToUse, browserPopupRedirectResolver);
     }
     throw err;
   }
@@ -865,7 +851,7 @@ export async function extendCurrentUserSessionInteractive(): Promise<'renewed' |
     if (current.email) {
       hintedProvider.setCustomParameters({ login_hint: current.email });
     }
-    await reauthenticateWithPopup(current, hintedProvider);
+    await reauthenticateWithPopup(current, hintedProvider, browserPopupRedirectResolver);
     markAuthenticatedSessionActive(current);
     const caps = await detectFirebaseAuthCapabilities();
     syncProactiveRefreshWithCapabilities(current, caps.tokenServiceEnabled);
@@ -1130,10 +1116,7 @@ export async function detectFirebaseAuthCapabilities(
             data.preferredBrandAuthDomain.trim()
               ? data.preferredBrandAuthDomain.trim().toLowerCase()
               : undefined;
-          const activeAuthDomain =
-            currentDomainAuthorized !== false && preferredBrandAuthDomain
-              ? applyPreferredFirebaseAuthDomain(preferredBrandAuthDomain)
-              : data.effectiveAuthDomain || EFFECTIVE_FIREBASE_AUTH_DOMAIN;
+          const activeAuthDomain = EFFECTIVE_FIREBASE_AUTH_DOMAIN;
 
           const serverResult: FirebaseAuthCapabilities = {
             projectId: data.projectId || firebaseConfig.projectId,

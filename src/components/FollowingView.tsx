@@ -19,6 +19,8 @@ import type {
 import { db } from '../lib/firebase';
 import { formatNotificationTimestamp } from '../lib/notificationLogic';
 import { ListingCard } from './ListingCard';
+import { UserPresenceBadge } from './UserPresenceBadge';
+import { ActiveStatus } from './ActiveStatus';
 
 interface FollowingViewProps {
   userUid: string | null;
@@ -232,23 +234,26 @@ export const FollowingView: React.FC<FollowingViewProps> = ({
                         onClick={() => onOpenPublicProfile(follow.sellerId)}
                         className="flex items-center gap-3 text-left min-w-0 hover:underline"
                       >
-                        <div
-                          className="w-12 h-12 rounded-xl overflow-hidden grid place-items-center font-extrabold text-sm text-white shrink-0"
-                          style={{ background: 'var(--purple)' }}
-                        >
-                          {avatarUrl && !failedAvatars[follow.id] ? (
-                            <img
-                              src={avatarUrl}
-                              alt={displayName}
-                              referrerPolicy="no-referrer"
-                              onError={() =>
-                                setFailedAvatars((prev) => ({ ...prev, [follow.id]: true }))
-                              }
-                              className="w-full h-full object-cover"
-                            />
-                          ) : (
-                            <span>{displayName.slice(0, 2).toUpperCase()}</span>
-                          )}
+                        <div className="relative shrink-0">
+                          <div
+                            className="w-12 h-12 rounded-xl overflow-hidden grid place-items-center font-extrabold text-sm text-white shrink-0"
+                            style={{ background: 'var(--purple)' }}
+                          >
+                            {avatarUrl && !failedAvatars[follow.id] ? (
+                              <img
+                                src={avatarUrl}
+                                alt={displayName}
+                                referrerPolicy="no-referrer"
+                                onError={() =>
+                                  setFailedAvatars((prev) => ({ ...prev, [follow.id]: true }))
+                                }
+                                className="w-full h-full object-cover"
+                              />
+                            ) : (
+                              <span>{displayName.slice(0, 2).toUpperCase()}</span>
+                            )}
+                          </div>
+                          <ActiveStatus userId={follow.sellerId} viewerUserId={userUid} mode="dot" className="absolute -bottom-1 -right-1" />
                         </div>
                         <div className="min-w-0">
                           <div className="flex items-center gap-1.5">
@@ -263,9 +268,12 @@ export const FollowingView: React.FC<FollowingViewProps> = ({
                               />
                             )}
                           </div>
-                          <p className="text-xs font-semibold truncate" style={{ color: 'var(--text-2)' }}>
-                            @{username} · Followed {formatNotificationTimestamp(follow.createdAtMs)}
-                          </p>
+                          <div className="flex items-center gap-1.5 text-xs font-semibold truncate" style={{ color: 'var(--text-2)' }}>
+                            <span className="truncate">@{username}</span>
+                            <ActiveStatus userId={follow.sellerId} viewerUserId={userUid} mode="full" />
+                            <span aria-hidden="true" className="shrink-0">·</span>
+                            <span className="shrink-0 truncate">Followed {formatNotificationTimestamp(follow.createdAtMs)}</span>
+                          </div>
                         </div>
                       </button>
                     </div>

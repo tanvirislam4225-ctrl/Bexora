@@ -1,0 +1,29 @@
+{
+  "rules": {
+    "presence": {
+      "$userId": {
+        ".read": "auth != null",
+        ".write": "auth != null && auth.uid === $userId",
+        ".validate": "newData.hasChildren(['state', 'lastActiveAt'])",
+        "state": {
+          ".validate": "newData.isString() && (newData.val() === 'online' || newData.val() === 'offline')"
+        },
+        "lastActiveAt": {
+          ".validate": "newData.isNumber() && newData.val() > 0"
+        },
+        "showStatus": {
+          ".validate": "!newData.exists() || newData.isBoolean()"
+        },
+        "connections": {
+          "$connectionId": {
+            ".read": "auth != null",
+            ".write": "auth != null && auth.uid === $userId"
+          }
+        },
+        "$other": {
+          ".validate": false
+        }
+      }
+    }
+  }
+}

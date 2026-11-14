@@ -205,29 +205,27 @@ export function evaluateApiCorsAndCsrf(input: CorsCsrfInput): CorsCsrfDecision {
 }
 
 /**
- * Extracts a spoof-resistant client IP key behind a single trusted ingress proxy (e.g. Cloud Run).
- * Uses the rightmost valid IP appended by the ingress proxy in X-Forwarded-For rather than index [0],
- * which can be forged by an unauthenticated caller to evade IP rate limiting.
+ * Extracts a spoof-resistant client IP key using Express's `req.ip`, which respects the configured
+ * `trust proxy` hop count (`TRUST_PROXY_HOPS`), falling back to `remoteAddress`.
+ * Avoids taking the last X-Forwarded-For hop directly so multi-proxy setups (e.g. Cloudflare + Hostinger)
+ * do not collapse all visitors onto one proxy IP.
  */
 export function extractClientIpKey(params: {
   xForwardedFor?: string;
   reqIp?: string;
   remoteAddress?: string;
 }): string {
-  const rawXff = String(params.xForwardedFor || '').trim();
-  if (rawXff) {
-    const hops = rawXff
-      .split(',')
-      .map((s) => s.trim().replace(/^::ffff:/i, ''))
-      .filter((s) => net.isIP(s) !== 0);
-    if (hops.length > 0) {
-      return hops[hops.length - 1]!;
+  const candidates = [params.reqIp, params.remoteAddress];
+  for (const rawCandidate of candidates) {
+    const cleaned = String(rawCandidate || '')
+      .trim()
+      .replace(/^::ffff:/i, '');
+    if (cleaned && net.isIP(cleaned) !== 0) {
+      return cleaned;
     }
   }
-  const fallback = String(params.reqIp || params.remoteAddress || '')
-    .trim()
-    .replace(/^::ffff:/i, '');
-  return fallback && net.isIP(fallback) !== 0 ? fallback : fallback || 'anon';
+  const fallback = String(params.reqIp || params.remoteAddress || '').trim();
+  return fallback || 'anon';
 }
 
 /**

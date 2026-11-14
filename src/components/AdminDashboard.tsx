@@ -359,7 +359,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   // AI Assistant & Cloud Diagnostics State
   const [healthSnapshot, setHealthSnapshot] = useState<Record<string, unknown> | null>(null);
   const [enablingCloudService, setEnablingCloudService] = useState<'token_service' | 'fcm_apis' | null>(null);
-  const [downloadingInfinityZip, setDownloadingInfinityZip] = useState(false);
+  const [migratingListingImages, setMigratingListingImages] = useState(false);
+  const [listingMigrationProgress, setListingMigrationProgress] = useState<{
+    processed: number;
+    failed: number;
+    skipped: number;
+    remainingEstimate: number | null;
+    statusText: string;
+  } | null>(null);
 
   useEffect(() => {
     setBuyerFeeEnabled(settings.buyerFeeEnabled);
@@ -2555,37 +2562,99 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
   };
 
-  // --- AI Assistant Export & Emergency Governance Handlers ---
-  const handleDownloadInfinityZip = async () => {
-    setDownloadingInfinityZip(true);
+  // --- Superadmin Legacy Listing Image Storage Migration & Config Backup Handlers ---
+  const handleMigrateListingImages = async () => {
+    if (!isSuperAdmin || migratingListingImages) return;
+    setMigratingListingImages(true);
+    let totalProcessed = 0;
+    let totalFailed = 0;
+    let totalSkipped = 0;
+    let cursor = '';
+    let remainingEstimate: number | null = null;
+    setListingMigrationProgress({
+      processed: 0,
+      failed: 0,
+      skipped: 0,
+      remainingEstimate: null,
+      statusText: 'Starting migration scan…',
+    });
+
     try {
       const idToken = await auth.currentUser?.getIdToken();
       if (!idToken) {
-        onFlash('Administrator authentication is required to download the deployment archive.');
+        onFlash('Superadmin authentication is required to migrate listing images.');
         return;
       }
-      const resp = await fetch('/api/admin/deployment-archive', {
-        headers: { Authorization: `Bearer ${idToken}` },
-      });
-      if (!resp.ok) {
-        const errPayload = (await resp.json().catch(() => ({}))) as { error?: string };
-        onFlash(errPayload.error || `Archive download failed (HTTP ${resp.status}).`);
-        return;
+
+      while (true) {
+        const resp = await fetch('/api/admin/migrate-listing-images', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${idToken}`,
+          },
+          body: JSON.stringify({ limit: 10, cursor }),
+        });
+
+        const data = (await resp.json().catch(() => ({}))) as {
+          ok?: boolean;
+          error?: string;
+          processed?: number;
+          failed?: number;
+          skipped?: number;
+          nextCursor?: string;
+          remainingEstimate?: number;
+        };
+
+        if (!resp.ok || !data.ok) {
+          throw new Error(data.error || `Migration request failed (HTTP ${resp.status}).`);
+        }
+
+        const batchProcessed = Number(data.processed || 0);
+        const batchFailed = Number(data.failed || 0);
+        const batchSkipped = Number(data.skipped || 0);
+        const nextCursor = typeof data.nextCursor === 'string' ? data.nextCursor.trim() : '';
+        remainingEstimate =
+          typeof data.remainingEstimate === 'number' ? data.remainingEstimate : remainingEstimate;
+
+        totalProcessed += batchProcessed;
+        totalFailed += batchFailed;
+        totalSkipped += batchSkipped;
+
+        const done = batchProcessed === 0 && !nextCursor;
+        setListingMigrationProgress({
+          processed: totalProcessed,
+          failed: totalFailed,
+          skipped: totalSkipped,
+          remainingEstimate,
+          statusText: done
+            ? `Completed: ${totalProcessed} migrated, ${totalFailed} failed, ${totalSkipped} skipped.`
+            : `Migrating… ${totalProcessed} processed, ${totalFailed} failed${
+                remainingEstimate !== null ? ` (~${remainingEstimate} docs remaining)` : ''
+              }`,
+        });
+
+        if (done || (nextCursor && nextCursor === cursor)) {
+          break;
+        }
+        cursor = nextCursor;
       }
-      const blob = await resp.blob();
-      const objectUrl = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = objectUrl;
-      a.download = 'BEXORA_INFINITYFREE_PRODUCTION.zip';
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(objectUrl);
-      onFlash('Downloaded BEXORA_INFINITYFREE_PRODUCTION.zip deployment archive.');
+
+      onFlash(
+        `Listing image migration finished: ${totalProcessed} migrated, ${totalFailed} failed.`
+      );
     } catch (err) {
-      onFlash(err instanceof Error ? err.message : 'Failed to download deployment archive.');
+      const msg = err instanceof Error ? err.message : 'Failed to migrate listing images.';
+      setListingMigrationProgress((prev) => ({
+        processed: prev?.processed ?? totalProcessed,
+        failed: prev?.failed ?? totalFailed,
+        skipped: prev?.skipped ?? totalSkipped,
+        remainingEstimate: prev?.remainingEstimate ?? remainingEstimate,
+        statusText: `Stopped: ${msg}`,
+      }));
+      onFlash(msg);
     } finally {
-      setDownloadingInfinityZip(false);
+      setMigratingListingImages(false);
     }
   };
 
@@ -2793,12 +2862,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </div>
                 <button
                   type="button"
-                  disabled={downloadingInfinityZip}
-                  onClick={handleDownloadInfinityZip}
+                  onClick={handleExportJsonBackup}
                   className="bx-btn bx-btn-primary px-4 py-2.5 text-xs font-extrabold inline-flex items-center gap-2"
                 >
                   <Download className="w-4 h-4" />
-                  {downloadingInfinityZip ? 'Preparing Archive…' : 'Download InfinityFree ZIP'}
+                  Export Config Checkpoint (.json)
                 </button>
               </div>
 
@@ -4394,6 +4462,38 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 )}
               </div>
 
+              {isSuperAdmin && (
+                <div className="bx-card p-6 space-y-3" data-testid="superadmin-listing-image-migration">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div>
+                      <h2 className="text-base font-black">Legacy Listing Image Storage Migration</h2>
+                      <p className="text-xs text-amber-700 dark:text-amber-400 font-bold mt-1">
+                        Backup first before migrating. Moves old inline data:image/ photos from Firestore listings to Firebase Storage and preserves originals in listingImageBackups.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      data-testid="move-old-listing-images-btn"
+                      disabled={migratingListingImages}
+                      onClick={() => void handleMigrateListingImages()}
+                      className="bx-btn bx-btn-primary px-4 py-2.5 text-xs font-extrabold whitespace-nowrap shrink-0 disabled:opacity-60"
+                    >
+                      {migratingListingImages
+                        ? 'Migrating Listing Images…'
+                        : 'Move old listing images to Storage'}
+                    </button>
+                  </div>
+                  {listingMigrationProgress && (
+                    <div className="p-3 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)] text-xs font-bold space-y-1">
+                      <div>{listingMigrationProgress.statusText}</div>
+                      <div className="opacity-75 tabular-nums">
+                        Processed: {listingMigrationProgress.processed} · Failed: {listingMigrationProgress.failed} · Skipped: {listingMigrationProgress.skipped}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
               <div className="bx-card p-6 space-y-3">
                 <h2 className="text-base font-black">Immutable Audit Trail ({auditLogs.length})</h2>
                 <div className="max-h-80 overflow-y-auto space-y-2">
@@ -4423,11 +4523,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               reportedDealsCount={reportedDealsCount}
               healthSnapshot={healthSnapshot}
               enablingCloudService={enablingCloudService}
-              downloadingInfinityZip={downloadingInfinityZip}
               onToggleEmergencyStop={handleToggleEmergencyStop}
               onRefreshSystemHealth={fetchSystemHealth}
               onEnableCloudService={handleEnableCloudServiceFromHealth}
-              onDownloadInfinityZip={handleDownloadInfinityZip}
               onExportJsonBackup={handleExportJsonBackup}
               onWriteAuditLog={writeAuditLog}
               onFlash={onFlash}

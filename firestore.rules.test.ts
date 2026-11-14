@@ -281,6 +281,12 @@ test('Firestore Rules: enforces 10-image gallery validation, OTP phoneVerified r
     /exists\(\/databases\/\$\(database\)\/documents\/conversations\/\$\(incoming\(\)\.refId\)\)/
   );
 });
-
-
-
+test('Firestore Rules: enforces userPresence and per-session heartbeat validation with strict owner/admin mutations', () => {
+  assert.match(rules, /function\s+isValidUserPresence\(data,\s*uid\)/);
+  assert.match(rules, /function\s+isValidUserPresenceSession\(data,\s*uid,\s*sessionId\)/);
+  assert.match(rules, /match\s+\/userPresence\/\{userId\}/);
+  assert.match(rules, /match\s+\/sessions\/\{sessionId\}/);
+  assert.match(rules, /request\.auth\.uid\s*==\s*userId\s*\|\|\s*isAdmin\(\)/);
+  assert.match(rules, /incoming\(\)\.diff\(existing\(\)\)\.affectedKeys\(\)\.hasOnly\(\['state',\s*'lastSeenMs',\s*'activeSessions',\s*'updatedAt'\]\)/);
+  assert.match(rules, /incoming\(\)\.diff\(existing\(\)\)\.affectedKeys\(\)\.hasOnly\(\['state',\s*'lastHeartbeatAtMs',\s*'updatedAt'\]\)/);
+});

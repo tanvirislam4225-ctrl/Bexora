@@ -34,6 +34,7 @@ import {
   shouldLockBodyScrollForDrawer,
 } from '../lib/navigationAndProfileMenuLogic';
 import { type AuthStateLifecycle } from '../lib/authDomainAndPersistenceLogic';
+import type { CachedUser } from '../lib/cachedUser';
 
 export type NavPage = FullScreenPage;
 
@@ -55,10 +56,13 @@ interface NavbarProps {
   onChangeCurrency: (c: CurrencyCode) => void;
   userUid: string | null;
   profile: PublicProfile | null;
+  cachedUser?: CachedUser | null;
+  hasCachedUser?: boolean;
   authStatus?: AuthStateLifecycle;
   isAdmin: boolean;
   signingOut: boolean;
   onOpenAuth: () => void;
+  onPrefetchAuth?: () => void;
   onOpenCreateListing: () => void;
   onOpenWallet: (mode?: 'deposit' | 'withdraw' | 'history') => void;
   onOpenPublicSelf?: () => void;
@@ -83,10 +87,13 @@ export const Navbar: React.FC<NavbarProps> = ({
   onChangeCurrency,
   userUid,
   profile,
+  cachedUser,
+  hasCachedUser,
   authStatus,
   isAdmin,
   signingOut,
   onOpenAuth,
+  onPrefetchAuth,
   onOpenCreateListing,
   onOpenWallet,
   onOpenPublicSelf,
@@ -119,22 +126,26 @@ export const Navbar: React.FC<NavbarProps> = ({
     { id: 'deals', label: t(language, 'nav_deals'), icon: <ShieldCheck className="w-4 h-4 shrink-0" /> },
   ];
 
+  const activeAccount = profile ?? cachedUser ?? null;
+  const effectiveUserUid = userUid ?? cachedUser?.uid ?? null;
   const effectiveAuthStatus: AuthStateLifecycle =
-    authStatus ?? (userUid ? 'authenticated' : 'unauthenticated');
+    authStatus ?? (effectiveUserUid || hasCachedUser ? 'authenticated' : 'unauthenticated');
+  const isAuthenticatedUi =
+    effectiveAuthStatus === 'authenticated' && Boolean(effectiveUserUid || hasCachedUser);
 
-  const safeDisplayName = (profile?.displayName || profile?.username || '').trim();
+  const safeDisplayName = (activeAccount?.displayName || activeAccount?.username || '').trim();
   const initials = safeDisplayName
     ? safeDisplayName
         .split(/\s+/)
+        .filter(Boolean)
         .map((w) => w[0])
         .slice(0, 2)
         .join('')
         .toUpperCase()
-    : 'ME';
-
+    : '';
 
   const profileMenuItems = buildProfileMenuActions({
-    userUid,
+    userUid: effectiveUserUid,
     isAdmin,
     signingOut,
   });
@@ -143,10 +154,10 @@ export const Navbar: React.FC<NavbarProps> = ({
 
   // Close profile menu when auth state clears
   useEffect(() => {
-    if (!userUid) {
+    if (!effectiveUserUid) {
       setProfileMenuOpen(false);
     }
-  }, [userUid]);
+  }, [effectiveUserUid]);
 
   // Close profile dropdown on outside pointer/touch click or Escape key
   useEffect(() => {
@@ -339,77 +350,89 @@ export const Navbar: React.FC<NavbarProps> = ({
               {theme === 'light' ? <Moon className="w-5 h-5" /> : <Sun className="w-5 h-5" />}
             </button>
 
-            {effectiveAuthStatus === 'initializing' ? (
-              <div
-                data-testid="navbar-auth-initializing"
-                className="h-9 w-9 rounded-lg border-2 border-[var(--border-strong)] bg-[var(--surface-2)] flex items-center justify-center animate-pulse"
-                title="Loading session..."
-                aria-label="Loading authentication..."
-              >
-                <UserIcon className="w-4 h-4 text-[var(--text-3)] opacity-60" />
-              </div>
-            ) : effectiveAuthStatus === 'authenticated' && userUid ? (
-              <>
-                <button
-                  type="button"
-                  onClick={() => onOpenWallet('deposit')}
-                  className={`bx-icon-btn hidden sm:inline-flex ${
-                    page === 'wallet'
-                      ? '!bg-[var(--orange-soft)] !border-[var(--orange)]'
-                      : ''
-                  }`}
-                  aria-label="Open Wallet"
-                  title="Wallet & Add Balance"
-                >
-                  <Wallet className="w-5 h-5" />
-                </button>
-                <button
-                  type="button"
-                  onClick={onOpenCreateListing}
-                  className="bx-btn bx-btn-yellow bx-btn-sm hidden md:inline-flex"
-                >
-                  <Plus className="w-4 h-4" />
-                  <span>{t(language, 'btn_sell')}</span>
-                </button>
-
-                {/* Desktop / Tablet / Mobile Profile Dropdown Menu */}
-                <div ref={profileMenuWrapRef} className="relative">
+            <div className="min-w-[84px] sm:min-w-[168px] flex items-center justify-end gap-2">
+              {effectiveAuthStatus === 'initializing' ? (
+                <div
+                  className="w-[84px] sm:w-[168px] h-9 invisible pointer-events-none"
+                  aria-hidden="true"
+                />
+              ) : isAuthenticatedUi ? (
+                <>
                   <button
                     type="button"
-                    data-testid="navbar-profile-menu-btn"
-                    onClick={() => setProfileMenuOpen((prev) => !prev)}
-                    className="bx-icon-btn !w-auto px-2.5 gap-1 font-extrabold text-xs !bg-[var(--orange)] !text-white"
-                    aria-label="My Profile"
-                    aria-haspopup="menu"
-                    aria-expanded={profileMenuOpen}
-                    title={safeDisplayName || 'My Profile'}
+                    onClick={() => onOpenWallet('deposit')}
+                    className={`bx-icon-btn hidden sm:inline-flex ${
+                      page === 'wallet'
+                        ? '!bg-[var(--orange-soft)] !border-[var(--orange)]'
+                        : ''
+                    }`}
+                    aria-label="Open Wallet"
+                    title="Wallet & Add Balance"
                   >
-                    <span>{initials}</span>
-                    <ChevronDown
-                      className={`w-3.5 h-3.5 transition-transform duration-150 ${
-                        profileMenuOpen ? 'rotate-180' : ''
-                      }`}
-                    />
+                    <Wallet className="w-5 h-5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onOpenCreateListing}
+                    className="bx-btn bx-btn-yellow bx-btn-sm hidden md:inline-flex"
+                  >
+                    <Plus className="w-4 h-4" />
+                    <span>{t(language, 'btn_sell')}</span>
                   </button>
 
-                  {profileMenuOpen && (
-                    <div
-                      role="menu"
-                      aria-label="Account profile menu"
-                      data-testid="navbar-profile-dropdown"
-                      className="absolute right-0 top-[calc(100%+8px)] w-64 max-w-[calc(100vw-2rem)] z-[65] bx-card p-2 shadow-xl"
+                  {/* Desktop / Tablet / Mobile Profile Dropdown Menu */}
+                  <div ref={profileMenuWrapRef} className="relative">
+                    <button
+                      type="button"
+                      data-testid="navbar-profile-menu-btn"
+                      onClick={() => setProfileMenuOpen((prev) => !prev)}
+                      className="bx-icon-btn !w-auto px-2.5 gap-1.5 font-extrabold text-xs !bg-[var(--orange)] !text-white min-w-[54px]"
+                      aria-label="My Profile"
+                      aria-haspopup="menu"
+                      aria-expanded={profileMenuOpen}
+                      title={safeDisplayName || 'My Profile'}
                     >
-                      {/* Signed-in Identity Summary */}
-                      <div className="px-3 py-2.5 border-b border-[var(--border-soft)] mb-1">
-                        <div className="text-sm font-black truncate text-[var(--text)]">
-                          {safeDisplayName || 'Verified Member'}
+                      {activeAccount?.avatarUrl ? (
+                        <img
+                          src={activeAccount.avatarUrl}
+                          alt={safeDisplayName || 'Profile'}
+                          width={20}
+                          height={20}
+                          decoding="async"
+                          className="w-5 h-5 rounded-full object-cover shrink-0"
+                        />
+                      ) : initials ? (
+                        <span>{initials}</span>
+                      ) : (
+                        <UserIcon className="w-4 h-4 shrink-0" />
+                      )}
+                      <ChevronDown
+                        className={`w-3.5 h-3.5 transition-transform duration-150 ${
+                          profileMenuOpen ? 'rotate-180' : ''
+                        }`}
+                      />
+                    </button>
+
+                    {profileMenuOpen && (
+                      <div
+                        role="menu"
+                        aria-label="Account profile menu"
+                        data-testid="navbar-profile-dropdown"
+                        className="absolute right-0 top-[calc(100%+8px)] w-64 max-w-[calc(100vw-2rem)] z-[65] bx-card p-2 shadow-xl"
+                      >
+                        {/* Signed-in Identity Summary */}
+                        <div className="px-3 py-2.5 border-b border-[var(--border-soft)] mb-1">
+                          {safeDisplayName && (
+                            <div className="text-sm font-black truncate text-[var(--text)]">
+                              {safeDisplayName}
+                            </div>
+                          )}
+                          {activeAccount?.username && (
+                            <div className="text-xs font-bold truncate text-[var(--text-2)]">
+                              @{activeAccount.username}
+                            </div>
+                          )}
                         </div>
-                        {profile?.username && (
-                          <div className="text-xs font-bold truncate text-[var(--text-2)]">
-                            @{profile.username}
-                          </div>
-                        )}
-                      </div>
 
                       {/* Primary Profile Menu Navigation Options */}
                       <div className="flex flex-col gap-0.5">
@@ -465,17 +488,20 @@ export const Navbar: React.FC<NavbarProps> = ({
                   )}
                 </div>
               </>
-            ) : (
-              <button
-                type="button"
-                onClick={onOpenAuth}
-                className="bx-btn bx-btn-orange bx-btn-sm inline-flex items-center gap-1.5"
-                data-testid="navbar-login-btn"
-              >
-                <UserIcon className="w-4 h-4" />
-                <span>{t(language, 'btn_login')}</span>
-              </button>
-            )}
+              ) : (
+                <button
+                  type="button"
+                  onClick={onOpenAuth}
+                  onMouseEnter={onPrefetchAuth}
+                  onFocus={onPrefetchAuth}
+                  className="bx-btn bx-btn-orange bx-btn-sm inline-flex items-center gap-1.5"
+                  data-testid="navbar-login-btn"
+                >
+                  <UserIcon className="w-4 h-4" />
+                  <span>{t(language, 'btn_login')}</span>
+                </button>
+              )}
+            </div>
           </div>
         </div>
       </header>
@@ -537,13 +563,10 @@ export const Navbar: React.FC<NavbarProps> = ({
 
                 {effectiveAuthStatus === 'initializing' ? (
                   <div
-                    data-testid="drawer-auth-initializing"
-                    className="flex items-center gap-3 px-3.5 py-3 rounded-xl border-[1.5px] border-[var(--border-strong)] bg-[var(--surface-2)] animate-pulse"
-                  >
-                    <UserIcon className="w-4 h-4 text-[var(--text-3)] opacity-60" />
-                    <div className="h-4 w-28 bg-[var(--border-soft)] rounded" />
-                  </div>
-                ) : effectiveAuthStatus === 'authenticated' && userUid ? (
+                    className="h-[46px] w-full invisible pointer-events-none"
+                    aria-hidden="true"
+                  />
+                ) : isAuthenticatedUi ? (
                   <button
                     type="button"
                     onClick={() => {
@@ -557,7 +580,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                     }`}
                   >
                     <UserIcon className="w-4 h-4 shrink-0" />
-                    <span>{t(language, 'nav_profile')}</span>
+                    <span>{activeAccount?.displayName || t(language, 'nav_profile')}</span>
                   </button>
                 ) : null}
 
@@ -652,13 +675,15 @@ export const Navbar: React.FC<NavbarProps> = ({
                       setDrawerOpen(false);
                       onOpenAuth();
                     }}
+                    onMouseEnter={onPrefetchAuth}
+                    onFocus={onPrefetchAuth}
                     className="bx-btn bx-btn-orange w-full shrink-0 flex items-center justify-center gap-2"
                     data-testid="drawer-login-btn"
                   >
                     <UserIcon className="w-4 h-4 shrink-0" />
                     <span>{t(language, 'btn_login')}</span>
                   </button>
-                ) : effectiveAuthStatus === 'authenticated' && userUid ? (
+                ) : isAuthenticatedUi ? (
                   <button
                     type="button"
                     disabled={signingOut}
@@ -686,13 +711,34 @@ export const BottomNav: React.FC<{
   page: NavPage;
   onNavigate: (p: NavPage) => void;
   language: LanguageCode;
-}> = ({ page, onNavigate, language }) => {
+  cachedUser?: CachedUser | null;
+  hasCachedUser?: boolean;
+  authStatus?: AuthStateLifecycle;
+}> = ({ page, onNavigate, language, cachedUser, hasCachedUser, authStatus }) => {
+  const showAccountAvatar =
+    (authStatus === 'authenticated' || Boolean(hasCachedUser)) && Boolean(cachedUser?.avatarUrl);
+
   const items: { id: NavPage; label: string; icon: React.ReactNode }[] = [
     { id: 'home', label: t(language, 'nav_home'), icon: <Home className="w-5 h-5" /> },
     { id: 'market', label: t(language, 'nav_market'), icon: <LayoutGrid className="w-5 h-5" /> },
     { id: 'chat', label: t(language, 'nav_chat'), icon: <MessageSquare className="w-5 h-5" /> },
     { id: 'deals', label: t(language, 'nav_deals'), icon: <ShieldCheck className="w-5 h-5" /> },
-    { id: 'profile', label: t(language, 'nav_profile'), icon: <UserIcon className="w-5 h-5" /> },
+    {
+      id: 'profile',
+      label: t(language, 'nav_profile'),
+      icon: showAccountAvatar && cachedUser?.avatarUrl ? (
+        <img
+          src={cachedUser.avatarUrl}
+          alt={cachedUser.displayName || t(language, 'nav_profile')}
+          width={20}
+          height={20}
+          decoding="async"
+          className="w-5 h-5 rounded-full object-cover"
+        />
+      ) : (
+        <UserIcon className="w-5 h-5" />
+      ),
+    },
   ];
 
   return (
@@ -702,6 +748,7 @@ export const BottomNav: React.FC<{
     >
       {items.map((it) => {
         const active = isNavSectionActive(page, it.id);
+        const hideInitializingProfile = it.id === 'profile' && authStatus === 'initializing';
         return (
           <button
             key={it.id}
@@ -709,7 +756,7 @@ export const BottomNav: React.FC<{
             onClick={() => onNavigate(it.id)}
             className={`flex flex-col items-center justify-center gap-1 min-h-[56px] px-1 text-[11px] font-bold transition-colors ${
               active ? 'text-[var(--orange)]' : 'text-[var(--text-3)]'
-            }`}
+            } ${hideInitializingProfile ? 'invisible pointer-events-none' : ''}`}
           >
             {it.icon}
             <span className="truncate max-w-full">{it.label}</span>

@@ -132,7 +132,9 @@ export default defineConfig(() => {
           globIgnores: [
             '**/firebase-messaging-sw.js',
             '**/vendor/firebase/**',
-            '**/BEXORA_INFINITYFREE_PRODUCTION.zip',
+            '**/AdminDashboard-*.js',
+            '**/Admin*-*.js',
+            '**/PhoneCountryInput-*.js',
           ],
           navigateFallbackDenylist: [
             /^\/api\//,
@@ -140,7 +142,6 @@ export default defineConfig(() => {
             /^\/firebase-messaging-sw\.js$/,
             /^\/vendor\/firebase\/.*\.js$/,
             /^\/sounds\/.*\.wav$/,
-            /BEXORA_INFINITYFREE_PRODUCTION\.zip$/,
           ],
           runtimeCaching: [
             {
@@ -164,7 +165,7 @@ export default defineConfig(() => {
           ],
         },
         devOptions: {
-          enabled: true,
+          enabled: false,
           type: 'module',
         },
       }),
@@ -177,6 +178,18 @@ export default defineConfig(() => {
     },
     build: {
       sourcemap: false,
+      rollupOptions: {
+        output: {
+          manualChunks(id) {
+            if (id.includes('node_modules/react/') || id.includes('node_modules/react-dom/')) {
+              return 'vendor-react';
+            }
+            if (id.includes('node_modules/firebase/') || id.includes('node_modules/@firebase/')) {
+              return 'vendor-firebase';
+            }
+          },
+        },
+      },
     },
     server: {
       allowedHosts: ['.run.app', '.ai.studio', 'bexora.com', '.bexora.com', 'localhost', '127.0.0.1'],
