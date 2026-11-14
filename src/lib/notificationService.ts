@@ -671,3 +671,47 @@ export async function appendDealAuditEvent(input: {
   }
 }
 
+const DISMISSED_NOTIFICATIONS_STORAGE_PREFIX = 'bexora_dismissed_notifications_v1:';
+const MAX_LOCALLY_DISMISSED_NOTIFICATIONS = 1000;
+
+export function getLocallyDismissedNotificationIds(scopeKey: string): Set<string> {
+  if (typeof window === 'undefined') return new Set<string>();
+  const key = `${DISMISSED_NOTIFICATIONS_STORAGE_PREFIX}${String(scopeKey || 'guest').trim() || 'guest'}`;
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return new Set<string>();
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return new Set<string>();
+    return new Set(
+      parsed.filter((entry): entry is string => typeof entry === 'string' && entry.length > 0)
+    );
+  } catch {
+    return new Set<string>();
+  }
+}
+
+export function dismissNotificationsLocally(scopeKey: string, ids: string[]): void {
+  if (typeof window === 'undefined' || !Array.isArray(ids) || ids.length === 0) return;
+  const key = `${DISMISSED_NOTIFICATIONS_STORAGE_PREFIX}${String(scopeKey || 'guest').trim() || 'guest'}`;
+  try {
+    const existingSet = getLocallyDismissedNotificationIds(scopeKey);
+    const merged = Array.from(existingSet);
+    for (const rawId of ids) {
+      const id = String(rawId || '').trim();
+      if (!id) continue;
+      if (existingSet.has(id)) {
+        const idx = merged.indexOf(id);
+        if (idx >= 0) merged.splice(idx, 1);
+      }
+      existingSet.add(id);
+      merged.push(id);
+    }
+    const capped =
+      merged.length > MAX_LOCALLY_DISMISSED_NOTIFICATIONS
+        ? merged.slice(-MAX_LOCALLY_DISMISSED_NOTIFICATIONS)
+        : merged;
+    window.localStorage.setItem(key, JSON.stringify(capped));
+  } catch {
+    // Ignore localStorage failures in restricted browser environments
+  }
+}

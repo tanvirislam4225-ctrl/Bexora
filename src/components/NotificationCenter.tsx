@@ -16,6 +16,7 @@ import {
   ShieldAlert,
   Smartphone,
   Sparkles,
+  Trash2,
   WifiOff,
   X,
 } from 'lucide-react';
@@ -50,6 +51,8 @@ interface NotificationCenterProps {
   onRetry: () => void;
   onMarkOneRead: (item: NotificationRecord) => Promise<void>;
   onMarkAllRead: () => Promise<void>;
+  onDismiss?: (item: NotificationRecord) => void | Promise<void>;
+  onClearAll?: () => void | Promise<void>;
   onNavigateDestination: (dest: SafeInternalDestination) => void;
   onOpenAuth: () => void;
   externalOpenSignal?: number;
@@ -88,6 +91,8 @@ export const NotificationCenter: React.FC<NotificationCenterProps> = ({
   onRetry,
   onMarkOneRead,
   onMarkAllRead,
+  onDismiss,
+  onClearAll,
   onNavigateDestination,
   onOpenAuth,
   externalOpenSignal,
@@ -95,6 +100,7 @@ export const NotificationCenter: React.FC<NotificationCenterProps> = ({
   const [open, setOpen] = useState(false);
   const [selectedNotificationId, setSelectedNotificationId] = useState<string | null>(null);
   const [markingAll, setMarkingAll] = useState(false);
+  const [clearingAll, setClearingAll] = useState(false);
   const [markingOneId, setMarkingOneId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [browserPermission, setBrowserPermission] = useState<
@@ -206,6 +212,20 @@ export const NotificationCenter: React.FC<NotificationCenterProps> = ({
     }
   };
 
+  const handleClearAll = async () => {
+    if (sortedNotifications.length === 0 || clearingAll || !onClearAll) return;
+    setActionError(null);
+    setClearingAll(true);
+    try {
+      await onClearAll();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Unable to clean notifications.';
+      setActionError(msg);
+    } finally {
+      setClearingAll(false);
+    }
+  };
+
   const safeSelectedDestination = useMemo(
     () =>
       selectedNotification
@@ -260,23 +280,23 @@ export const NotificationCenter: React.FC<NotificationCenterProps> = ({
               className="fixed inset-x-3 top-[68px] sm:inset-x-auto sm:right-6 sm:top-[72px] sm:w-[440px] max-h-[calc(100vh-84px)] flex flex-col rounded-2xl border-2 border-[var(--border-strong)] bg-[var(--surface)] text-[var(--text)] shadow-[var(--shadow)] overflow-hidden"
             >
               {/* Panel Header */}
-              <div className="px-4 py-3.5 border-b-2 border-[var(--border-strong)] bg-[var(--surface-2)] flex items-center justify-between gap-2 shrink-0">
-                <div className="flex items-center gap-2 min-w-0">
+              <div className="px-3 sm:px-4 py-3 sm:py-3.5 border-b-2 border-[var(--border-strong)] bg-[var(--surface-2)] flex items-center justify-between gap-2 shrink-0">
+                <div className="flex items-center gap-1.5 sm:gap-2 min-w-0 overflow-hidden">
                   <Bell className="w-4 h-4 text-[var(--orange)] shrink-0" />
-                  <h2 className="text-base font-black tracking-tight whitespace-nowrap">
+                  <h2 className="text-sm sm:text-base font-black tracking-tight whitespace-nowrap shrink-0">
                     Inbox
                   </h2>
-                  <span className="text-xs font-extrabold text-[var(--text-2)] tabular-nums whitespace-nowrap shrink-0">
+                  <span className="text-[11px] sm:text-xs font-extrabold text-[var(--text-2)] tabular-nums truncate">
                     · {unreadCount} unread
                   </span>
                 </div>
 
-                <div className="flex items-center gap-1.5 shrink-0">
+                <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
                   <button
                     type="button"
                     onClick={() => void handleMarkAll()}
                     disabled={unreadCount === 0 || markingAll}
-                    className="bx-btn bx-btn-sm !min-h-[34px] !px-2.5 !py-1 text-xs font-extrabold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 disabled:opacity-45 disabled:cursor-not-allowed"
+                    className="bx-btn bx-btn-sm !min-h-[32px] sm:!min-h-[34px] !px-2 sm:!px-2.5 !py-1 text-[11px] sm:text-xs font-extrabold inline-flex items-center gap-1 sm:gap-1.5 whitespace-nowrap shrink-0 disabled:opacity-45 disabled:cursor-not-allowed"
                   >
                     <CheckCheck className="w-3.5 h-3.5" />
                     <span className="sm:hidden">{markingAll ? '…' : 'Mark read'}</span>
@@ -286,11 +306,22 @@ export const NotificationCenter: React.FC<NotificationCenterProps> = ({
                   </button>
                   <button
                     type="button"
+                    onClick={() => void handleClearAll()}
+                    disabled={sortedNotifications.length === 0 || clearingAll || !onClearAll}
+                    title="Remove all notifications from inbox"
+                    aria-label="Clean all notifications"
+                    className="bx-btn bx-btn-sm !min-h-[32px] sm:!min-h-[34px] !px-2 sm:!px-2.5 !py-1 text-[11px] sm:text-xs font-extrabold inline-flex items-center gap-1 whitespace-nowrap shrink-0 disabled:opacity-45 disabled:cursor-not-allowed"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>{clearingAll ? '…' : 'Clean'}</span>
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => {
                       setOpen(false);
                       bellButtonRef.current?.focus();
                     }}
-                    className="bx-icon-btn !w-8 !h-8"
+                    className="bx-icon-btn !w-8 !h-8 shrink-0"
                     aria-label="Close notifications panel"
                   >
                     <X className="w-4 h-4" />
@@ -389,90 +420,17 @@ export const NotificationCenter: React.FC<NotificationCenterProps> = ({
                     const isDealRoomCreated = kind === 'deal_room_created';
                     const isFollowedListing = isFollowedSellerNewListingNotification(item);
                     return (
-                      <article
+                      <SwipeableNotificationCard
                         key={item.id}
-                        className={`p-3.5 transition-colors flex flex-col gap-2 ${
-                          isUnread
-                            ? 'bg-[var(--surface-2)]'
-                            : 'bg-[var(--surface)] opacity-90'
-                        }`}
-                      >
-                        <div className="flex items-center justify-between gap-2 text-[11px] font-bold text-[var(--text-2)]">
-                          <div className="flex items-center gap-1.5 min-w-0 truncate">
-                            {renderCategoryIcon(item.category, item.severity)}
-                            <span className="font-extrabold text-[var(--text)] truncate">
-                              {isDealRoomCreated
-                                ? 'Paid Deal Room'
-                                : isFollowedListing
-                                ? 'Followed Seller · New Listing'
-                                : getNotificationCategoryLabel(item.category)}
-                            </span>
-                            <span aria-hidden="true">·</span>
-                            <span
-                              className={
-                                isUnread
-                                  ? 'font-black text-[var(--orange)]'
-                                  : 'font-semibold text-[var(--text-3)]'
-                              }
-                            >
-                              {isUnread ? 'Unread' : 'Read'}
-                            </span>
-                          </div>
-
-                          <span
-                            title={formatNotificationExactDateTime(item.createdAtMs)}
-                            className="text-[11px] font-bold text-[var(--text-3)] tabular-nums shrink-0 inline-flex items-center gap-1"
-                          >
-                            <Clock className="w-3 h-3" />
-                            {formatNotificationTimestamp(item.createdAtMs)}
-                          </span>
-                        </div>
-
-                        <div className="space-y-1">
-                          <h3
-                            className={`text-sm leading-snug break-words ${
-                              isUnread
-                                ? 'font-black text-[var(--text)]'
-                                : 'font-bold text-[var(--text-2)]'
-                            }`}
-                          >
-                            {item.title}
-                          </h3>
-                          <p className="text-xs font-medium text-[var(--text-2)] line-clamp-2 leading-relaxed break-words">
-                            {item.preview}
-                          </p>
-                        </div>
-
-                        <div className="flex items-center justify-between gap-2 pt-0.5">
-                          <span className="text-[11px] font-bold text-[var(--text-3)] truncate">
-                            {item.referenceLabel || ''}
-                          </span>
-                          <div className="flex items-center gap-1.5 shrink-0">
-                            {isUnread && (
-                              <button
-                                type="button"
-                                onClick={() => void handleMarkSingleRead(item)}
-                                disabled={isSyncingThis}
-                                aria-label={`Mark notification read: ${item.title}`}
-                                className="bx-btn bx-btn-ghost bx-btn-sm !min-h-[30px] !px-2.5 !py-1 text-[11px] font-bold inline-flex items-center gap-1 whitespace-nowrap"
-                              >
-                                <Check className="w-3 h-3 text-[var(--green)]" />
-                                <span>Mark read</span>
-                              </button>
-                            )}
-                            <button
-                              type="button"
-                              onClick={() => void handleViewNotification(item)}
-                              disabled={isSyncingThis}
-                              aria-label={`View notification: ${item.title}`}
-                              className="bx-btn bx-btn-sm !min-h-[30px] !px-3 !py-1 text-xs font-extrabold inline-flex items-center gap-1.5 whitespace-nowrap"
-                            >
-                              <Eye className="w-3.5 h-3.5 text-[var(--orange)]" />
-                              <span>{isSyncingThis ? 'Opening…' : 'View'}</span>
-                            </button>
-                          </div>
-                        </div>
-                      </article>
+                        item={item}
+                        isUnread={isUnread}
+                        isSyncingThis={isSyncingThis}
+                        isDealRoomCreated={isDealRoomCreated}
+                        isFollowedListing={isFollowedListing}
+                        onMarkSingleRead={handleMarkSingleRead}
+                        onViewNotification={handleViewNotification}
+                        onDismiss={onDismiss}
+                      />
                     );
                   })
                 )}
@@ -593,3 +551,188 @@ export const NotificationCenter: React.FC<NotificationCenterProps> = ({
     </>
   );
 };
+
+interface SwipeableNotificationCardProps {
+  item: NotificationRecord;
+  isUnread: boolean;
+  isSyncingThis: boolean;
+  isDealRoomCreated: boolean;
+  isFollowedListing: boolean;
+  onMarkSingleRead: (item: NotificationRecord) => Promise<void>;
+  onViewNotification: (item: NotificationRecord) => Promise<void>;
+  onDismiss?: (item: NotificationRecord) => void | Promise<void>;
+}
+
+const SWIPE_DISMISS_THRESHOLD_PX = 90;
+
+const SwipeableNotificationCard: React.FC<SwipeableNotificationCardProps> = ({
+  item,
+  isUnread,
+  isSyncingThis,
+  isDealRoomCreated,
+  isFollowedListing,
+  onMarkSingleRead,
+  onViewNotification,
+  onDismiss,
+}) => {
+  const [offsetX, setOffsetX] = useState(0);
+  const [dragging, setDragging] = useState(false);
+  const gestureRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    lockedHorizontal: boolean;
+  } | null>(null);
+
+  const handlePointerDown = (e: React.PointerEvent<HTMLElement>) => {
+    if (!onDismiss) return;
+    if (e.button !== 0 && e.pointerType === 'mouse') return;
+    const target = e.target as HTMLElement | null;
+    if (target?.closest('button, a, input, select, textarea')) return;
+    gestureRef.current = {
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startY: e.clientY,
+      lockedHorizontal: false,
+    };
+  };
+
+  const handlePointerMove = (e: React.PointerEvent<HTMLElement>) => {
+    const g = gestureRef.current;
+    if (!g || g.pointerId !== e.pointerId) return;
+    const dx = e.clientX - g.startX;
+    const dy = e.clientY - g.startY;
+    if (!g.lockedHorizontal) {
+      if (Math.abs(dy) > 10 && Math.abs(dy) > Math.abs(dx)) {
+        gestureRef.current = null;
+        return;
+      }
+      if (Math.abs(dx) > 8 && Math.abs(dx) > Math.abs(dy)) {
+        g.lockedHorizontal = true;
+        setDragging(true);
+        try {
+          e.currentTarget.setPointerCapture(e.pointerId);
+        } catch {
+          // Ignore capture errors on synthetic events
+        }
+      } else {
+        return;
+      }
+    }
+    setOffsetX(dx);
+  };
+
+  const finishGesture = (e: React.PointerEvent<HTMLElement>) => {
+    const g = gestureRef.current;
+    if (!g || g.pointerId !== e.pointerId) return;
+    const dx = e.clientX - g.startX;
+    const wasLocked = g.lockedHorizontal;
+    gestureRef.current = null;
+    setDragging(false);
+    try {
+      if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      }
+    } catch {
+      // Ignore release errors
+    }
+    if (wasLocked && Math.abs(dx) > SWIPE_DISMISS_THRESHOLD_PX && onDismiss) {
+      void onDismiss(item);
+      return;
+    }
+    setOffsetX(0);
+  };
+
+  const opacity = offsetX === 0 ? undefined : Math.max(0.25, 1 - Math.abs(offsetX) / 220);
+
+  return (
+    <article
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={finishGesture}
+      onPointerCancel={finishGesture}
+      style={{
+        touchAction: 'pan-y',
+        transform: offsetX !== 0 ? `translateX(${offsetX}px)` : undefined,
+        opacity,
+        transition: dragging ? 'none' : 'transform 180ms ease, opacity 180ms ease',
+      }}
+      className={`p-3.5 transition-colors flex flex-col gap-2 select-none ${
+        isUnread ? 'bg-[var(--surface-2)]' : 'bg-[var(--surface)] opacity-90'
+      }`}
+    >
+      <div className="flex items-center justify-between gap-2 text-[11px] font-bold text-[var(--text-2)]">
+        <div className="flex items-center gap-1.5 min-w-0 truncate">
+          {renderCategoryIcon(item.category, item.severity)}
+          <span className="font-extrabold text-[var(--text)] truncate">
+            {isDealRoomCreated
+              ? 'Paid Deal Room'
+              : isFollowedListing
+              ? 'Followed Seller · New Listing'
+              : getNotificationCategoryLabel(item.category)}
+          </span>
+          <span aria-hidden="true">·</span>
+          <span
+            className={
+              isUnread ? 'font-black text-[var(--orange)]' : 'font-semibold text-[var(--text-3)]'
+            }
+          >
+            {isUnread ? 'Unread' : 'Read'}
+          </span>
+        </div>
+
+        <span
+          title={formatNotificationExactDateTime(item.createdAtMs)}
+          className="text-[11px] font-bold text-[var(--text-3)] tabular-nums shrink-0 inline-flex items-center gap-1"
+        >
+          <Clock className="w-3 h-3" />
+          {formatNotificationTimestamp(item.createdAtMs)}
+        </span>
+      </div>
+
+      <div className="space-y-1">
+        <h3
+          className={`text-sm leading-snug break-words ${
+            isUnread ? 'font-black text-[var(--text)]' : 'font-bold text-[var(--text-2)]'
+          }`}
+        >
+          {item.title}
+        </h3>
+        <p className="text-xs font-medium text-[var(--text-2)] line-clamp-2 leading-relaxed break-words">
+          {item.preview}
+        </p>
+      </div>
+
+      <div className="flex items-center justify-between gap-2 pt-0.5">
+        <span className="text-[11px] font-bold text-[var(--text-3)] truncate">
+          {item.referenceLabel || ''}
+        </span>
+        <div className="flex items-center gap-1.5 shrink-0">
+          {isUnread && (
+            <button
+              type="button"
+              onClick={() => void onMarkSingleRead(item)}
+              disabled={isSyncingThis}
+              aria-label={`Mark notification read: ${item.title}`}
+              className="bx-btn bx-btn-ghost bx-btn-sm !min-h-[30px] !px-2.5 !py-1 text-[11px] font-bold inline-flex items-center gap-1 whitespace-nowrap"
+            >
+              <Check className="w-3 h-3 text-[var(--green)]" />
+              <span>Mark read</span>
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => void onViewNotification(item)}
+            disabled={isSyncingThis}
+            aria-label={`View notification: ${item.title}`}
+            className="bx-btn bx-btn-sm !min-h-[30px] !px-3 !py-1 text-xs font-extrabold inline-flex items-center gap-1.5 whitespace-nowrap"
+          >
+            <Eye className="w-3.5 h-3.5 text-[var(--orange)]" />
+            <span>{isSyncingThis ? 'Opening…' : 'View'}</span>
+          </button>
+        </div>
+      </div>
+    </article>
+  );
+};
+

@@ -106,8 +106,10 @@ import {
   sortNotificationsNewestFirst,
 } from './lib/notificationLogic';
 import {
+  dismissNotificationsLocally,
   emitDealAdminNotification,
   emitUserNotification,
+  getLocallyDismissedNotificationIds,
   markAllNotificationsReadInFirestore,
   markLocalAnnouncementRead,
   markNotificationReadInFirestore,
@@ -670,6 +672,7 @@ export default function App() {
   const [notifReloadEpoch, setNotifReloadEpoch] = useState(0);
   const [notifOpenSignal, setNotifOpenSignal] = useState(0);
   const [announcementReadEpoch, setAnnouncementReadEpoch] = useState(0);
+  const [dismissedNotifEpoch, setDismissedNotifEpoch] = useState(0);
   const [notificationPrefs, setNotificationPrefs] = useState<UserNotificationPreferences>(() =>
     loadLocalNotificationPreferences(null)
   );
@@ -1943,16 +1946,22 @@ export default function App() {
 
   const combinedNotifications = useMemo(() => {
     void announcementReadEpoch;
-    return mergeAnnouncementsIntoFeed(
+    void dismissedNotifEpoch;
+    const scopeKey = fbUser?.uid || 'guest';
+    const merged = mergeAnnouncementsIntoFeed(
       personalNotifications,
       activeAnnouncements,
       fbUser?.uid ?? null
     );
+    const dismissedIds = getLocallyDismissedNotificationIds(scopeKey);
+    if (dismissedIds.size === 0) return merged;
+    return merged.filter((item) => !dismissedIds.has(item.id));
   }, [
     personalNotifications,
     activeAnnouncements,
     fbUser?.uid,
     announcementReadEpoch,
+    dismissedNotifEpoch,
   ]);
 
   const unreadNotificationCount = useMemo(
@@ -1995,6 +2004,23 @@ export default function App() {
       await markAllNotificationsReadInFirestore(fbUser.uid, personalNotifications);
     }
   }, [fbUser, combinedNotifications, personalNotifications]);
+
+  const handleDismissNotification = useCallback(
+    (item: NotificationRecord) => {
+      const scopeKey = fbUser?.uid || 'guest';
+      dismissNotificationsLocally(scopeKey, [item.id]);
+      setDismissedNotifEpoch((n) => n + 1);
+    },
+    [fbUser?.uid]
+  );
+
+  const handleClearAllNotifications = useCallback(() => {
+    const scopeKey = fbUser?.uid || 'guest';
+    const ids = combinedNotifications.map((item) => item.id).filter(Boolean);
+    if (ids.length === 0) return;
+    dismissNotificationsLocally(scopeKey, ids);
+    setDismissedNotifEpoch((n) => n + 1);
+  }, [fbUser?.uid, combinedNotifications]);
 
   const handleNavigateNotificationDestination = useCallback(
     async (dest: SafeInternalDestination) => {
@@ -2853,6 +2879,8 @@ export default function App() {
             onRetry={() => setNotifReloadEpoch((n) => n + 1)}
             onMarkOneRead={handleMarkSingleNotificationRead}
             onMarkAllRead={handleMarkAllNotificationsRead}
+            onDismiss={handleDismissNotification}
+            onClearAll={handleClearAllNotifications}
             onNavigateDestination={(dest) => {
               void handleNavigateNotificationDestination(dest);
             }}

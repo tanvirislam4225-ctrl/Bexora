@@ -242,7 +242,8 @@ export function registerMarketplaceManagementRoutes<
     cfg: VerifiedFirebaseRuntimeConfig,
     structuredQuery: Record<string, unknown>,
     idToken: string,
-    parentDocPath = ''
+    parentDocPath = '',
+    throwOnError = false
   ): Promise<Array<Record<string, unknown>>> {
     const parentUrl = parentDocPath
       ? `${buildFirestoreRestBase(cfg)}/${parentDocPath}:runQuery`
@@ -255,7 +256,12 @@ export function registerMarketplaceManagementRoutes<
       },
       body: JSON.stringify({ structuredQuery }),
     });
-    if (!res.ok) return [];
+    if (!res.ok) {
+      if (throwOnError) {
+        throw new Error(`REST runQuery failed (${res.status})`);
+      }
+      return [];
+    }
     const rows = (await res.json()) as Array<{ document?: FirestoreRestDoc }>;
     const out: Array<Record<string, unknown>> = [];
     for (const row of rows) {
@@ -1368,6 +1374,278 @@ export function registerMarketplaceManagementRoutes<
       authUsersMap,
     };
   }
+
+  async function readCollectionPagedForFinanceOverview(
+    cfg: VerifiedFirebaseRuntimeConfig,
+    adminIdToken: string,
+    collectionName: string,
+    fields: string[]
+  ): Promise<{ docs: Array<Record<string, unknown>>; complete: boolean }> {
+    try {
+      const adminApp = getOrInitFirebaseAdminApp(cfg.projectId);
+      const db = getAdminFirestore(adminApp, cfg.firestoreDatabaseId);
+      const docs: Array<Record<string, unknown>> = [];
+      let lastId: string | null = null;
+      while (true) {
+        let q = db
+          .collection(collectionName)
+          .orderBy(FieldPath.documentId())
+          .select(...fields)
+          .limit(500);
+        if (lastId) {
+          q = q.startAfter(lastId);
+        }
+        const snap = await q.get();
+        if (snap.empty) break;
+        for (const d of snap.docs) {
+          docs.push({ id: d.id, ...(d.data() as Record<string, unknown>) });
+        }
+        if (snap.docs.length < 500) break;
+        lastId = snap.docs[snap.docs.length - 1].id;
+      }
+      return { docs, complete: true };
+    } catch {
+      // Fallback to Firestore REST structuredQuery with 300/page offset pagination
+    }
+
+    const docs: Array<Record<string, unknown>> = [];
+    let offset = 0;
+    try {
+      while (true) {
+        const page = await restRunStructuredQuery(
+          cfg,
+          {
+            from: [{ collectionId: collectionName }],
+            select: { fields: fields.map((fieldPath) => ({ fieldPath })) },
+            orderBy: [{ field: { fieldPath: '__name__' }, direction: 'ASCENDING' }],
+            limit: 300,
+            offset,
+          },
+          adminIdToken,
+          '',
+          true
+        );
+        docs.push(...page);
+        if (page.length < 300) break;
+        offset += 300;
+      }
+      return { docs, complete: true };
+    } catch {
+      return { docs, complete: false };
+    }
+  }
+
+  app.get('/api/admin/finance-overview', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const cfg = loadVerifiedFirebaseConfig();
+    const adminCaller = await verifyAdminCaller(req, cfg);
+    if (!adminCaller) {
+      return res.status(403).json({ ok: false, error: 'Administrator authentication is required.' });
+    }
+
+    const rawRate = req.query.usdToBdtRate;
+    let usdToBdtRateUsed = 120;
+    if (rawRate !== undefined && String(rawRate).trim() !== '') {
+      const parsed = Number(rawRate);
+      if (!Number.isFinite(parsed) || parsed <= 0 || parsed >= 100000) {
+        return res.status(400).json({
+          ok: false,
+          error: 'usdToBdtRate must be greater than 0 and less than 100000.',
+        });
+      }
+      usdToBdtRateUsed = parsed;
+    }
+
+    const toBdtMinor = (rawAmount: unknown, rawCurrency: unknown): number => {
+      const num = Number(rawAmount);
+      if (!Number.isFinite(num) || num === 0) return 0;
+      const minor = Math.round(num);
+      const currency = String(rawCurrency || 'BDT').trim().toUpperCase();
+      if (currency === 'USD') {
+        return Math.round(minor * usdToBdtRateUsed);
+      }
+      return minor;
+    };
+
+    try {
+      const [privRes, listRes, dealRes, wdrRes, depRes] = await Promise.all([
+        readCollectionPagedForFinanceOverview(cfg, adminCaller.idToken, 'privateUsers', [
+          'walletBalanceMinor',
+          'reservedBalanceMinor',
+        ]),
+        readCollectionPagedForFinanceOverview(cfg, adminCaller.idToken, 'listings', [
+          'status',
+          'priceMinor',
+          'currency',
+        ]),
+        readCollectionPagedForFinanceOverview(cfg, adminCaller.idToken, 'deals', [
+          'status',
+          'currency',
+          'baseAmountMinor',
+          'platformCommissionMinor',
+          'refundPlatformRetainedMinor',
+          'sellerPayoutMinor',
+          'buyerTotalMinor',
+        ]),
+        readCollectionPagedForFinanceOverview(cfg, adminCaller.idToken, 'withdrawals', [
+          'status',
+          'amountMinor',
+          'currency',
+        ]),
+        readCollectionPagedForFinanceOverview(cfg, adminCaller.idToken, 'deposits', [
+          'status',
+          'amountMinor',
+          'currency',
+        ]),
+      ]);
+
+      const complete =
+        privRes.complete &&
+        listRes.complete &&
+        dealRes.complete &&
+        wdrRes.complete &&
+        depRes.complete;
+
+      let liveCount = 0;
+      let liveValueBdtMinor = 0;
+      let pendingListingCount = 0;
+      let pendingValueBdtMinor = 0;
+      for (const l of listRes.docs) {
+        const st = String(l.status || '');
+        if (st === 'active' || st === 'reserved') {
+          liveCount += 1;
+          liveValueBdtMinor += toBdtMinor(l.priceMinor, l.currency);
+        } else if (st === 'pending') {
+          pendingListingCount += 1;
+          pendingValueBdtMinor += toBdtMinor(l.priceMinor, l.currency);
+        }
+      }
+
+      const HELD_ESCROW_STATUSES = new Set([
+        'paid_deal_room_active',
+        'paid',
+        'transfer_in_progress',
+        'transfer_submitted',
+        'awaiting_buyer_confirmation',
+        'transfer_rejected',
+        'security_period_active',
+        'protection_active',
+        'reported_under_review',
+        'protection_expired',
+      ]);
+
+      let settledCount = 0;
+      let grossSalesBdtMinor = 0;
+      let realizedRevenueBdtMinor = 0;
+      let refundRetainedRevenueBdtMinor = 0;
+      let sellerPayoutsReleasedBdtMinor = 0;
+      let heldCount = 0;
+      let escrowHeldBdtMinor = 0;
+      let pendingSellerEarningsBdtMinor = 0;
+      let expectedRevenueBdtMinor = 0;
+
+      for (const d of dealRes.docs) {
+        const st = String(d.status || '');
+        if (st === 'settled') {
+          settledCount += 1;
+          grossSalesBdtMinor += toBdtMinor(d.baseAmountMinor, d.currency);
+          realizedRevenueBdtMinor += toBdtMinor(d.platformCommissionMinor, d.currency);
+          sellerPayoutsReleasedBdtMinor += toBdtMinor(d.sellerPayoutMinor, d.currency);
+        } else if (st === 'refunded') {
+          refundRetainedRevenueBdtMinor += toBdtMinor(d.refundPlatformRetainedMinor, d.currency);
+        } else if (HELD_ESCROW_STATUSES.has(st)) {
+          heldCount += 1;
+          escrowHeldBdtMinor += toBdtMinor(d.buyerTotalMinor, d.currency);
+          pendingSellerEarningsBdtMinor += toBdtMinor(d.sellerPayoutMinor, d.currency);
+          expectedRevenueBdtMinor += toBdtMinor(d.platformCommissionMinor, d.currency);
+        }
+      }
+
+      let usersWithBalance = 0;
+      let availableWalletBdtMinor = 0;
+      let lockedInWithdrawalsBdtMinor = 0;
+      for (const u of privRes.docs) {
+        const walletNum = Number(u.walletBalanceMinor);
+        const wallet = Number.isFinite(walletNum) ? Math.round(walletNum) : 0;
+        const reservedNum = Number(u.reservedBalanceMinor);
+        const reserved = Number.isFinite(reservedNum) ? Math.round(reservedNum) : 0;
+        if (wallet > 0) usersWithBalance += 1;
+        availableWalletBdtMinor += wallet;
+        lockedInWithdrawalsBdtMinor += reserved;
+      }
+
+      let pendingWithdrawalsCount = 0;
+      let pendingWithdrawalsBdtMinor = 0;
+      let paidWithdrawalsBdtMinor = 0;
+      for (const w of wdrRes.docs) {
+        const st = String(w.status || '');
+        if (st === 'pending') {
+          pendingWithdrawalsCount += 1;
+          pendingWithdrawalsBdtMinor += toBdtMinor(w.amountMinor, w.currency);
+        } else if (st === 'paid') {
+          paidWithdrawalsBdtMinor += toBdtMinor(w.amountMinor, w.currency);
+        }
+      }
+
+      let pendingDepositsCount = 0;
+      let pendingDepositsBdtMinor = 0;
+      let approvedDepositsBdtMinor = 0;
+      for (const dep of depRes.docs) {
+        const st = String(dep.status || '');
+        if (st === 'pending') {
+          pendingDepositsCount += 1;
+          pendingDepositsBdtMinor += toBdtMinor(dep.amountMinor, dep.currency);
+        } else if (st === 'approved') {
+          approvedDepositsBdtMinor += toBdtMinor(dep.amountMinor, dep.currency);
+        }
+      }
+
+      return res.json({
+        ok: true,
+        generatedAtMs: Date.now(),
+        usdToBdtRateUsed,
+        complete,
+        listings: {
+          liveCount,
+          liveValueBdtMinor,
+          pendingCount: pendingListingCount,
+          pendingValueBdtMinor,
+        },
+        deals: {
+          settledCount,
+          grossSalesBdtMinor,
+          realizedRevenueBdtMinor,
+          refundRetainedRevenueBdtMinor,
+          sellerPayoutsReleasedBdtMinor,
+          heldCount,
+          escrowHeldBdtMinor,
+          pendingSellerEarningsBdtMinor,
+          expectedRevenueBdtMinor,
+        },
+        users: {
+          totalUsers: privRes.docs.length,
+          usersWithBalance,
+          availableWalletBdtMinor,
+          lockedInWithdrawalsBdtMinor,
+        },
+        withdrawals: {
+          pendingCount: pendingWithdrawalsCount,
+          pendingBdtMinor: pendingWithdrawalsBdtMinor,
+          paidBdtMinor: paidWithdrawalsBdtMinor,
+        },
+        deposits: {
+          pendingCount: pendingDepositsCount,
+          pendingBdtMinor: pendingDepositsBdtMinor,
+          approvedBdtMinor: approvedDepositsBdtMinor,
+        },
+      });
+    } catch (err) {
+      return res.status(500).json({
+        ok: false,
+        error: err instanceof Error ? err.message : 'Unable to compute finance overview.',
+      });
+    }
+  });
 
   app.get('/api/admin/users', async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');

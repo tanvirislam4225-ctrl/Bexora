@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
   addDoc,
   collection,
@@ -25,7 +25,6 @@ import {
   Check,
   Clock,
   Code2,
-  Download,
   ExternalLink,
   Eye,
   FileCheck2,
@@ -77,6 +76,7 @@ import {
   auth,
   db,
   detectFirebaseAuthCapabilities,
+  fetchWithFreshBearerToken,
   requestServerEnableTokenService,
 } from '../lib/firebase';
 import {
@@ -117,7 +117,52 @@ import { AdminPaymentManagement } from './AdminPaymentManagement';
 import { AdminAiAssistantWorkspace } from './AdminAiAssistantWorkspace';
 import { AdminTrustSafetyCenter } from './AdminTrustSafetyCenter';
 import { AdminUsersDirectory } from './AdminUsersDirectory';
+import {
+  DismissibleNotice,
+  hideAllAdminNotices,
+  restoreAllAdminNotices,
+} from './DismissibleNotice';
 import { ImageLightboxModal } from './ImageLightboxModal';
+
+interface AdminFinanceOverviewPayload {
+  ok: boolean;
+  generatedAtMs: number;
+  usdToBdtRateUsed: number;
+  complete: boolean;
+  listings: {
+    liveCount: number;
+    liveValueBdtMinor: number;
+    pendingCount: number;
+    pendingValueBdtMinor: number;
+  };
+  deals: {
+    settledCount: number;
+    grossSalesBdtMinor: number;
+    realizedRevenueBdtMinor: number;
+    refundRetainedRevenueBdtMinor: number;
+    sellerPayoutsReleasedBdtMinor: number;
+    heldCount: number;
+    escrowHeldBdtMinor: number;
+    pendingSellerEarningsBdtMinor: number;
+    expectedRevenueBdtMinor: number;
+  };
+  users: {
+    totalUsers: number;
+    usersWithBalance: number;
+    availableWalletBdtMinor: number;
+    lockedInWithdrawalsBdtMinor: number;
+  };
+  withdrawals: {
+    pendingCount: number;
+    pendingBdtMinor: number;
+    paidBdtMinor: number;
+  };
+  deposits: {
+    pendingCount: number;
+    pendingBdtMinor: number;
+    approvedBdtMinor: number;
+  };
+}
 
 interface AdminDashboardProps {
   adminUid: string;
@@ -244,6 +289,42 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [auditLogs, setAuditLogs] = useState<AuditLogRecord[]>([]);
   const [adminRoles, setAdminRoles] = useState<{ uid: string; role: string; grantedBy: string }[]>([]);
   const [announcements, setAnnouncements] = useState<AnnouncementRecord[]>([]);
+  const [financeOverview, setFinanceOverview] = useState<AdminFinanceOverviewPayload | null>(null);
+  const [financeLoading, setFinanceLoading] = useState(false);
+  const [financeError, setFinanceError] = useState<string | null>(null);
+
+  const fetchFinanceOverview = useCallback(async () => {
+    setFinanceLoading(true);
+    setFinanceError(null);
+    try {
+      const rate =
+        Number.isFinite(settings.usdToBdtRate) &&
+        settings.usdToBdtRate > 0 &&
+        settings.usdToBdtRate < 100000
+          ? settings.usdToBdtRate
+          : 120;
+      const resp = await fetchWithFreshBearerToken(
+        `/api/admin/finance-overview?usdToBdtRate=${encodeURIComponent(String(rate))}`
+      );
+      const json = (await resp.json().catch(() => null)) as
+        | (AdminFinanceOverviewPayload & { error?: string })
+        | null;
+      if (!resp.ok || !json || !json.ok) {
+        throw new Error(json?.error || `Failed to load finance overview (${resp.status}).`);
+      }
+      setFinanceOverview(json);
+    } catch (err) {
+      setFinanceError(err instanceof Error ? err.message : 'Unable to load finance overview.');
+    } finally {
+      setFinanceLoading(false);
+    }
+  }, [settings.usdToBdtRate]);
+
+  useEffect(() => {
+    if (section === 'overview') {
+      void fetchFinanceOverview();
+    }
+  }, [section, fetchFinanceOverview]);
 
   // Admin Notification & Broadcast Composer State
   const [notifMode, setNotifMode] = useState<'broadcast_announcement' | 'targeted_user'>('broadcast_announcement');
@@ -2658,22 +2739,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
   };
 
-  const handleExportJsonBackup = () => {
-    const blob = new Blob(
-      [JSON.stringify({ exportedAt: new Date().toISOString(), settings, proposals }, null, 2)],
-      { type: 'application/json' }
-    );
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `bexora-config-checkpoint-${Date.now()}.json`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    onFlash('Exported JSON recovery checkpoint.');
-  };
-
   const handleToggleEmergencyStop = async () => {
     const next = !settings.aiEmergencyStop;
     try {
@@ -2851,62 +2916,329 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         {/* RIGHT-SIDE CONTENT WORKBENCH */}
         <div className="flex-1 min-w-0 space-y-6">
           {/* 1. OVERVIEW */}
-          {section === 'overview' && (
-            <div className="space-y-6">
-              <div className="bx-card p-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                <div>
-                  <h1 className="text-2xl font-black tracking-tight">BEXORA Operations Overview</h1>
-                  <p className="text-xs opacity-75 mt-1">
-                    Real-time Firebase Cloud Firestore telemetry — zero synthetic metrics.
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={handleExportJsonBackup}
-                  className="bx-btn bx-btn-primary px-4 py-2.5 text-xs font-extrabold inline-flex items-center gap-2"
-                >
-                  <Download className="w-4 h-4" />
-                  Export Config Checkpoint (.json)
-                </button>
-              </div>
+          {section === 'overview' && (() => {
+            const financeRateUsed = financeOverview?.usdToBdtRateUsed || settings.usdToBdtRate || 120;
+            const fmtFinance = (bdtMinor: number) =>
+              formatMoneyFromMinor(bdtMinor, displayCurrency, 'BDT', financeRateUsed);
+            const isInitialFinanceLoad = financeLoading && !financeOverview;
+            const availableUserBalanceMinor = financeOverview?.users.availableWalletBdtMinor ?? 0;
+            const lockedInWithdrawalsMinor = financeOverview?.users.lockedInWithdrawalsBdtMinor ?? 0;
+            const payableIfAllWithdrawMinor = availableUserBalanceMinor + lockedInWithdrawalsMinor;
+            const escrowHeldMinor = financeOverview?.deals.escrowHeldBdtMinor ?? 0;
+            const totalPlatformObligationsMinor = payableIfAllWithdrawMinor + escrowHeldMinor;
+            const estimatedSurplusMinor =
+              ((financeOverview?.deposits.approvedBdtMinor ?? 0) -
+                (financeOverview?.withdrawals.paidBdtMinor ?? 0)) -
+              totalPlatformObligationsMinor;
 
-              <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 tabular-nums">
-                <div className="bx-card p-4">
-                  <div className="text-xs font-bold uppercase opacity-70">Pending Listings</div>
-                  <div className="text-2xl font-black mt-1">{pendingListingsCount}</div>
-                </div>
-                <div className="bx-card p-4">
-                  <div className="text-xs font-bold uppercase opacity-70">Pending NIDs</div>
-                  <div className="text-2xl font-black mt-1">{pendingNidsCount}</div>
-                </div>
-                <div className="bx-card p-4">
-                  <div className="text-xs font-bold uppercase opacity-70">Pending Deposits</div>
-                  <div className="text-2xl font-black mt-1">{pendingDepositsCount}</div>
-                </div>
-                <div className="bx-card p-4">
-                  <div className="text-xs font-bold uppercase opacity-70">Disputes / Ready</div>
-                  <div className="text-2xl font-black mt-1 text-red-600">
-                    {reportedDealsCount} / <span className="text-emerald-600">{readyToSettleDealsCount}</span>
+            return (
+              <div className="space-y-6">
+                <div className="bx-card p-6 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                  <div>
+                    <h1 className="text-2xl font-black tracking-tight">BEXORA Operations Overview</h1>
+                    <p className="text-xs opacity-75 mt-1">
+                      Real-time Firebase Cloud Firestore telemetry — zero synthetic metrics.
+                      {financeOverview && (
+                        <span className="ml-2 font-bold">
+                          · Updated {new Date(financeOverview.generatedAtMs).toLocaleTimeString()} · 1 USD ={' '}
+                          {financeOverview.usdToBdtRateUsed} BDT
+                        </span>
+                      )}
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => void fetchFinanceOverview()}
+                      disabled={financeLoading}
+                      className="bx-btn bx-btn-primary px-3.5 py-2 text-xs font-extrabold inline-flex items-center gap-1.5 disabled:opacity-60"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${financeLoading ? 'animate-spin' : ''}`} />
+                      <span>{financeLoading ? 'Refreshing…' : 'Refresh Totals'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        hideAllAdminNotices();
+                        onFlash('Admin tips hidden.');
+                      }}
+                      className="bx-btn bx-btn-ghost px-3 py-2 text-xs font-extrabold"
+                    >
+                      Hide tips
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        restoreAllAdminNotices();
+                        onFlash('Hidden admin tips restored.');
+                      }}
+                      className="bx-btn bx-btn-ghost px-3 py-2 text-xs font-extrabold"
+                    >
+                      Show hidden tips
+                    </button>
                   </div>
                 </div>
-              </div>
 
-              <div className="bx-card p-5 space-y-3">
-                <h2 className="text-sm font-black uppercase">Active Fee, Dispute Refund & Security Timer Policy</h2>
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs font-bold">
-                  <div className="p-3 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)]">
-                    Buyer Fee: {settings.buyerFeeEnabled ? `${settings.buyerFeePct}%` : 'Disabled (0%)'} · Dispute Refund: 100% Bid + Refundable Fee (3% Platform Retained)
+                {financeError && (
+                  <div
+                    role="alert"
+                    className="bx-card p-4 border-2 border-red-600 bg-red-50 dark:bg-red-950/30 text-xs font-bold text-red-700 dark:text-red-300"
+                  >
+                    Finance overview failed to load: {financeError}
                   </div>
-                  <div className="p-3 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)]">
-                    Seller Commission: {settings.sellerFeeEnabled ? `${settings.sellerFeePct}%` : 'Disabled (0%)'}
+                )}
+
+                {financeOverview && !financeOverview.complete && (
+                  <div
+                    role="status"
+                    className="bx-card p-4 border-2 border-amber-500 bg-amber-50 dark:bg-amber-950/30 text-xs font-bold text-amber-800 dark:text-amber-300"
+                  >
+                    Warning: Some Firestore collections could not be read completely. Displayed totals may be partial — click &ldquo;Refresh Totals&rdquo; to retry.
                   </div>
-                  <div className="p-3 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)]">
-                    Security Timers: YouTube {getProtectionDurationHours('youtube', settings)}h (7d) · Facebook & Standard {getProtectionDurationHours('facebook', settings)}h
+                )}
+
+                <div className="space-y-3">
+                  <h2 className="text-sm font-black uppercase tracking-wide">Action Queue</h2>
+                  <div className="grid grid-cols-2 lg:grid-cols-5 gap-4 tabular-nums">
+                    <button
+                      type="button"
+                      onClick={() => setSection('moderation')}
+                      className="bx-card p-4 text-left cursor-pointer hover:border-[#FF6500] transition-colors"
+                    >
+                      <div className="text-xs font-bold uppercase opacity-70">Pending Listings</div>
+                      <div className="text-2xl font-black mt-1">{pendingListingsCount}</div>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSection('nid')}
+                      className="bx-card p-4 text-left cursor-pointer hover:border-[#FF6500] transition-colors"
+                    >
+                      <div className="text-xs font-bold uppercase opacity-70">Pending NIDs</div>
+                      <div className="text-2xl font-black mt-1">{pendingNidsCount}</div>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSection('deposits')}
+                      className="bx-card p-4 text-left cursor-pointer hover:border-[#FF6500] transition-colors"
+                    >
+                      <div className="text-xs font-bold uppercase opacity-70">Pending Deposits</div>
+                      <div className="text-2xl font-black mt-1">{pendingDepositsCount}</div>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSection('withdrawals')}
+                      className="bx-card p-4 text-left cursor-pointer hover:border-[#FF6500] transition-colors"
+                    >
+                      <div className="text-xs font-bold uppercase opacity-70">Pending Withdrawals</div>
+                      <div className="text-2xl font-black mt-1">{pendingWithdrawalsCount}</div>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSection('deals')}
+                      className="bx-card p-4 text-left cursor-pointer hover:border-[#FF6500] transition-colors"
+                    >
+                      <div className="text-xs font-bold uppercase opacity-70">Disputes / Ready</div>
+                      <div className="text-2xl font-black mt-1 text-red-600">
+                        {reportedDealsCount} / <span className="text-emerald-600">{readyToSettleDealsCount}</span>
+                      </div>
+                    </button>
                   </div>
                 </div>
+
+                <div className="space-y-3">
+                  <h2 className="text-sm font-black uppercase tracking-wide">Marketplace Value &amp; Earnings</h2>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 tabular-nums">
+                    <div className="bx-card p-4 space-y-1">
+                      <div className="text-xs font-bold uppercase opacity-70">Total Listing Value</div>
+                      <div className="text-2xl font-black">
+                        {isInitialFinanceLoad || !financeOverview
+                          ? '…'
+                          : fmtFinance(financeOverview.listings.liveValueBdtMinor)}
+                      </div>
+                      <p className="text-[11px] opacity-75">
+                        {financeOverview
+                          ? `${financeOverview.listings.liveCount} live · ${financeOverview.listings.pendingCount} pending (${fmtFinance(financeOverview.listings.pendingValueBdtMinor)})`
+                          : 'Live listings value'}
+                      </p>
+                    </div>
+
+                    <div className="bx-card p-4 space-y-1">
+                      <div className="text-xs font-bold uppercase opacity-70">Gross Merchandise Volume</div>
+                      <div className="text-2xl font-black">
+                        {isInitialFinanceLoad || !financeOverview
+                          ? '…'
+                          : fmtFinance(financeOverview.deals.grossSalesBdtMinor)}
+                      </div>
+                      <p className="text-[11px] opacity-75">
+                        {financeOverview
+                          ? `${financeOverview.deals.settledCount} completed deals (asset price only)`
+                          : 'Completed deals, asset price only'}
+                      </p>
+                    </div>
+
+                    <div className="bx-card p-4 space-y-1">
+                      <div className="text-xs font-bold uppercase opacity-70">Platform Revenue (Earned)</div>
+                      <div className="text-2xl font-black text-emerald-600 dark:text-emerald-400">
+                        {isInitialFinanceLoad || !financeOverview
+                          ? '…'
+                          : fmtFinance(
+                              financeOverview.deals.realizedRevenueBdtMinor +
+                                financeOverview.deals.refundRetainedRevenueBdtMinor
+                            )}
+                      </div>
+                      <p className="text-[11px] opacity-75">
+                        {financeOverview
+                          ? `Settled fees (${fmtFinance(financeOverview.deals.realizedRevenueBdtMinor)}) + dispute retained (${fmtFinance(financeOverview.deals.refundRetainedRevenueBdtMinor)})`
+                          : 'Settled commission + retained dispute fees'}
+                      </p>
+                    </div>
+
+                    <div className="bx-card p-4 space-y-1">
+                      <div className="text-xs font-bold uppercase opacity-70">Projected Revenue</div>
+                      <div className="text-2xl font-black text-[#FF6500]">
+                        {isInitialFinanceLoad || !financeOverview
+                          ? '…'
+                          : fmtFinance(financeOverview.deals.expectedRevenueBdtMinor)}
+                      </div>
+                      <p className="text-[11px] opacity-75">
+                        {financeOverview
+                          ? `Commission on ${financeOverview.deals.heldCount} funded deals still in escrow`
+                          : 'Commission on funded deals still in escrow'}
+                      </p>
+                    </div>
+
+                    <div className="bx-card p-4 space-y-1">
+                      <div className="text-xs font-bold uppercase opacity-70">Seller Payouts Released</div>
+                      <div className="text-2xl font-black">
+                        {isInitialFinanceLoad || !financeOverview
+                          ? '…'
+                          : fmtFinance(financeOverview.deals.sellerPayoutsReleasedBdtMinor)}
+                      </div>
+                      <p className="text-[11px] opacity-75">
+                        {financeOverview
+                          ? `Across ${financeOverview.deals.settledCount} settled deals`
+                          : 'Net payouts credited to sellers'}
+                      </p>
+                    </div>
+
+                    <div className="bx-card p-4 space-y-1">
+                      <div className="text-xs font-bold uppercase opacity-70">Funds in Escrow</div>
+                      <div className="text-2xl font-black">
+                        {isInitialFinanceLoad || !financeOverview ? '…' : fmtFinance(escrowHeldMinor)}
+                      </div>
+                      <p className="text-[11px] opacity-75">
+                        {financeOverview
+                          ? `${financeOverview.deals.heldCount} active funded deals in escrow`
+                          : 'Buyer funds currently held in escrow'}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  <h2 className="text-sm font-black uppercase tracking-wide">User Balances &amp; Liabilities</h2>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 tabular-nums">
+                    <div className="bx-card p-4 space-y-1">
+                      <div className="text-xs font-bold uppercase opacity-70">Available User Balance</div>
+                      <div className="text-2xl font-black">
+                        {isInitialFinanceLoad || !financeOverview
+                          ? '…'
+                          : fmtFinance(availableUserBalanceMinor)}
+                      </div>
+                      <p className="text-[11px] opacity-75">
+                        {financeOverview
+                          ? `${financeOverview.users.usersWithBalance} of ${financeOverview.users.totalUsers} users hold a withdrawable balance`
+                          : 'Withdrawable user wallet balances'}
+                      </p>
+                    </div>
+
+                    <div className="bx-card p-4 space-y-1">
+                      <div className="text-xs font-bold uppercase opacity-70">Pending Seller Earnings</div>
+                      <div className="text-2xl font-black">
+                        {isInitialFinanceLoad || !financeOverview
+                          ? '…'
+                          : fmtFinance(financeOverview.deals.pendingSellerEarningsBdtMinor)}
+                      </div>
+                      <p className="text-[11px] opacity-75">
+                        Seller share of deals still in security period
+                      </p>
+                    </div>
+
+                    <div className="bx-card p-4 space-y-1">
+                      <div className="text-xs font-bold uppercase opacity-70">Locked in Withdrawals</div>
+                      <div className="text-2xl font-black">
+                        {isInitialFinanceLoad || !financeOverview
+                          ? '…'
+                          : fmtFinance(lockedInWithdrawalsMinor)}
+                      </div>
+                      <p className="text-[11px] opacity-75">
+                        {financeOverview
+                          ? `${financeOverview.withdrawals.pendingCount} pending requests (${fmtFinance(financeOverview.withdrawals.pendingBdtMinor)})`
+                          : 'Reserved for pending withdrawal requests'}
+                      </p>
+                    </div>
+
+                    <div className="bx-card p-4 space-y-1">
+                      <div className="text-xs font-bold uppercase opacity-70">Payable if All Withdraw</div>
+                      <div className="text-2xl font-black">
+                        {isInitialFinanceLoad || !financeOverview
+                          ? '…'
+                          : fmtFinance(payableIfAllWithdrawMinor)}
+                      </div>
+                      <p className="text-[11px] opacity-75">
+                        Available balance + locked withdrawal holds
+                      </p>
+                    </div>
+
+                    <div className="bx-card p-4 space-y-1">
+                      <div className="text-xs font-bold uppercase opacity-70">Total Platform Obligations</div>
+                      <div className="text-2xl font-black">
+                        {isInitialFinanceLoad || !financeOverview
+                          ? '…'
+                          : fmtFinance(totalPlatformObligationsMinor)}
+                      </div>
+                      <p className="text-[11px] opacity-75">
+                        Minimum amount to keep in reserve
+                      </p>
+                    </div>
+
+                    <div className="bx-card p-4 space-y-1">
+                      <div className="text-xs font-bold uppercase opacity-70">Estimated Surplus</div>
+                      <div
+                        className={`text-2xl font-black ${
+                          estimatedSurplusMinor < 0
+                            ? 'text-red-600 dark:text-red-400'
+                            : 'text-emerald-600 dark:text-emerald-400'
+                        }`}
+                      >
+                        {isInitialFinanceLoad || !financeOverview ? '…' : fmtFinance(estimatedSurplusMinor)}
+                      </div>
+                      <p className="text-[11px] opacity-75">
+                        {financeOverview
+                          ? `estimate only · Deposits (${fmtFinance(financeOverview.deposits.approvedBdtMinor)}) − Paid (${fmtFinance(financeOverview.withdrawals.paidBdtMinor)}) − Obligations`
+                          : 'estimate only'}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                <DismissibleNotice id="overview-policy" className="bx-card p-5 space-y-3">
+                  <h2 className="text-sm font-black uppercase">Active Fee, Dispute Refund &amp; Security Timer Policy</h2>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs font-bold">
+                    <div className="p-3 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)]">
+                      Buyer Fee: {settings.buyerFeeEnabled ? `${settings.buyerFeePct}%` : 'Disabled (0%)'} · Dispute Refund: 100% Bid + Refundable Fee (3% Platform Retained)
+                    </div>
+                    <div className="p-3 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)]">
+                      Seller Commission: {settings.sellerFeeEnabled ? `${settings.sellerFeePct}%` : 'Disabled (0%)'}
+                    </div>
+                    <div className="p-3 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)]">
+                      Security Timers: YouTube {getProtectionDurationHours('youtube', settings)}h (7d) · Facebook &amp; Standard {getProtectionDurationHours('facebook', settings)}h
+                    </div>
+                  </div>
+                </DismissibleNotice>
               </div>
-            </div>
-          )}
+            );
+          })()}
 
           {/* 1B. ALL USERS MANAGEMENT DIRECTORY */}
           {section === 'users' && (
@@ -4285,11 +4617,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               <form onSubmit={handleSaveBrandingAndNotice} className="bx-card p-6 space-y-5">
                 <div>
                   <h2 className="text-lg font-black">
-                    Platform Branding, Top Notice Banner & Active Languages
+                    Platform Branding, Top Notice Banner &amp; Active Languages
                   </h2>
-                  <p className="text-xs opacity-75 mt-1">
-                    Customize site display name, custom HTTPS brand logo URL (leave blank to use the default BEXORA geometric emblem), top announcement notice bar, and enabled customer languages.
-                  </p>
+                  <DismissibleNotice id="branding-intro" className="mt-1">
+                    <p className="text-xs opacity-75">
+                      Customize site display name, custom HTTPS brand logo URL (leave blank to use the default BEXORA geometric emblem), top announcement notice bar, and enabled customer languages.
+                    </p>
+                  </DismissibleNotice>
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -4526,7 +4860,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               onToggleEmergencyStop={handleToggleEmergencyStop}
               onRefreshSystemHealth={fetchSystemHealth}
               onEnableCloudService={handleEnableCloudServiceFromHealth}
-              onExportJsonBackup={handleExportJsonBackup}
               onWriteAuditLog={writeAuditLog}
               onFlash={onFlash}
               firebaseAuthProvidersUrl={DEFAULT_FIREBASE_AUTH_PROVIDERS_URL}
@@ -4540,14 +4873,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             <div className="space-y-6">
               <div className="bx-card p-6 space-y-5">
                 <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--bx-border)] pb-3">
-                  <div>
+                  <div className="w-full">
                     <h1 className="text-xl font-black flex items-center gap-2">
                       <Megaphone className="w-5 h-5 text-[#FF6500]" />
-                      Platform Announcements & Targeted User Alerts
+                      Platform Announcements &amp; Targeted User Alerts
                     </h1>
-                    <p className="text-xs opacity-75 mt-1">
-                      Publish official BEXORA announcements to the Header Notification Center or send direct notices to an individual member UID.
-                    </p>
+                    <DismissibleNotice id="announcements-intro" className="mt-1">
+                      <p className="text-xs opacity-75">
+                        Publish official BEXORA announcements to the Header Notification Center or send direct notices to an individual member UID.
+                      </p>
+                    </DismissibleNotice>
                   </div>
                 </div>
 

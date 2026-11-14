@@ -4,7 +4,6 @@ import {
   Activity,
   AlertOctagon,
   AlertTriangle,
-  Archive,
   Bot,
   CalendarClock,
   CheckCircle2,
@@ -12,7 +11,6 @@ import {
   ChevronRight,
   Clock,
   Code2,
-  Download,
   ExternalLink,
   FileSearch,
   History,
@@ -87,7 +85,6 @@ export interface AdminAiAssistantWorkspaceProps {
   onToggleEmergencyStop: () => Promise<void>;
   onRefreshSystemHealth: () => Promise<void>;
   onEnableCloudService: (target: 'token_service' | 'fcm_apis') => Promise<void>;
-  onExportJsonBackup: () => void;
   onWriteAuditLog: (
     actorId: string,
     action: string,
@@ -193,7 +190,6 @@ export const AdminAiAssistantWorkspace: React.FC<AdminAiAssistantWorkspaceProps>
   onToggleEmergencyStop,
   onRefreshSystemHealth,
   onEnableCloudService,
-  onExportJsonBackup,
   onWriteAuditLog,
   onFlash,
   firebaseAuthProvidersUrl,
@@ -2159,38 +2155,19 @@ export const AdminAiAssistantWorkspace: React.FC<AdminAiAssistantWorkspaceProps>
 
                 <div className="bx-card p-4 space-y-3 text-xs">
                   <h3 className="font-black text-sm flex items-center gap-1.5">
-                    <Archive className="w-4 h-4 text-[#FF6500]" />
-                    Release Packages &amp; Config Checkpoints
+                    <History className="w-4 h-4 text-[#FF6500]" />
+                    Recent Immutable Admin Audit Logs ({auditLogs.length})
                   </h3>
-                  <p className="text-[11px] text-[var(--text-2)]">
-                    Export a static frontend bundle or non-secret configuration checkpoint before applying major platform updates.
-                  </p>
-                  <div className="flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      onClick={onExportJsonBackup}
-                      className="bx-btn bx-btn-ghost px-3.5 py-2 text-xs font-extrabold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
-                    >
-                      <Download className="w-3.5 h-3.5" />
-                      Export Config Checkpoint (.json)
-                    </button>
-                  </div>
-
-                  <div className="pt-2 border-t border-[var(--bx-border)] space-y-1.5">
-                    <div className="text-[11px] font-black uppercase text-[var(--text-2)]">
-                      Recent Immutable Admin Audit Logs ({auditLogs.length})
-                    </div>
-                    <div className="max-h-36 overflow-y-auto space-y-1 font-mono text-[10px]">
-                      {auditLogs.slice(0, 12).map((l) => (
-                        <div
-                          key={l.id}
-                          className="p-1.5 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)] truncate"
-                        >
-                          [{new Date(l.createdAtMs).toLocaleTimeString()}] <strong>{l.action}</strong>:{' '}
-                          {l.details}
-                        </div>
-                      ))}
-                    </div>
+                  <div className="max-h-48 overflow-y-auto space-y-1 font-mono text-[10px]">
+                    {auditLogs.slice(0, 12).map((l) => (
+                      <div
+                        key={l.id}
+                        className="p-1.5 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)] truncate"
+                      >
+                        [{new Date(l.createdAtMs).toLocaleTimeString()}] <strong>{l.action}</strong>:{' '}
+                        {l.details}
+                      </div>
+                    ))}
                   </div>
                 </div>
               </div>
