@@ -9,16 +9,16 @@ export const BexoraLogo: React.FC<{
   const resolvedName = (siteName || 'BEXORA').trim() || 'BEXORA';
   const resolvedLogo = logoUrl && logoUrl.trim() ? logoUrl.trim() : './icon.svg';
   return (
-    <span className="inline-flex items-center gap-2.5 select-none shrink-0">
+    <span className="inline-flex items-center gap-1.5 sm:gap-2.5 select-none shrink-0">
       <img
         src={resolvedLogo}
         alt={`${resolvedName} official mark`}
         width={compact ? 32 : 36}
         height={compact ? 32 : 36}
-        className="w-8 h-8 md:w-9 md:h-9 rounded-lg object-contain shrink-0"
+        className="w-7 h-7 sm:w-8 sm:h-8 md:w-9 md:h-9 rounded-lg object-contain shrink-0"
       />
       <span
-        className="font-extrabold text-lg md:text-xl tracking-tight whitespace-nowrap"
+        className="font-extrabold text-base sm:text-lg md:text-xl tracking-tight whitespace-nowrap"
         style={{ color: 'var(--text)' }}
       >
         {resolvedName}
@@ -94,6 +94,14 @@ export const PlatformIcon: React.FC<{ id: PlatformId; size?: number; className?:
           <circle cx="17.8" cy="13.4" r="0.95" fill="currentColor" stroke="none" />
         </svg>
       );
+    case 'others':
+      return (
+        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.85" strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden="true">
+          <path d="M12 3 4 7.5v9L12 21l8-4.5v-9L12 3Z" />
+          <path d="m4 7.5 8 4.5 8-4.5" />
+          <path d="M12 12v9" />
+        </svg>
+      );
   }
 };
 
@@ -106,4 +114,5 @@ export const PLATFORM_BANNER_BG: Record<PlatformId, string> = {
   website: 'linear-gradient(135deg, #12897B, #0D5C53)',
   domain: 'linear-gradient(135deg, #272738, #793A91)',
   gaming: 'linear-gradient(135deg, #5B2873, #D98200)',
+  others: 'linear-gradient(135deg, #4B5563, #1F2937)',
 };

@@ -548,3 +548,49 @@ export function resolveNotificationOnboardingState(
   return 'show_onboarding';
 }
 
+/**
+ * Separates a user's visible notification feed into:
+ * - `personalDocIds`: real Firestore `/notifications/{id}` docs owned strictly by `uid`
+ *   (safe to permanently delete for this user).
+ * - `announcementMirrorIds`: global `/announcements` mirrors (must only be hidden locally
+ *   for this user so global announcements remain intact for other users).
+ */
+export function partitionNotificationsForDeletion(
+  items: ReadonlyArray<Pick<NotificationRecord, 'id' | 'recipientId' | 'isAnnouncementMirror'>>,
+  uid: string | null | undefined
+): { personalDocIds: string[]; announcementMirrorIds: string[] } {
+  const personalDocIds: string[] = [];
+  const announcementMirrorIds: string[] = [];
+  const seenPersonal = new Set<string>();
+  const seenMirror = new Set<string>();
+
+  for (const item of items) {
+    if (!item || !item.id) continue;
+    if (item.isAnnouncementMirror) {
+      if (!seenMirror.has(item.id)) {
+        seenMirror.add(item.id);
+        announcementMirrorIds.push(item.id);
+      }
+      continue;
+    }
+    if (uid && item.recipientId === uid && isValidFirestoreDocId(item.id)) {
+      if (!seenPersonal.has(item.id)) {
+        seenPersonal.add(item.id);
+        personalDocIds.push(item.id);
+      }
+    }
+  }
+
+  return { personalDocIds, announcementMirrorIds };
+}
+
+export function canUserDeleteNotification(
+  item: Pick<NotificationRecord, 'id' | 'recipientId' | 'isAnnouncementMirror'> | null | undefined,
+  uid: string | null | undefined
+): boolean {
+  if (!item || !item.id) return false;
+  if (item.isAnnouncementMirror) return true;
+  return Boolean(uid && item.recipientId === uid && isValidFirestoreDocId(item.id));
+}
+
+

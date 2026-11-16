@@ -1,6 +1,7 @@
 import {
   addDoc,
   collection,
+  deleteDoc,
   doc,
   getDoc,
   getDocs,
@@ -12,10 +13,12 @@ import {
   writeBatch,
 } from 'firebase/firestore';
 import { auth, db, handleFirestoreError, OperationType } from './firebase';
+import { buildApiUrl } from './apiClient';
 import {
   buildNotificationId,
   chunkForFirestoreBatch,
   isValidFirestoreDocId,
+  partitionNotificationsForDeletion,
   sanitizeNotificationDestination,
   truncateNotificationField,
 } from './notificationLogic';
@@ -51,6 +54,10 @@ export interface EmitNotificationInput {
 
 const inFlightCreateIds = new Set<string>();
 const inFlightMarkAllByUid = new Map<string, Promise<{ updatedCount: number }>>();
+const inFlightClearAllByUid = new Map<
+  string,
+  Promise<{ deletedPersonalCount: number; dismissedMirrorIds: string[] }>
+>();
 
 /**
  * Emits a real Firestore-backed notification idempotently AFTER the underlying marketplace action succeeds.
@@ -249,6 +256,94 @@ export async function markAllNotificationsReadInFirestore(
   }
 }
 
+/**
+ * Deletes a single personal notification document belonging to the signed-in recipient.
+ * Announcement mirrors are not stored per-user in `/notifications` and are dismissed locally
+ * so global `/announcements` remain untouched for other users.
+ */
+export async function deleteNotificationInFirestore(
+  notification: Pick<NotificationRecord, 'id' | 'recipientId' | 'isAnnouncementMirror'>
+): Promise<{ deletedFromFirestore: boolean; isMirror: boolean }> {
+  if (!notification || !notification.id) {
+    return { deletedFromFirestore: false, isMirror: false };
+  }
+  if (notification.isAnnouncementMirror) {
+    return { deletedFromFirestore: false, isMirror: true };
+  }
+  const currentUser = auth.currentUser;
+  if (
+    !currentUser ||
+    notification.recipientId !== currentUser.uid ||
+    !isValidFirestoreDocId(notification.id)
+  ) {
+    return { deletedFromFirestore: false, isMirror: false };
+  }
+
+  const path = `notifications/${notification.id}`;
+  try {
+    await deleteDoc(doc(db, 'notifications', notification.id));
+    return { deletedFromFirestore: true, isMirror: false };
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
+    return { deletedFromFirestore: false, isMirror: false };
+  }
+}
+
+/**
+ * Permanently deletes all personal `/notifications/{id}` records belonging ONLY to `uid`
+ * in chunked Firestore batches (`<= 450` writes) and returns any announcement mirror IDs to
+ * hide locally without affecting global `/announcements`.
+ */
+export async function clearAllUserNotificationsInFirestore(
+  uid: string,
+  notifications: ReadonlyArray<NotificationRecord>
+): Promise<{ deletedPersonalCount: number; dismissedMirrorIds: string[] }> {
+  const currentUser = auth.currentUser;
+  const { personalDocIds, announcementMirrorIds } = partitionNotificationsForDeletion(
+    notifications,
+    uid
+  );
+
+  if (!currentUser || currentUser.uid !== uid) {
+    return {
+      deletedPersonalCount: 0,
+      dismissedMirrorIds: notifications.map((n) => n.id).filter(Boolean),
+    };
+  }
+
+  const existingInFlight = inFlightClearAllByUid.get(uid);
+  if (existingInFlight) {
+    return existingInFlight;
+  }
+
+  const job = (async () => {
+    let deletedPersonalCount = 0;
+    if (personalDocIds.length > 0) {
+      const chunks = chunkForFirestoreBatch(personalDocIds, 450);
+      for (const chunk of chunks) {
+        const batch = writeBatch(db);
+        for (const docId of chunk) {
+          batch.delete(doc(db, 'notifications', docId));
+        }
+        try {
+          await batch.commit();
+          deletedPersonalCount += chunk.length;
+        } catch (error) {
+          handleFirestoreError(error, OperationType.DELETE, 'notifications');
+        }
+      }
+    }
+    return { deletedPersonalCount, dismissedMirrorIds: announcementMirrorIds };
+  })();
+
+  inFlightClearAllByUid.set(uid, job);
+  try {
+    return await job;
+  } finally {
+    inFlightClearAllByUid.delete(uid);
+  }
+}
+
 export interface PublishAdminNotificationInput {
   mode: 'broadcast_announcement' | 'targeted_user';
   targetUid?: string;
@@ -411,7 +506,7 @@ export async function publishAdminNotification(
 
   // Trigger fault-isolated server-side Web Push broadcast to all active device push tokens
   currentUser.getIdToken().then((idToken) => {
-    fetch('/api/fcm/broadcast', {
+    fetch(buildApiUrl('/api/fcm/broadcast'), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

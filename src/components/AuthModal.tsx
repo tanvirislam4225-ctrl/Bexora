@@ -20,6 +20,7 @@ import {
   RefreshCw,
   ShieldCheck,
 } from 'lucide-react';
+import { buildApiUrl } from '../lib/apiClient';
 import {
   auth,
   browserPopupRedirectResolver,
@@ -269,9 +270,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       // Pre-check fraud-ban security blocklist (if backend endpoint is available)
       try {
         const eligResp = await fetch(
-          `/api/auth/registration-eligibility?email=${encodeURIComponent(
-            validation.cleanEmail
-          )}&phone=${encodeURIComponent(validation.normalizedPhone)}`,
+          buildApiUrl(
+            `/api/auth/registration-eligibility?email=${encodeURIComponent(
+              validation.cleanEmail
+            )}&phone=${encodeURIComponent(validation.normalizedPhone)}`
+          ),
           { headers: { Accept: 'application/json' } }
         );
         const ct = eligResp.headers.get('content-type') || '';

@@ -1,5 +1,6 @@
 import { doc, getDoc, increment, updateDoc } from 'firebase/firestore';
 import { auth, db } from './firebase';
+import { buildApiUrl } from './apiClient';
 
 const VIEWER_TOKEN_STORAGE_KEY = 'bx_viewer_token_v1';
 const VIEW_SESSION_PREFIX = 'bx_last_view_';
@@ -123,7 +124,7 @@ export async function recordAssetDetailView(params: {
         if (idToken) headers.Authorization = `Bearer ${idToken}`;
       }
 
-      const res = await fetch(`/api/listings/${encodeURIComponent(listingId)}/view`, {
+      const res = await fetch(buildApiUrl(`/api/listings/${encodeURIComponent(listingId)}/view`), {
         method: 'POST',
         headers,
         body: JSON.stringify({ viewerToken }),

@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildNotificationId,
+  canUserDeleteNotification,
   chunkForFirestoreBatch,
   classifyAuthFailureCause,
   classifyTokenServiceProbe,
@@ -10,6 +11,7 @@ import {
   filterNotificationsForRecipient,
   formatUnreadBadgeCount,
   isValidFirestoreDocId,
+  partitionNotificationsForDeletion,
   resolveNotificationOnboardingState,
   sanitizeNotificationDestination,
   sortNotificationsNewestFirst,
@@ -324,5 +326,71 @@ test('resolveNotificationOnboardingState handles Case A (default), Case B (grant
   assert.equal(chatDest.kind, 'chat');
   assert.equal(chatDest.view, 'chat');
   assert.equal(chatDest.targetId, 'conv_987_xyz');
+});
+
+test('partitionNotificationsForDeletion isolates current user personal docs from global announcement mirrors and other users', () => {
+  const items: NotificationRecord[] = [
+    {
+      id: 'ntf_u1_a',
+      recipientId: 'user_1',
+      actorId: 'admin_1',
+      actorRole: 'admin',
+      category: 'deal',
+      severity: 'info',
+      title: 'Deal Update',
+      preview: 'Deal update',
+      body: 'Deal update',
+      refType: 'deal',
+      refId: 'deal_1',
+      referenceLabel: 'Deal',
+      destination: 'deal:deal_1',
+      read: false,
+      createdAtMs: 1000,
+    },
+    {
+      id: 'ntf_u2_b',
+      recipientId: 'user_2',
+      actorId: 'admin_1',
+      actorRole: 'admin',
+      category: 'wallet',
+      severity: 'success',
+      title: 'Other User Wallet',
+      preview: 'Other',
+      body: 'Other',
+      refType: 'wallet',
+      refId: 'dep_1',
+      referenceLabel: 'Wallet',
+      destination: 'wallet',
+      read: false,
+      createdAtMs: 2000,
+    },
+    {
+      id: 'ann_mirror_global1',
+      recipientId: 'user_1',
+      actorId: 'admin_1',
+      actorRole: 'admin',
+      category: 'announcement',
+      severity: 'info',
+      title: 'Global Announcement',
+      preview: 'Banner',
+      body: 'Banner',
+      refType: 'announcement',
+      refId: 'global1',
+      referenceLabel: 'Announcement',
+      destination: '',
+      read: true,
+      createdAtMs: 3000,
+      isAnnouncementMirror: true,
+    },
+  ];
+
+  const partitioned = partitionNotificationsForDeletion(items, 'user_1');
+  assert.deepEqual(partitioned.personalDocIds, ['ntf_u1_a']);
+  assert.deepEqual(partitioned.announcementMirrorIds, ['ann_mirror_global1']);
+
+  assert.equal(canUserDeleteNotification(items[0], 'user_1'), true);
+  assert.equal(canUserDeleteNotification(items[1], 'user_1'), false);
+  assert.equal(canUserDeleteNotification(items[2], 'user_1'), true);
+  assert.equal(canUserDeleteNotification(items[0], null), false);
 });
 

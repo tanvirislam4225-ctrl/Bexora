@@ -39,6 +39,7 @@ import {
 import { emitUserNotification } from '../lib/notificationService';
 import { UserPresenceBadge } from './UserPresenceBadge';
 import { ActiveStatus } from './ActiveStatus';
+import { UserProfileLink } from './UserProfileLink';
 
 interface ChatViewProps {
   userUid: string | null;
@@ -46,6 +47,7 @@ interface ChatViewProps {
   conversations: ConversationRecord[];
   initialConvId: string | null;
   onRequireAuth: () => void;
+  onOpenPublicProfile?: (uid: string) => void;
   onReportConversation?: (target: ReportModalTarget) => void;
   onFlash: (msg: string) => void;
 }
@@ -56,6 +58,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   conversations,
   initialConvId,
   onRequireAuth,
+  onOpenPublicProfile,
   onReportConversation,
   onFlash,
 }) => {
@@ -447,7 +450,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
                       <h3 className="font-extrabold text-sm truncate">
-                        {activeConv.buyerId === userUid ? activeConv.sellerName : activeConv.buyerName}
+                        <UserProfileLink
+                          uid={activeConv.buyerId === userUid ? activeConv.sellerId : activeConv.buyerId}
+                          name={activeConv.buyerId === userUid ? activeConv.sellerName : activeConv.buyerName}
+                          onOpenProfile={onOpenPublicProfile}
+                        />
                       </h3>
                       <ActiveStatus
                         userId={activeConv.buyerId === userUid ? activeConv.sellerId : activeConv.buyerId}

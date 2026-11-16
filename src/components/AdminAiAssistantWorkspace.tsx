@@ -33,6 +33,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import { auth, db, getValidFirebaseIdToken } from '../lib/firebase';
+import { buildApiUrl } from '../lib/apiClient';
 import { evaluateProposalGovernanceGate } from '../lib/aiAuditLogic';
 import {
   AiProposalRecord,
@@ -279,7 +280,7 @@ export const AdminAiAssistantWorkspace: React.FC<AdminAiAssistantWorkspaceProps>
             updatedAt: serverTimestamp(),
           });
           const headers = await getAdminBearerHeaders();
-          await fetch(`/api/admin/ai/proposals/${encodeURIComponent(item.id)}/mark-synced`, {
+          await fetch(buildApiUrl(`/api/admin/ai/proposals/${encodeURIComponent(item.id)}/mark-synced`), {
             method: 'POST',
             headers,
           }).catch(() => {});
@@ -307,7 +308,7 @@ export const AdminAiAssistantWorkspace: React.FC<AdminAiAssistantWorkspaceProps>
       setOverviewError(null);
       try {
         const headers = await getAdminBearerHeaders();
-        const res = await fetch('/api/admin/ai/overview', { headers });
+        const res = await fetch(buildApiUrl('/api/admin/ai/overview'), { headers });
         if (!res.ok) {
           const errJson = (await res.json().catch(() => ({}))) as { error?: string };
           throw new Error(errJson.error || `Failed to load AI Workspace (${res.status}).`);
@@ -351,7 +352,7 @@ export const AdminAiAssistantWorkspace: React.FC<AdminAiAssistantWorkspaceProps>
     const timer = window.setInterval(async () => {
       try {
         const headers = await getAdminBearerHeaders();
-        const res = await fetch('/api/admin/ai/audit/status', { headers });
+        const res = await fetch(buildApiUrl('/api/admin/ai/audit/status'), { headers });
         if (!res.ok) return;
         const status = (await res.json()) as ActiveAuditRunStatus;
         setActiveAudit(status);
@@ -380,7 +381,7 @@ export const AdminAiAssistantWorkspace: React.FC<AdminAiAssistantWorkspaceProps>
     setLoadingMessages(true);
     try {
       const headers = await getAdminBearerHeaders();
-      const res = await fetch(`/api/admin/ai/conversations/${encodeURIComponent(convId)}`, {
+      const res = await fetch(buildApiUrl(`/api/admin/ai/conversations/${encodeURIComponent(convId)}`), {
         headers,
       });
       if (!res.ok) throw new Error('Could not load conversation messages.');
@@ -405,7 +406,7 @@ export const AdminAiAssistantWorkspace: React.FC<AdminAiAssistantWorkspaceProps>
   const handleDeleteConversation = async (convId: string) => {
     try {
       const headers = await getAdminBearerHeaders();
-      const res = await fetch(`/api/admin/ai/conversations/${encodeURIComponent(convId)}`, {
+      const res = await fetch(buildApiUrl(`/api/admin/ai/conversations/${encodeURIComponent(convId)}`), {
         method: 'DELETE',
         headers,
       });
@@ -442,7 +443,7 @@ export const AdminAiAssistantWorkspace: React.FC<AdminAiAssistantWorkspaceProps>
 
     try {
       const headers = await getAdminBearerHeaders();
-      const res = await fetch('/api/admin/ai/chat', {
+      const res = await fetch(buildApiUrl('/api/admin/ai/chat'), {
         method: 'POST',
         headers,
         body: JSON.stringify({
@@ -513,7 +514,7 @@ export const AdminAiAssistantWorkspace: React.FC<AdminAiAssistantWorkspaceProps>
 
     try {
       const headers = await getAdminBearerHeaders();
-      const res = await fetch('/api/admin/ai/audit/run', {
+      const res = await fetch(buildApiUrl('/api/admin/ai/audit/run'), {
         method: 'POST',
         headers,
       });
@@ -559,7 +560,7 @@ export const AdminAiAssistantWorkspace: React.FC<AdminAiAssistantWorkspaceProps>
     setLoadingReportId(reportId);
     try {
       const headers = await getAdminBearerHeaders();
-      const res = await fetch(`/api/admin/ai/reports/${encodeURIComponent(reportId)}`, {
+      const res = await fetch(buildApiUrl(`/api/admin/ai/reports/${encodeURIComponent(reportId)}`), {
         headers,
       });
       if (!res.ok) throw new Error('Could not load historical report.');
@@ -577,7 +578,7 @@ export const AdminAiAssistantWorkspace: React.FC<AdminAiAssistantWorkspaceProps>
     setSavingSchedule(true);
     try {
       const headers = await getAdminBearerHeaders();
-      const res = await fetch('/api/admin/ai/schedule', {
+      const res = await fetch(buildApiUrl('/api/admin/ai/schedule'), {
         method: 'PUT',
         headers,
         body: JSON.stringify({

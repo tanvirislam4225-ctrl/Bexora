@@ -151,6 +151,29 @@ export const PLATFORM_CATALOG: Record<PlatformId, PlatformDefinition> = {
     urlHint: '',
     monetizationOptions: [],
   },
+  others: {
+    id: 'others',
+    name: 'Others',
+    subcategories: [
+      'Other Digital Asset',
+      'SaaS / Software',
+      'E-commerce Store',
+      'Discord Server',
+      'Newsletter / Community',
+      'Mobile App',
+      'Digital Bundle',
+    ],
+    metricLabel: 'Audience / Users',
+    supportsMonetization: true,
+    requiresUrl: false,
+    requiresAge: false,
+    urlHint: 'https://example.com (optional)',
+    monetizationOptions: [
+      { id: 'oth-direct', name: 'Direct Revenue / Sales' },
+      { id: 'oth-ads', name: 'Ad Network / Sponsorship' },
+      { id: 'oth-subs', name: 'Recurring Subscriptions' },
+    ],
+  },
 };
 
 export const PLATFORM_LIST: PlatformId[] = [
@@ -162,6 +185,7 @@ export const PLATFORM_LIST: PlatformId[] = [
   'website',
   'domain',
   'gaming',
+  'others',
 ];
 
 export const DEFAULT_PUBLIC_SETTINGS: PublicSettings = {
@@ -386,7 +410,7 @@ export function formatAccountAge(years?: number, months?: number): string {
   return parts.join(', ');
 }
 
-const PLATFORM_DOMAIN_RULES: Record<Exclude<PlatformId, 'gaming' | 'website' | 'domain'>, string[]> = {
+const PLATFORM_DOMAIN_RULES: Record<Exclude<PlatformId, 'gaming' | 'website' | 'domain' | 'others'>, string[]> = {
   youtube: ['youtube.com', 'www.youtube.com', 'm.youtube.com', 'youtu.be'],
   facebook: ['facebook.com', 'www.facebook.com', 'm.facebook.com', 'web.facebook.com', 'fb.com'],
   instagram: ['instagram.com', 'www.instagram.com'],
@@ -399,7 +423,7 @@ export function validatePlatformAssetUrl(
   rawUrl: string
 ): { valid: boolean; normalizedUrl: string; status: 'domain_matched' | 'not_applicable'; error?: string } {
   const trimmed = (rawUrl || '').trim();
-  if (platform === 'gaming') {
+  if (platform === 'gaming' || platform === 'others') {
     if (!trimmed) {
       return { valid: true, normalizedUrl: '', status: 'not_applicable' };
     }
@@ -476,7 +500,7 @@ export function validatePlatformAssetUrl(
   return {
     valid: true,
     normalizedUrl: parsed.toString(),
-    status: 'domain_matched',
+    status: platform === 'others' || platform === 'gaming' ? 'not_applicable' : 'domain_matched',
   };
 }
 
@@ -1352,6 +1376,12 @@ export function getPlatformTransferChecklist(platform: PlatformId): string[] {
         'Linked buyer recovery bind inside official game security settings',
         'Removed seller secondary social binds and logged out active devices',
         'Confirmed Game UID and Account Level match the verified listing',
+      ];
+    case 'others':
+      return [
+        'Transferred primary ownership, files, or admin credentials to the buyer',
+        'Confirmed all recovery emails, API keys, and backup binds belong exclusively to the buyer',
+        'Verified asset access, revenue/monetization status, and included deliverables match the listing',
       ];
     default:
       return [

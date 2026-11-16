@@ -26,6 +26,7 @@ import { formatMoneyFromMinor, PLATFORM_CATALOG } from '../lib/marketplaceLogic'
 import { formatNotificationExactDateTime } from '../lib/notificationLogic';
 import { BidActionConfirmModal } from './BidActionConfirmModal';
 import { PLATFORM_BANNER_BG, PlatformIcon } from './Icons';
+import { UserProfileLink } from './UserProfileLink';
 
 interface MyBidsViewProps {
   userUid: string | null;
@@ -403,15 +404,12 @@ export const MyBidsView: React.FC<MyBidsViewProps> = ({
 
                       <div className="flex flex-wrap items-center gap-2 text-xs">
                         <span style={{ color: 'var(--text-2)' }}>Seller:</span>
-                        <button
-                          type="button"
-                          onClick={() => onOpenPublicProfile(entry.sellerId)}
-                          className="font-bold hover:underline"
-                          style={{ color: 'var(--text)' }}
-                        >
-                          {entry.sellerName}
-                          {entry.sellerUsername ? ` (@${entry.sellerUsername})` : ''}
-                        </button>
+                        <UserProfileLink
+                          uid={entry.sellerId}
+                          name={`${entry.sellerName}${entry.sellerUsername ? ` (@${entry.sellerUsername})` : ''}`}
+                          onOpenProfile={onOpenPublicProfile}
+                          className="font-bold"
+                        />
                       </div>
                     </div>
                   </div>

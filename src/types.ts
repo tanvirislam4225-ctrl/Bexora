@@ -6,7 +6,8 @@ export type PlatformId =
   | 'telegram'
   | 'website'
   | 'domain'
-  | 'gaming';
+  | 'gaming'
+  | 'others';
 
 export type CurrencyCode = 'BDT' | 'USD';
 export type LanguageCode = 'en' | 'bn' | 'hi' | 'ar' | 'ur';
@@ -625,3 +626,19 @@ export interface UserPresenceSession {
   createdAtMs: number;
   updatedAtMs?: number;
 }
+
+export interface AdminInvitationRecord {
+  id: string;
+  targetUid: string;
+  targetName?: string;
+  targetEmail?: string;
+  role: 'admin' | 'superadmin';
+  permissions: string[];
+  status: 'pending' | 'accepted' | 'rejected' | 'revoked';
+  invitedBy: string;
+  invitedByName?: string;
+  rejectionReason?: string;
+  respondedAtMs?: number;
+  createdAtMs: number;
+}
+

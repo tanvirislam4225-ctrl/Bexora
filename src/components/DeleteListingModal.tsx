@@ -21,6 +21,7 @@ import {
   type ListingDeletionPreflightResult,
 } from '../lib/listingAndBidManagementLogic';
 import { sanitizeSafeImageSrc } from '../lib/marketplaceLogic';
+import { buildApiUrl } from '../lib/apiClient';
 import { PLATFORM_BANNER_BG, PlatformIcon } from './Icons';
 
 interface DeleteListingModalProps {
@@ -60,7 +61,7 @@ export const DeleteListingModal: React.FC<DeleteListingModalProps> = ({
       try {
         const idToken = auth.currentUser ? await auth.currentUser.getIdToken().catch(() => '') : '';
         if (idToken) {
-          const resp = await fetch(`/api/listings/${encodeURIComponent(listing.id)}/delete-preflight`, {
+          const resp = await fetch(buildApiUrl(`/api/listings/${encodeURIComponent(listing.id)}/delete-preflight`), {
             headers: {
               Accept: 'application/json',
               Authorization: `Bearer ${idToken}`,
@@ -181,7 +182,7 @@ export const DeleteListingModal: React.FC<DeleteListingModalProps> = ({
       const idToken = auth.currentUser ? await auth.currentUser.getIdToken().catch(() => '') : '';
       if (idToken) {
         try {
-          const resp = await fetch(`/api/listings/${encodeURIComponent(listing.id)}/delete`, {
+          const resp = await fetch(buildApiUrl(`/api/listings/${encodeURIComponent(listing.id)}/delete`), {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',

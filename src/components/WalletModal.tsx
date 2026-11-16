@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { addDoc, collection, doc, runTransaction, serverTimestamp } from 'firebase/firestore';
-import { ArrowDownLeft, ArrowLeft, ArrowUpRight, Check, CheckCircle2, Copy, ShieldCheck, Upload, Wallet } from 'lucide-react';
+import { ArrowDownLeft, ArrowLeft, ArrowUpRight, Check, CheckCircle2, Clock, Copy, ShieldCheck, Upload, Wallet } from 'lucide-react';
 import {
   CurrencyCode,
+  DealRecord,
   DepositRequestRecord,
   PrivateUser,
   PublicProfile,
@@ -17,6 +18,7 @@ import {
 } from '../lib/countryCurrencyCatalog';
 import { db, validateAndProcessImageFile } from '../lib/firebase';
 import { formatMoneyFromMinor } from '../lib/marketplaceLogic';
+import { summarizeUserPendingSellerDeals } from '../lib/adminFinanceLogic';
 import { emitUserNotification } from '../lib/notificationService';
 import type { UserRestrictionRecord } from '../types/moderation';
 
@@ -30,6 +32,7 @@ interface WalletModalProps {
   settings: PublicSettings;
   deposits: DepositRequestRecord[];
   withdrawals: WithdrawalRequestRecord[];
+  deals?: DealRecord[];
   displayCurrency: CurrencyCode;
   onFlash: (msg: string) => void;
   moderationRestriction?: UserRestrictionRecord | null;
@@ -47,6 +50,7 @@ export const WalletModal: React.FC<WalletModalProps> = ({
   settings,
   deposits,
   withdrawals,
+  deals = [],
   displayCurrency,
   onFlash,
   moderationRestriction = null,
@@ -54,6 +58,11 @@ export const WalletModal: React.FC<WalletModalProps> = ({
   initialMode = 'deposit',
 }) => {
   const [mode, setMode] = useState<'deposit' | 'withdraw' | 'history'>(initialMode);
+
+  const pendingSellerSummary = useMemo(
+    () => summarizeUserPendingSellerDeals(deals, userUid, settings.usdToBdtRate),
+    [deals, userUid, settings.usdToBdtRate]
+  );
 
   useEffect(() => {
     setMode(initialMode);
@@ -109,6 +118,7 @@ export const WalletModal: React.FC<WalletModalProps> = ({
   const [withdrawAmountInput, setWithdrawAmountInput] = useState('');
 
   const [busy, setBusy] = useState(false);
+  const submitLockRef = useRef(false);
   const [error, setError] = useState('');
   const fileRef = useRef<HTMLInputElement | null>(null);
 
@@ -127,6 +137,7 @@ export const WalletModal: React.FC<WalletModalProps> = ({
 
   const handleSubmitDeposit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submitLockRef.current) return;
     setError('');
     if (!currentManualMethod || !currentManualMethod.receivingNumber) {
       setError('Please select an active payment method configured by an administrator.');
@@ -150,6 +161,7 @@ export const WalletModal: React.FC<WalletModalProps> = ({
       return;
     }
 
+    submitLockRef.current = true;
     setBusy(true);
     try {
       const effectiveRate = settings.usdtToBdtRate || settings.usdToBdtRate || 125;
@@ -198,11 +210,13 @@ export const WalletModal: React.FC<WalletModalProps> = ({
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not submit deposit request.');
     } finally {
+      submitLockRef.current = false;
       setBusy(false);
     }
   };
   const handleSubmitWithdrawal = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submitLockRef.current) return;
     setError('');
     if (!currentWithdrawMethod) {
       setError('Please select an active withdrawal method.');
@@ -236,6 +250,7 @@ export const WalletModal: React.FC<WalletModalProps> = ({
       return;
     }
 
+    submitLockRef.current = true;
     setBusy(true);
     try {
       const wRef = doc(collection(db, 'withdrawals'));
@@ -302,6 +317,7 @@ export const WalletModal: React.FC<WalletModalProps> = ({
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Withdrawal request failed.');
     } finally {
+      submitLockRef.current = false;
       setBusy(false);
     }
   };
@@ -364,6 +380,48 @@ export const WalletModal: React.FC<WalletModalProps> = ({
                   settings.usdToBdtRate
                 )}
               </p>
+            )}
+          </div>
+
+          <div
+            data-testid="wallet-pending-seller-balance-card"
+            className="bx-card p-5 space-y-2.5 tabular-nums border-2"
+            style={{ borderColor: 'var(--border-strong)' }}
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="inline-flex items-center gap-1.5 text-xs font-extrabold uppercase tracking-wider text-[var(--text-2)]">
+                <Clock className="w-3.5 h-3.5 text-[var(--orange)]" />
+                Pending Seller Balance (Escrow Hold)
+              </span>
+              <span className="text-[11px] font-black uppercase text-[var(--orange)]">
+                Locked
+              </span>
+            </div>
+            <div className="text-2xl font-black text-[var(--text)]">
+              {formatMoneyFromMinor(
+                pendingSellerSummary.totalPendingBdtMinor,
+                displayCurrency,
+                'BDT',
+                settings.usdToBdtRate
+              )}
+            </div>
+            <p className="text-xs leading-relaxed" style={{ color: 'var(--text-2)' }}>
+              {pendingSellerSummary.activePendingCount > 0
+                ? `${pendingSellerSummary.activePendingCount} active escrow sale${pendingSellerSummary.activePendingCount === 1 ? '' : 's'} awaiting security period completion. Cannot be withdrawn until automatically released to Available Wallet Balance with 0 disputes.`
+                : 'Completed sales waiting out the security countdown appear here before automatic release into your Available Wallet Balance.'}
+            </p>
+            {pendingSellerSummary.deals.length > 0 && (
+              <div className="pt-2 border-t border-[var(--border-soft)] space-y-1.5">
+                {pendingSellerSummary.deals.slice(0, 4).map((d) => (
+                  <div key={d.dealId} className="flex items-center justify-between gap-2 text-[11px]">
+                    <span className="truncate font-bold text-[var(--text)]">{d.listingTitle}</span>
+                    <span className="shrink-0 font-extrabold text-[var(--text-2)]">
+                      {formatMoneyFromMinor(d.payoutBdtMinor, displayCurrency, 'BDT', settings.usdToBdtRate)}
+                      {d.isDisputed ? ' · Hold (Dispute)' : d.isReadyForRelease ? ' · Releasing' : ''}
+                    </span>
+                  </div>
+                ))}
+              </div>
             )}
           </div>
 

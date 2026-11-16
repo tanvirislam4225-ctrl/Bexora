@@ -437,6 +437,29 @@ async function startServer() {
     res.json({ status: 'ok' });
   });
 
+  // 1B. Server-verified Admin Access check (used as resilient fallback when client Firestore listener encounters transient issues)
+  app.get('/api/admin/access', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const cfg = loadVerifiedFirebaseConfig();
+    if (!cfg.configValid) {
+      return res.status(503).json({ ok: false, isAdmin: false, error: 'Firebase configuration unavailable.' });
+    }
+    const caller = await verifyCallerFirebaseToken(req, cfg);
+    if (!caller) {
+      return res.status(401).json({ ok: false, isAdmin: false, role: 'none', error: 'Authentication required.' });
+    }
+    const adminCaller = await verifyAdminCaller(req, cfg);
+    if (!adminCaller) {
+      return res.status(403).json({ ok: false, isAdmin: false, role: 'none', error: 'Administrator privileges required.' });
+    }
+    return res.json({
+      ok: true,
+      isAdmin: true,
+      uid: adminCaller.uid,
+      role: adminCaller.role,
+    });
+  });
+
   // 2. Safe Manual Payment Destination Endpoint (No secrets exposed)
   app.get('/api/config/payments', (_req, res) => {
     res.json({
@@ -4887,21 +4910,35 @@ Current system snapshot: ${typeof systemContext === 'string' ? systemContext.sli
         maxAge: '1y',
         immutable: true,
         dotfiles: 'deny',
+        fallthrough: false,
       })
     );
+    // Explicitly return 404 for missing hashed chunks so the SPA catch-all never serves index.html for a JS/CSS module
+    app.use('/assets', (_err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+      res.status(404).type('text/plain').send('Asset not found');
+    });
     app.use(
       express.static(distPath, {
         dotfiles: 'deny',
         index: false,
         setHeaders(res, filePath) {
-          if (filePath.endsWith('index.html') || filePath.endsWith('sw.js')) {
-            res.setHeader('Cache-Control', 'no-cache');
+          if (
+            filePath.endsWith('index.html') ||
+            filePath.endsWith('sw.js') ||
+            filePath.endsWith('registerSW.js') ||
+            filePath.endsWith('manifest.webmanifest')
+          ) {
+            res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
           }
         },
       })
     );
-    app.get('*', (_req, res) => {
-      res.setHeader('Cache-Control', 'no-cache');
+    app.get('*', (req, res) => {
+      const cleanReqPath = (req.path || '').toLowerCase();
+      if (/\.(?:js|mjs|css|map|png|jpg|jpeg|webp|svg|ico|wav|woff2?)$/i.test(cleanReqPath)) {
+        return res.status(404).type('text/plain').send('Not Found');
+      }
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
       res.sendFile(path.join(distPath, 'index.html'));
     });
   } else {
@@ -4922,6 +4959,19 @@ Current system snapshot: ${typeof systemContext === 'string' ? systemContext.sli
 
   httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`BEXORA server running on http://0.0.0.0:${PORT}`);
+    const runSweep = () => {
+      const fn = (app.locals as { runEscrowAutoReleaseSweep?: () => Promise<unknown> })
+        .runEscrowAutoReleaseSweep;
+      if (typeof fn === 'function') {
+        void fn().catch((err) => {
+          console.warn('[BEXORA Escrow Sweep] Periodic sweep warning:', err);
+        });
+      }
+    };
+    const initialTimer = setTimeout(runSweep, 15_000);
+    if (typeof initialTimer.unref === 'function') initialTimer.unref();
+    const intervalTimer = setInterval(runSweep, 3 * 60 * 1000);
+    if (typeof intervalTimer.unref === 'function') intervalTimer.unref();
   });
 }
 

@@ -74,6 +74,7 @@ const VALID_PLATFORMS = new Set<string>([
   'website',
   'domain',
   'gaming',
+  'others',
 ]);
 
 export const VALID_INFO_TOPICS = new Set<InfoTopicId>([
@@ -156,18 +157,25 @@ export function resolveCanonicalPathnameForNavigation(
   nextRoute: AppRouteState
 ): string {
   const mappedTopic = mapCleanLegalPathnameToInfoTopic(currentPathname);
-  if (!mappedTopic) {
-    return currentPathname || '/';
+  if (mappedTopic) {
+    if (nextRoute.page === 'info' && nextRoute.infoTopic === mappedTopic) {
+      return currentPathname;
+    }
+    return '/';
   }
-  if (nextRoute.page === 'info' && nextRoute.infoTopic === mappedTopic) {
-    return currentPathname;
+  const cleanPath = (currentPathname || '/').replace(/\/+$/, '').toLowerCase() || '/';
+  if (cleanPath === '/admin') {
+    return nextRoute.page === 'admin' ? currentPathname : '/';
   }
-  return '/';
+  if (cleanPath === '/marketplace' || cleanPath === '/market') {
+    return nextRoute.page === 'market' ? currentPathname : '/';
+  }
+  return currentPathname || '/';
 }
 
 /**
- * Parses URL search parameters and clean OAuth legal paths (`/privacy`, `/terms`), `?autostart=1`,
- * and `?dest=...` notification links into a full-screen `AppRouteState`.
+ * Parses URL search parameters and clean OAuth legal paths (`/privacy`, `/terms`), clean app paths
+ * (`/admin`, `/marketplace`), `?autostart=1`, and `?dest=...` notification links into `AppRouteState`.
  */
 export function parseRouteFromSearch(search: string, pathname = '/'): AppRouteState {
   const cleanSearch = search.startsWith('?') ? search.slice(1) : search;
@@ -222,6 +230,18 @@ export function parseRouteFromSearch(search: string, pathname = '/'): AppRouteSt
     const cleanLegalTopic = mapCleanLegalPathnameToInfoTopic(pathname);
     if (cleanLegalTopic) {
       return { page: 'info', infoTopic: cleanLegalTopic };
+    }
+    const cleanPath = (pathname || '/').replace(/\/+$/, '').toLowerCase() || '/';
+    if (cleanPath === '/admin') {
+      const dealId = sanitizeRouteId(params.get('dealId'));
+      return { page: 'admin', dealId };
+    }
+    if (cleanPath === '/marketplace' || cleanPath === '/market') {
+      const rawPlat = (params.get('platform') || '').trim().toLowerCase();
+      return {
+        page: 'market',
+        platformFilter: VALID_PLATFORMS.has(rawPlat) ? (rawPlat as PlatformId) : undefined,
+      };
     }
   }
 

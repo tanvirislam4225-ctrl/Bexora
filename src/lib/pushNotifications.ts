@@ -1,6 +1,7 @@
 import { deleteDoc, doc, getDoc, getDocs, collection, serverTimestamp, setDoc, updateDoc } from 'firebase/firestore';
 import { deleteToken, getMessaging, getToken, isSupported, onMessage, type MessagePayload } from 'firebase/messaging';
 import app, { auth, db } from './firebase';
+import { buildApiUrl } from './apiClient';
 import { deterministicHashHex } from './notificationLogic';
 import {
   clearLocalNotificationSessionData,
@@ -195,7 +196,7 @@ export async function fetchServerFcmStatus(): Promise<ServerFcmDiagnosticStatus 
       const idToken = await auth.currentUser.getIdToken(false).catch(() => '');
       if (idToken) headers.Authorization = `Bearer ${idToken}`;
     }
-    const res = await fetch('/api/fcm/status', {
+    const res = await fetch(buildApiUrl('/api/fcm/status'), {
       method: 'GET',
       headers,
       cache: 'no-store',
@@ -221,7 +222,7 @@ export async function enableFcmCloudApisViaServer(): Promise<{
     if (idToken) {
       headers.Authorization = `Bearer ${idToken}`;
     }
-    const res = await fetch('/api/fcm/enable-cloud-apis', {
+    const res = await fetch(buildApiUrl('/api/fcm/enable-cloud-apis'), {
       method: 'POST',
       headers,
       body: JSON.stringify({}),
@@ -855,7 +856,7 @@ export async function dispatchBackgroundWebPush(
       reqPayload.recipientId === currentUser.uid ? currentUser.uid : null
     );
 
-    const res = await fetch('/api/fcm/send', {
+    const res = await fetch(buildApiUrl('/api/fcm/send'), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

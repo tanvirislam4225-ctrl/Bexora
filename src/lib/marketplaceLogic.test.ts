@@ -596,3 +596,21 @@ test('Tri-state Token Service flag policy and Tab-Wake continuity evaluator prev
   assert.equal(evaluateWakeSessionAction(now - 600_000, now, false), 'restore_expired_now');
 });
 
+test('Others category allows optional URL & optional age while enforcing https:// when URL is provided', () => {
+  const emptyUrl = validatePlatformAssetUrl('others', '');
+  assert.equal(emptyUrl.valid, true);
+  assert.equal(emptyUrl.normalizedUrl, '');
+  assert.equal(emptyUrl.status, 'not_applicable');
+
+  const validUrl = validatePlatformAssetUrl('others', 'https://saas-example.com/app');
+  assert.equal(validUrl.valid, true);
+  assert.equal(validUrl.status, 'not_applicable');
+
+  const badUrl = validatePlatformAssetUrl('others', 'http://insecure.com');
+  assert.equal(badUrl.valid, false);
+
+  const optionalAge = validateAccountAge('0', '0', false);
+  assert.equal(optionalAge.valid, true);
+});
+
+

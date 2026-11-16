@@ -12,6 +12,7 @@ import { formatListingPublishedTime, formatViewCount } from '../lib/viewCountLog
 import { PLATFORM_BANNER_BG, PlatformIcon } from './Icons';
 import { UserPresenceBadge } from './UserPresenceBadge';
 import { ActiveStatus } from './ActiveStatus';
+import { UserProfileLink } from './UserProfileLink';
 
 interface ListingCardProps {
   listing: MarketplaceListing;
@@ -151,14 +152,14 @@ export const ListingCard: React.FC<ListingCardProps> = ({
             }
             aria-pressed={isFavorited}
             title={isFavorited ? 'Saved in Favorites — click to remove' : 'Save to Favorites'}
-            className="absolute top-2.5 right-2.5 z-10 w-8 h-8 sm:w-8.5 sm:h-8.5 rounded-full grid place-items-center border shadow-sm transition-transform hover:scale-105 active:scale-95"
+            className="absolute top-2 right-2 z-10 w-10 h-10 sm:w-9 sm:h-9 rounded-full grid place-items-center border shadow-sm transition-transform hover:scale-105 active:scale-95"
             style={{
               background: isFavorited ? '#FFE4E6' : 'rgba(18, 18, 22, 0.72)',
               borderColor: isFavorited ? '#E11D48' : 'rgba(255, 255, 255, 0.28)',
               color: isFavorited ? '#E11D48' : '#FFFFFF',
             }}
           >
-            <Heart className={`w-3.5 h-3.5 sm:w-4 sm:h-4 ${isFavorited ? 'fill-current' : ''}`} />
+            <Heart className={`w-4 h-4 ${isFavorited ? 'fill-current' : ''}`} />
           </button>
         )}
       </div>
@@ -187,8 +188,12 @@ export const ListingCard: React.FC<ListingCardProps> = ({
             style={{ color: 'var(--text-3)' }}
           >
             <span>{publishedTimeAgo}</span>
-            <span aria-hidden="true">·</span>
-            <span>{formatAccountAge(listing.ageYears, listing.ageMonths)}</span>
+            {((listing.ageYears || 0) > 0 || (listing.ageMonths || 0) > 0 || listing.platform !== 'others') && (
+              <>
+                <span aria-hidden="true">·</span>
+                <span>{formatAccountAge(listing.ageYears, listing.ageMonths)}</span>
+              </>
+            )}
           </div>
         </div>
 
@@ -217,6 +222,8 @@ export const ListingCard: React.FC<ListingCardProps> = ({
         >
           {listing.platform === 'gaming' ? (
             <span className="font-semibold truncate">Level {listing.gameLevel ?? listing.metricValue}</span>
+          ) : listing.platform === 'others' && (!listing.metricValue || listing.metricValue <= 0) ? (
+            <span className="font-semibold truncate">{listing.subcategory || 'Digital Asset'}</span>
           ) : (
             <span className="font-semibold truncate">
               {listing.metricValue.toLocaleString('en-US')} {metricLabel.toLowerCase()}
@@ -259,17 +266,17 @@ export const ListingCard: React.FC<ListingCardProps> = ({
           style={{ borderColor: 'var(--border-soft)' }}
         >
           {/* Seller Profile */}
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              if (onOpenSellerProfile) onOpenSellerProfile(listing.sellerId);
-              else onOpen(listing);
-            }}
-            className="inline-flex items-center gap-1.5 min-w-0 text-left hover:underline shrink-0 max-w-[130px]"
-            aria-label={`View seller ${listing.sellerName}`}
-          >
-            <span className="relative shrink-0 inline-flex">
+          <div className="inline-flex items-center gap-1.5 min-w-0 text-left shrink-0 max-w-[140px]">
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                if (onOpenSellerProfile) onOpenSellerProfile(listing.sellerId);
+                else onOpen(listing);
+              }}
+              className="relative shrink-0 inline-flex cursor-pointer"
+              aria-label={`View seller ${listing.sellerName} avatar`}
+            >
               <span
                 className="w-5.5 h-5.5 sm:w-5.5 sm:h-5.5 rounded-full grid place-items-center text-[10px] font-extrabold text-white shrink-0"
                 style={{ background: 'var(--purple)' }}
@@ -277,10 +284,13 @@ export const ListingCard: React.FC<ListingCardProps> = ({
                 {initials}
               </span>
               <ActiveStatus userId={listing.sellerId} mode="dot" className="absolute -bottom-0.5 -right-0.5" />
-            </span>
-            <span className="text-xs sm:text-[12px] font-bold truncate" style={{ color: 'var(--text)' }}>
-              {listing.sellerName}
-            </span>
+            </button>
+            <UserProfileLink
+              uid={listing.sellerId}
+              name={listing.sellerName}
+              onOpenProfile={onOpenSellerProfile || (() => onOpen(listing))}
+              className="text-xs sm:text-[12px] font-bold truncate text-[var(--text)]"
+            />
             {listing.sellerVerified && (
               <ShieldCheck
                 className="w-3.5 h-3.5 shrink-0"
@@ -288,7 +298,7 @@ export const ListingCard: React.FC<ListingCardProps> = ({
                 aria-label="Verified Seller"
               />
             )}
-          </button>
+          </div>
 
           {/* Real-Time View Count */}
           <div

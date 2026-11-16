@@ -9,6 +9,7 @@ import {
 } from '../lib/listingAndBidManagementLogic';
 import { formatMoneyFromMinor } from '../lib/marketplaceLogic';
 import { emitUserNotification } from '../lib/notificationService';
+import { buildApiUrl } from '../lib/apiClient';
 
 interface BidActionConfirmModalProps {
   mode: 'withdraw' | 'reject';
@@ -81,10 +82,11 @@ export const BidActionConfirmModal: React.FC<BidActionConfirmModalProps> = ({
       const idToken = await auth.currentUser?.getIdToken().catch(() => '');
       if (idToken) {
         try {
-          const endpoint =
+          const endpoint = buildApiUrl(
             mode === 'withdraw'
               ? `/api/bids/${encodeURIComponent(bid.id)}/withdraw`
-              : `/api/bids/${encodeURIComponent(bid.id)}/reject`;
+              : `/api/bids/${encodeURIComponent(bid.id)}/reject`
+          );
           const resp = await fetch(endpoint, {
             method: 'POST',
             headers: {

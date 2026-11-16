@@ -43,6 +43,7 @@ import {
   shouldKeepProactiveTokenRefreshEnabled,
 } from './authDomainAndPersistenceLogic';
 import { buildNotificationId, classifyTokenServiceProbe } from './notificationLogic';
+import { buildApiUrl } from './apiClient';
 import type { AuthProviderStatus, TokenServiceStatus } from '../types';
 
 const TOKEN_SERVICE_VERIFIED_STORAGE_KEY = 'bx_token_service_verified';
@@ -762,6 +763,7 @@ export async function fetchWithFreshBearerToken(
   input: RequestInfo | URL,
   init: RequestInit = {}
 ): Promise<Response> {
+  const resolvedInput = typeof input === 'string' && input.startsWith('/api/') ? buildApiUrl(input) : input;
   const buildHeaders = (token: string): Headers => {
     const h = new Headers(init.headers || {});
     if (token) {
@@ -771,7 +773,7 @@ export async function fetchWithFreshBearerToken(
   };
 
   const initialToken = await getValidFirebaseIdToken(false);
-  const firstResp = await fetch(input, {
+  const firstResp = await fetch(resolvedInput, {
     ...init,
     headers: buildHeaders(initialToken),
   });
@@ -779,7 +781,7 @@ export async function fetchWithFreshBearerToken(
   if (firstResp.status === 401 && auth.currentUser) {
     const refreshedToken = await getValidFirebaseIdToken(true);
     if (refreshedToken && refreshedToken !== initialToken) {
-      return fetch(input, {
+      return fetch(resolvedInput, {
         ...init,
         headers: buildHeaders(refreshedToken),
       });
@@ -1068,9 +1070,9 @@ export async function detectFirebaseAuthCapabilities(
 
   inflightCapabilitiesPromise = (async () => {
     try {
-      const endpoint = forceRefresh
-        ? `/api/auth/capabilities?refresh=${Date.now()}`
-        : '/api/auth/capabilities';
+      const endpoint = buildApiUrl(
+        forceRefresh ? `/api/auth/capabilities?refresh=${Date.now()}` : '/api/auth/capabilities'
+      );
       const reqHeaders: Record<string, string> = { Accept: 'application/json' };
       if (auth.currentUser) {
         const idToken = await auth.currentUser.getIdToken(false).catch(() => '');
@@ -1414,7 +1416,7 @@ export async function requestServerEnableTokenService(): Promise<EnableTokenServ
     if (idToken) {
       headers.Authorization = `Bearer ${idToken}`;
     }
-    const resp = await fetch('/api/auth/enable-token-service', {
+    const resp = await fetch(buildApiUrl('/api/auth/enable-token-service'), {
       method: 'POST',
       headers,
       body: JSON.stringify({}),

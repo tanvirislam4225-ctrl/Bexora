@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import {
   addDoc,
   collection,
@@ -15,14 +15,16 @@ import {
   serverTimestamp,
   setDoc,
   updateDoc,
+  writeBatch,
 } from 'firebase/firestore';
 import {
   Activity,
   AlertOctagon,
-  Bell,
   Bot,
-  Calculator,
   Check,
+  CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   Clock,
   Code2,
   ExternalLink,
@@ -40,6 +42,7 @@ import {
   Percent,
   Play,
   RefreshCw,
+  Search,
   Send,
   ShieldAlert,
   ShieldCheck,
@@ -50,6 +53,7 @@ import {
   X,
 } from 'lucide-react';
 import {
+  AdminInvitationRecord,
   AiProposalRecord,
   AnnouncementRecord,
   AuditLogRecord,
@@ -65,9 +69,32 @@ import {
   MarketplaceListing,
   NotificationCategory,
   NotificationSeverity,
+  PlatformId,
   PublicSettings,
   WithdrawalRequestRecord,
 } from '../types';
+import {
+  buildApiUrl,
+  cachedApiGetJson,
+  invalidateClientApiCache,
+} from '../lib/apiClient';
+import { lazyWithRetry } from '../lib/chunkRetry';
+import {
+  ActiveAdminRecord,
+  AdminDealQueueTab,
+  AdminDepositBucket,
+  AdminListingBucket,
+  AdminNidBucket,
+  AdminRoleBucket,
+  AdminWithdrawalBucket,
+  filterAdminDeals,
+  filterAndBucketAdminGovernance,
+  filterAndBucketDeposits,
+  filterAndBucketListings,
+  filterAndBucketNids,
+  filterAndBucketWithdrawals,
+  paginateAdminItems,
+} from '../lib/adminQueueLogic';
 import {
   BOOTSTRAPPED_SUPERADMIN_EMAIL,
   DEFAULT_FIREBASE_AUTH_DOMAINS_URL,
@@ -112,57 +139,43 @@ import {
 import { shouldTriggerFollowerPublicationAlert } from '../lib/engagementLogic';
 import { fanoutNewListingToFollowers } from '../lib/engagementService';
 import { enableFcmCloudApisViaServer } from '../lib/pushNotifications';
-import { SUPPORTED_LANGUAGES } from '../lib/i18n';
-import { AdminPaymentManagement } from './AdminPaymentManagement';
-import { AdminAiAssistantWorkspace } from './AdminAiAssistantWorkspace';
-import { AdminTrustSafetyCenter } from './AdminTrustSafetyCenter';
-import { AdminUsersDirectory } from './AdminUsersDirectory';
+import { UserProfileLink } from './UserProfileLink';
 import {
   DismissibleNotice,
-  hideAllAdminNotices,
-  restoreAllAdminNotices,
 } from './DismissibleNotice';
 import { ImageLightboxModal } from './ImageLightboxModal';
+import { PageShellSkeleton } from './LoadingSkeletons';
+import type { AdminFinanceOverviewPayload } from './admin/AdminOverviewSection';
 
-interface AdminFinanceOverviewPayload {
-  ok: boolean;
-  generatedAtMs: number;
-  usdToBdtRateUsed: number;
-  complete: boolean;
-  listings: {
-    liveCount: number;
-    liveValueBdtMinor: number;
-    pendingCount: number;
-    pendingValueBdtMinor: number;
-  };
-  deals: {
-    settledCount: number;
-    grossSalesBdtMinor: number;
-    realizedRevenueBdtMinor: number;
-    refundRetainedRevenueBdtMinor: number;
-    sellerPayoutsReleasedBdtMinor: number;
-    heldCount: number;
-    escrowHeldBdtMinor: number;
-    pendingSellerEarningsBdtMinor: number;
-    expectedRevenueBdtMinor: number;
-  };
-  users: {
-    totalUsers: number;
-    usersWithBalance: number;
-    availableWalletBdtMinor: number;
-    lockedInWithdrawalsBdtMinor: number;
-  };
-  withdrawals: {
-    pendingCount: number;
-    pendingBdtMinor: number;
-    paidBdtMinor: number;
-  };
-  deposits: {
-    pendingCount: number;
-    pendingBdtMinor: number;
-    approvedBdtMinor: number;
-  };
-}
+const AdminPaymentManagement = lazyWithRetry(() =>
+  import('./AdminPaymentManagement').then((m) => ({ default: m.AdminPaymentManagement }))
+);
+const AdminAiAssistantWorkspace = lazyWithRetry(() =>
+  import('./AdminAiAssistantWorkspace').then((m) => ({ default: m.AdminAiAssistantWorkspace }))
+);
+const AdminTrustSafetyCenter = lazyWithRetry(() =>
+  import('./AdminTrustSafetyCenter').then((m) => ({ default: m.AdminTrustSafetyCenter }))
+);
+const AdminUsersDirectory = lazyWithRetry(() =>
+  import('./AdminUsersDirectory').then((m) => ({ default: m.AdminUsersDirectory }))
+);
+const AdminOverviewSection = lazyWithRetry(() =>
+  import('./admin/AdminOverviewSection').then((m) => ({ default: m.AdminOverviewSection }))
+);
+const AdminCommissionsSection = lazyWithRetry(() =>
+  import('./admin/AdminConfigSections').then((m) => ({ default: m.AdminCommissionsSection }))
+);
+const AdminCategoriesSection = lazyWithRetry(() =>
+  import('./admin/AdminConfigSections').then((m) => ({ default: m.AdminCategoriesSection }))
+);
+const AdminSupportAndBrandingSection = lazyWithRetry(() =>
+  import('./admin/AdminConfigSections').then((m) => ({ default: m.AdminSupportAndBrandingSection }))
+);
+const AdminAnnouncementsSection = lazyWithRetry(() =>
+  import('./admin/AdminAnnouncementsSection').then((m) => ({
+    default: m.AdminAnnouncementsSection,
+  }))
+);
 
 interface AdminDashboardProps {
   adminUid: string;
@@ -170,6 +183,7 @@ interface AdminDashboardProps {
   settings: PublicSettings;
   displayCurrency: CurrencyCode;
   initialDealId?: string | null;
+  onOpenPublicProfile?: (uid: string) => void;
   onFlash: (msg: string) => void;
 }
 
@@ -275,6 +289,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   settings,
   displayCurrency,
   initialDealId,
+  onOpenPublicProfile,
   onFlash,
 }) => {
   const [section, setSection] = useState<AdminSection>(initialDealId ? 'deals' : 'overview');
@@ -287,44 +302,189 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [deals, setDeals] = useState<DealRecord[]>([]);
   const [proposals, setProposals] = useState<AiProposalRecord[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLogRecord[]>([]);
-  const [adminRoles, setAdminRoles] = useState<{ uid: string; role: string; grantedBy: string }[]>([]);
+  const [adminRoles, setAdminRoles] = useState<ActiveAdminRecord[]>([]);
+  const [adminInvitations, setAdminInvitations] = useState<AdminInvitationRecord[]>([]);
   const [announcements, setAnnouncements] = useState<AnnouncementRecord[]>([]);
   const [financeOverview, setFinanceOverview] = useState<AdminFinanceOverviewPayload | null>(null);
   const [financeLoading, setFinanceLoading] = useState(false);
   const [financeError, setFinanceError] = useState<string | null>(null);
+  const [settlingExpiredDeals, setSettlingExpiredDeals] = useState(false);
+  const [busyItemKey, setBusyItemKey] = useState<string | null>(null);
 
-  const fetchFinanceOverview = useCallback(async () => {
-    setFinanceLoading(true);
-    setFinanceError(null);
-    try {
-      const rate =
-        Number.isFinite(settings.usdToBdtRate) &&
-        settings.usdToBdtRate > 0 &&
-        settings.usdToBdtRate < 100000
-          ? settings.usdToBdtRate
-          : 120;
-      const resp = await fetchWithFreshBearerToken(
-        `/api/admin/finance-overview?usdToBdtRate=${encodeURIComponent(String(rate))}`
-      );
-      const json = (await resp.json().catch(() => null)) as
-        | (AdminFinanceOverviewPayload & { error?: string })
-        | null;
-      if (!resp.ok || !json || !json.ok) {
-        throw new Error(json?.error || `Failed to load finance overview (${resp.status}).`);
+  // Organized Status Queues, Filters, Search & Pagination State
+  const [listingBucket, setListingBucket] = useState<AdminListingBucket>('pending');
+  const [listingSearch, setListingSearch] = useState('');
+  const [listingPlatformFilter, setListingPlatformFilter] = useState<PlatformId | 'all'>('all');
+  const [listingPage, setListingPage] = useState(1);
+
+  const [nidBucket, setNidBucket] = useState<AdminNidBucket>('pending_review');
+  const [nidSearch, setNidSearch] = useState('');
+  const [nidPage, setNidPage] = useState(1);
+  const [nidRejectReasons, setNidRejectReasons] = useState<Record<string, string>>({});
+
+  const [depositBucket, setDepositBucket] = useState<AdminDepositBucket>('pending');
+  const [depositSearch, setDepositSearch] = useState('');
+  const [depositPage, setDepositPage] = useState(1);
+  const [depositRejectReasons, setDepositRejectReasons] = useState<Record<string, string>>({});
+
+  const [withdrawalBucket, setWithdrawalBucket] = useState<AdminWithdrawalBucket>('pending');
+  const [withdrawalSearch, setWithdrawalSearch] = useState('');
+  const [withdrawalPage, setWithdrawalPage] = useState(1);
+  const [wdRefInputs, setWdRefInputs] = useState<Record<string, string>>({});
+  const [wdRejectReasons, setWdRejectReasons] = useState<Record<string, string>>({});
+
+  const [roleBucket, setRoleBucket] = useState<AdminRoleBucket>('pending');
+  const [roleSearch, setRoleSearch] = useState('');
+  const [targetInviteEmail, setTargetInviteEmail] = useState('');
+  const [targetInviteName, setTargetInviteName] = useState('');
+
+  const financeAbortRef = useRef<AbortController | null>(null);
+  const financeInFlightRef = useRef<Promise<void> | null>(null);
+
+  const fetchFinanceOverview = useCallback(
+    (forceRefresh = false): Promise<void> => {
+      if (!forceRefresh && financeInFlightRef.current) {
+        return financeInFlightRef.current;
       }
-      setFinanceOverview(json);
-    } catch (err) {
-      setFinanceError(err instanceof Error ? err.message : 'Unable to load finance overview.');
-    } finally {
-      setFinanceLoading(false);
-    }
-  }, [settings.usdToBdtRate]);
+      if (forceRefresh && financeAbortRef.current) {
+        financeAbortRef.current.abort();
+      }
+      const ac = new AbortController();
+      financeAbortRef.current = ac;
+
+      let task: Promise<void> | null = null;
+      task = (async () => {
+        setFinanceLoading(true);
+        setFinanceError(null);
+        try {
+          const rate =
+            Number.isFinite(settings.usdToBdtRate) &&
+            settings.usdToBdtRate > 0 &&
+            settings.usdToBdtRate < 100000
+              ? settings.usdToBdtRate
+              : 120;
+          const json = await cachedApiGetJson<AdminFinanceOverviewPayload & { error?: string }>(
+            `GET:/api/admin/finance-overview:${rate}`,
+            async () => {
+              const refreshParam = forceRefresh ? '&refresh=1' : '';
+              const resp = await fetchWithFreshBearerToken(
+                `/api/admin/finance-overview?usdToBdtRate=${encodeURIComponent(String(rate))}${refreshParam}`,
+                { signal: ac.signal }
+              );
+              const parsed = (await resp.json().catch(() => null)) as
+                | (AdminFinanceOverviewPayload & { error?: string })
+                | null;
+              if (!resp.ok || !parsed || !parsed.ok) {
+                throw new Error(parsed?.error || `Failed to load finance overview (${resp.status}).`);
+              }
+              return parsed;
+            },
+            {
+              ttlMs: 12_000,
+              forceRefresh,
+              shouldCache: (res) => Boolean(res?.ok && res?.complete),
+            }
+          );
+          if (!ac.signal.aborted) {
+            setFinanceOverview(json);
+          }
+        } catch (err) {
+          if (ac.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
+            return;
+          }
+          setFinanceError(err instanceof Error ? err.message : 'Unable to load finance overview.');
+        } finally {
+          if (financeAbortRef.current === ac) {
+            financeAbortRef.current = null;
+          }
+          if (task && financeInFlightRef.current === task) {
+            financeInFlightRef.current = null;
+          }
+          if (!ac.signal.aborted) {
+            setFinanceLoading(false);
+          }
+        }
+      })();
+
+      financeInFlightRef.current = task;
+      return task;
+    },
+    [settings.usdToBdtRate]
+  );
+
+  const invalidateAndRefreshFinanceOverview = useCallback(async () => {
+    invalidateClientApiCache('GET:/api/admin/finance-overview');
+    await fetchWithFreshBearerToken('/api/admin/finance-overview/invalidate', {
+      method: 'POST',
+    }).catch(() => {});
+    await fetchFinanceOverview(true);
+  }, [fetchFinanceOverview]);
 
   useEffect(() => {
-    if (section === 'overview') {
-      void fetchFinanceOverview();
+    return () => {
+      financeAbortRef.current?.abort();
+    };
+  }, []);
+
+  const handleSettleAllExpiredDeals = useCallback(async () => {
+    if (settlingExpiredDeals) return;
+    setSettlingExpiredDeals(true);
+    try {
+      const resp = await fetchWithFreshBearerToken('/api/admin/deals/settle-expired', {
+        method: 'POST',
+      });
+      const json = (await resp.json().catch(() => null)) as
+        | { ok?: boolean; settledCount?: number; checkedCount?: number; error?: string }
+        | null;
+      if (!resp.ok || !json?.ok) {
+        throw new Error(json?.error || `Failed to settle expired deals (${resp.status}).`);
+      }
+      onFlash(
+        json.settledCount && json.settledCount > 0
+          ? `Released seller payouts for ${json.settledCount} completed escrow deal(s).`
+          : 'No additional expired dispute-free escrow deals needed release.'
+      );
+      await fetchFinanceOverview(true);
+    } catch (err) {
+      onFlash(err instanceof Error ? err.message : 'Unable to run expired escrow payout release.');
+    } finally {
+      setSettlingExpiredDeals(false);
     }
+  }, [settlingExpiredDeals, onFlash, fetchFinanceOverview]);
+
+  useEffect(() => {
+    if (section !== 'overview') return;
+    void fetchFinanceOverview(false);
+    const intervalId = window.setInterval(() => {
+      if (typeof document === 'undefined' || document.visibilityState === 'visible') {
+        void fetchFinanceOverview(false);
+      }
+    }, 20_000);
+    const onOnline = () => {
+      void fetchFinanceOverview(true);
+    };
+    window.addEventListener('online', onOnline);
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener('online', onOnline);
+    };
   }, [section, fetchFinanceOverview]);
+
+  const overviewSnapshotFingerprint = `${allListings.length}:${nidSubmissions.length}:${deposits.length}:${withdrawals.length}:${deals.length}:${deals.map((d) => `${d.status}`).join(',')}`;
+  const lastFingerprintRef = useRef<string>('');
+  useEffect(() => {
+    if (section !== 'overview') return;
+    if (!lastFingerprintRef.current) {
+      lastFingerprintRef.current = overviewSnapshotFingerprint;
+      return;
+    }
+    if (lastFingerprintRef.current === overviewSnapshotFingerprint) return;
+    lastFingerprintRef.current = overviewSnapshotFingerprint;
+    const t = window.setTimeout(() => {
+      void fetchFinanceOverview(true);
+    }, 1200);
+    return () => window.clearTimeout(t);
+  }, [section, overviewSnapshotFingerprint, fetchFinanceOverview]);
 
   // Admin Notification & Broadcast Composer State
   const [notifMode, setNotifMode] = useState<'broadcast_announcement' | 'targeted_user'>('broadcast_announcement');
@@ -362,9 +522,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
   // Deal & Dispute Review Workbench State
   const [selectedDealId, setSelectedDealId] = useState<string | null>(initialDealId || null);
-  const [dealFilter, setDealFilter] = useState<
-    'all' | 'reported' | 'ready_to_settle' | 'active' | 'unpaid' | 'finalized'
-  >('all');
+  const [dealFilter, setDealFilter] = useState<AdminDealQueueTab>('all');
+  const [dealSearch, setDealSearch] = useState('');
+  const [dealsPage, setDealsPage] = useState(1);
   const [dealReports, setDealReports] = useState<DealReportRecord[]>([]);
   const [dealTransfers, setDealTransfers] = useState<DealTransferSubmission[]>([]);
   const [dealMessages, setDealMessages] = useState<ChatMessageRecord[]>([]);
@@ -488,7 +648,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
     unsubs.push(
       onSnapshot(
-        query(collection(db, 'listings'), limit(100)),
+        query(collection(db, 'listings'), limit(400)),
         (snap) => {
           const items: MarketplaceListing[] = snap.docs.map((d) => {
             const ld = d.data();
@@ -537,7 +697,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
     unsubs.push(
       onSnapshot(
-        query(collection(db, 'identityVerifications'), limit(80)),
+        query(collection(db, 'identityVerifications'), limit(250)),
         (snap) => {
           setNidSubmissions(
             snap.docs.map((d) => {
@@ -549,6 +709,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 status: nd.status,
                 rejectionReason: nd.rejectionReason,
                 reviewedBy: nd.reviewedBy,
+                submittedAt: nd.submittedAt,
+                updatedAt: nd.updatedAt,
               };
             })
           );
@@ -559,7 +721,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
     unsubs.push(
       onSnapshot(
-        query(collection(db, 'deposits'), limit(80)),
+        query(collection(db, 'deposits'), limit(250)),
         (snap) => {
           const items: DepositRequestRecord[] = snap.docs.map((d) => {
             const dd = d.data();
@@ -587,7 +749,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
     unsubs.push(
       onSnapshot(
-        query(collection(db, 'withdrawals'), limit(80)),
+        query(collection(db, 'withdrawals'), limit(250)),
         (snap) => {
           const items: WithdrawalRequestRecord[] = snap.docs.map((d) => {
             const wd = d.data();
@@ -617,7 +779,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
     unsubs.push(
       onSnapshot(
-        query(collection(db, 'deals'), limit(100)),
+        query(collection(db, 'deals'), limit(250)),
         (snap) => {
           const items: DealRecord[] = snap.docs.map((d) => {
             const dl = d.data();
@@ -675,99 +837,167 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       )
     );
 
-    unsubs.push(
-      onSnapshot(
-        query(collection(db, 'aiProposals'), limit(60)),
-        (snap) => {
-          const items: AiProposalRecord[] = snap.docs.map((d) => {
-            const p = d.data();
-            return {
-              id: d.id,
-              title: p.title,
-              category: p.category,
-              severity: p.severity,
-              summary: p.summary,
-              affectedFiles: p.affectedFiles || [],
-              proposedDiff: p.proposedDiff || '',
-              status: p.status,
-              decidedBy: p.decidedBy,
-              linkedIssueId: p.linkedIssueId ? String(p.linkedIssueId) : undefined,
-              createdAtMs: p.createdAt?.toMillis ? p.createdAt.toMillis() : Date.now(),
-            };
-          });
-          items.sort((a, b) => b.createdAtMs - a.createdAtMs);
-          setProposals(items);
-        },
-        (err) => console.error('Admin proposals listener error:', err)
-      )
-    );
-
-    unsubs.push(
-      onSnapshot(
-        query(collection(db, 'auditLogs'), orderBy('createdAt', 'desc'), limit(60)),
-        (snap) => {
-          setAuditLogs(
-            snap.docs.map((d) => {
-              const al = d.data();
-              return {
-                id: d.id,
-                actorId: al.actorId,
-                action: al.action,
-                targetType: al.targetType,
-                targetId: al.targetId,
-                details: al.details,
-                createdAtMs: al.createdAt?.toMillis ? al.createdAt.toMillis() : Date.now(),
-              };
-            })
-          );
-        },
-        (err) => console.error('Admin auditLogs listener error:', err)
-      )
-    );
-
-    unsubs.push(
-      onSnapshot(
-        collection(db, 'admins'),
-        (snap) => {
-          setAdminRoles(
-            snap.docs.map((d) => ({
-              uid: d.id,
-              role: d.data().role,
-              grantedBy: d.data().grantedBy,
-            }))
-          );
-        },
-        () => {}
-      )
-    );
-
-    unsubs.push(
-      onSnapshot(
-        query(collection(db, 'announcements'), limit(40)),
-        (snap) => {
-          const items: AnnouncementRecord[] = snap.docs.map((d) => {
-            const ad = d.data();
-            return {
-              id: d.id,
-              title: String(ad.title || ''),
-              preview: String(ad.preview || ''),
-              body: String(ad.body || ''),
-              severity: (ad.severity as NotificationSeverity) || 'info',
-              destination: ad.destination ? String(ad.destination) : '',
-              active: Boolean(ad.active),
-              authorId: String(ad.authorId || ''),
-              createdAtMs: Number(ad.createdAtMs || (ad.createdAt?.toMillis ? ad.createdAt.toMillis() : Date.now())),
-            };
-          });
-          items.sort((a, b) => b.createdAtMs - a.createdAtMs);
-          setAnnouncements(items);
-        },
-        () => {}
-      )
-    );
-
     return () => unsubs.forEach((u) => u());
   }, []);
+
+  // Section-Scoped Secondary Admin Listeners (attach only when viewing Roles, AI Dev, or Notifications)
+  useEffect(() => {
+    if (section !== 'roles' && section !== 'aidev' && section !== 'notifications') {
+      return;
+    }
+    const scopedUnsubs: (() => void)[] = [];
+
+    if (section === 'aidev') {
+      scopedUnsubs.push(
+        onSnapshot(
+          query(collection(db, 'aiProposals'), limit(60)),
+          (snap) => {
+            const items: AiProposalRecord[] = snap.docs.map((d) => {
+              const p = d.data();
+              return {
+                id: d.id,
+                title: p.title,
+                category: p.category,
+                severity: p.severity,
+                summary: p.summary,
+                affectedFiles: p.affectedFiles || [],
+                proposedDiff: p.proposedDiff || '',
+                status: p.status,
+                decidedBy: p.decidedBy,
+                linkedIssueId: p.linkedIssueId ? String(p.linkedIssueId) : undefined,
+                createdAtMs: p.createdAt?.toMillis ? p.createdAt.toMillis() : Date.now(),
+              };
+            });
+            items.sort((a, b) => b.createdAtMs - a.createdAtMs);
+            setProposals(items);
+          },
+          (err) => console.error('Admin proposals listener error:', err)
+        )
+      );
+    }
+
+    if (section === 'roles' || section === 'aidev') {
+      scopedUnsubs.push(
+        onSnapshot(
+          query(collection(db, 'auditLogs'), orderBy('createdAt', 'desc'), limit(60)),
+          (snap) => {
+            setAuditLogs(
+              snap.docs.map((d) => {
+                const al = d.data();
+                return {
+                  id: d.id,
+                  actorId: al.actorId,
+                  action: al.action,
+                  targetType: al.targetType,
+                  targetId: al.targetId,
+                  details: al.details,
+                  createdAtMs: al.createdAt?.toMillis ? al.createdAt.toMillis() : Date.now(),
+                };
+              })
+            );
+          },
+          (err) => console.error('Admin auditLogs listener error:', err)
+        )
+      );
+    }
+
+    if (section === 'roles') {
+      scopedUnsubs.push(
+        onSnapshot(
+          query(collection(db, 'admins'), limit(100)),
+          (snap) => {
+            setAdminRoles(
+              snap.docs.map((d) => {
+                const ad = d.data();
+                return {
+                  uid: d.id,
+                  role: ad.role === 'superadmin' ? 'superadmin' : 'admin',
+                  permissions: Array.isArray(ad.permissions)
+                    ? ad.permissions.map((p: unknown) => String(p))
+                    : ['all'],
+                  grantedBy: String(ad.grantedBy || ''),
+                  email: ad.email ? String(ad.email) : undefined,
+                  displayName: ad.displayName ? String(ad.displayName) : undefined,
+                  updatedAtMs: ad.createdAt?.toMillis ? ad.createdAt.toMillis() : Date.now(),
+                };
+              })
+            );
+          },
+          () => {}
+        )
+      );
+
+      if (isSuperAdmin) {
+        scopedUnsubs.push(
+          onSnapshot(
+            query(collection(db, 'adminInvitations'), limit(200)),
+            (snap) => {
+              const list: AdminInvitationRecord[] = snap.docs.map((d) => {
+                const idata = d.data();
+                return {
+                  id: d.id,
+                  targetUid: String(idata.targetUid || ''),
+                  targetName: idata.targetName ? String(idata.targetName) : undefined,
+                  targetEmail: idata.targetEmail ? String(idata.targetEmail) : undefined,
+                  role: idata.role === 'superadmin' ? 'superadmin' : 'admin',
+                  permissions: Array.isArray(idata.permissions)
+                    ? idata.permissions.map((p: unknown) => String(p))
+                    : [],
+                  status:
+                    idata.status === 'accepted' ||
+                    idata.status === 'rejected' ||
+                    idata.status === 'revoked'
+                      ? idata.status
+                      : 'pending',
+                  invitedBy: String(idata.invitedBy || ''),
+                  invitedByName: idata.invitedByName ? String(idata.invitedByName) : undefined,
+                  rejectionReason: idata.rejectionReason ? String(idata.rejectionReason) : undefined,
+                  respondedAtMs:
+                    typeof idata.respondedAtMs === 'number' ? idata.respondedAtMs : undefined,
+                  createdAtMs: Number(
+                    idata.createdAtMs || (idata.createdAt?.toMillis ? idata.createdAt.toMillis() : Date.now())
+                  ),
+                };
+              });
+              setAdminInvitations(list);
+            },
+            () => setAdminInvitations([])
+          )
+        );
+      } else {
+        setAdminInvitations([]);
+      }
+    }
+
+    if (section === 'notifications') {
+      scopedUnsubs.push(
+        onSnapshot(
+          query(collection(db, 'announcements'), limit(40)),
+          (snap) => {
+            const items: AnnouncementRecord[] = snap.docs.map((d) => {
+              const ad = d.data();
+              return {
+                id: d.id,
+                title: String(ad.title || ''),
+                preview: String(ad.preview || ''),
+                body: String(ad.body || ''),
+                severity: (ad.severity as NotificationSeverity) || 'info',
+                destination: ad.destination ? String(ad.destination) : '',
+                active: Boolean(ad.active),
+                authorId: String(ad.authorId || ''),
+                createdAtMs: Number(ad.createdAtMs || (ad.createdAt?.toMillis ? ad.createdAt.toMillis() : Date.now())),
+              };
+            });
+            items.sort((a, b) => b.createdAtMs - a.createdAtMs);
+            setAnnouncements(items);
+          },
+          () => {}
+        )
+      );
+    }
+
+    return () => scopedUnsubs.forEach((u) => u());
+  }, [section, isSuperAdmin]);
 
   // Load private monetization evidence and seller edit revision history when inspecting a listing
   useEffect(() => {
@@ -835,68 +1065,78 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
     let cancelled = false;
     (async () => {
-      for (const deal of missingSold.slice(0, 15)) {
-        if (cancelled) return;
-        backfilledActivityRef.current.add(`deal:${deal.id}`);
-        try {
-          const pubSnap = await getDoc(doc(db, 'publicProfiles', deal.sellerId));
-          const settledTs = deal.settledAtMs || deal.createdAtMs || Date.now();
-          const actId = generateOpaquePublicActivityId(settledTs);
-          const payload = buildSanitizedSoldTickerPayload({
-            deal: { ...deal, settledAtMs: settledTs },
-            sellerDisplayName: pubSnap.exists()
-              ? String(pubSnap.data()?.displayName || deal.sellerName || '')
-              : deal.sellerName,
-            sellerNidVerified: Boolean(pubSnap.exists() && pubSnap.data()?.nidVerified),
-            hidePublicActivityName: Boolean(
-              pubSnap.exists() && pubSnap.data()?.hidePublicActivityName
-            ),
-            nowMs: settledTs,
-          });
-          if (!payload) continue;
-          await setDoc(doc(db, 'publicActivity', actId), {
-            ...payload,
-            createdAt: serverTimestamp(),
-          });
-          await updateDoc(doc(db, 'deals', deal.id), {
-            publicActivityId: actId,
-            updatedAt: serverTimestamp(),
-          });
-        } catch {
-          // Non-fatal backfill skip
-        }
+      const targetDeals = missingSold.slice(0, 15);
+      const targetWds = missingPayout.slice(0, 15);
+      targetDeals.forEach((d) => backfilledActivityRef.current.add(`deal:${d.id}`));
+      targetWds.forEach((w) => backfilledActivityRef.current.add(`wd:${w.id}`));
+
+      const uniqueUids = Array.from(
+        new Set([...targetDeals.map((d) => d.sellerId), ...targetWds.map((w) => w.userId)].filter(Boolean))
+      );
+      const profileMap = new Map<string, Record<string, unknown>>();
+      await Promise.all(
+        uniqueUids.map(async (uid) => {
+          try {
+            const snap = await getDoc(doc(db, 'publicProfiles', uid));
+            if (snap.exists()) profileMap.set(uid, snap.data() as Record<string, unknown>);
+          } catch {
+            // Non-fatal
+          }
+        })
+      );
+      if (cancelled) return;
+
+      const batch = writeBatch(db);
+      let opCount = 0;
+
+      for (const deal of targetDeals) {
+        const pubData = profileMap.get(deal.sellerId);
+        const settledTs = deal.settledAtMs || deal.createdAtMs || Date.now();
+        const actId = generateOpaquePublicActivityId(settledTs);
+        const payload = buildSanitizedSoldTickerPayload({
+          deal: { ...deal, settledAtMs: settledTs },
+          sellerDisplayName: pubData ? String(pubData.displayName || deal.sellerName || '') : deal.sellerName,
+          sellerNidVerified: Boolean(pubData && pubData.nidVerified),
+          hidePublicActivityName: Boolean(pubData && pubData.hidePublicActivityName),
+          nowMs: settledTs,
+        });
+        if (!payload) continue;
+        batch.set(doc(db, 'publicActivity', actId), {
+          ...payload,
+          createdAt: serverTimestamp(),
+        });
+        batch.update(doc(db, 'deals', deal.id), {
+          publicActivityId: actId,
+          updatedAt: serverTimestamp(),
+        });
+        opCount += 2;
       }
 
-      for (const wd of missingPayout.slice(0, 15)) {
-        if (cancelled) return;
-        backfilledActivityRef.current.add(`wd:${wd.id}`);
-        try {
-          const pubSnap = await getDoc(doc(db, 'publicProfiles', wd.userId));
-          const paidTs = wd.reviewedAtMs || wd.createdAtMs || Date.now();
-          const actId = generateOpaquePublicActivityId(paidTs);
-          const payload = buildSanitizedPayoutTickerPayload({
-            withdrawal: { ...wd, reviewedAtMs: paidTs },
-            userDisplayName: pubSnap.exists()
-              ? String(pubSnap.data()?.displayName || wd.userName || '')
-              : wd.userName,
-            userNidVerified: Boolean(pubSnap.exists() && pubSnap.data()?.nidVerified),
-            hidePublicActivityName: Boolean(
-              pubSnap.exists() && pubSnap.data()?.hidePublicActivityName
-            ),
-            nowMs: paidTs,
-          });
-          if (!payload) continue;
-          await setDoc(doc(db, 'publicActivity', actId), {
-            ...payload,
-            createdAt: serverTimestamp(),
-          });
-          await updateDoc(doc(db, 'withdrawals', wd.id), {
-            publicActivityId: actId,
-            updatedAt: serverTimestamp(),
-          });
-        } catch {
-          // Non-fatal backfill skip
-        }
+      for (const wd of targetWds) {
+        const pubData = profileMap.get(wd.userId);
+        const paidTs = wd.reviewedAtMs || wd.createdAtMs || Date.now();
+        const actId = generateOpaquePublicActivityId(paidTs);
+        const payload = buildSanitizedPayoutTickerPayload({
+          withdrawal: { ...wd, reviewedAtMs: paidTs },
+          userDisplayName: pubData ? String(pubData.displayName || wd.userName || '') : wd.userName,
+          userNidVerified: Boolean(pubData && pubData.nidVerified),
+          hidePublicActivityName: Boolean(pubData && pubData.hidePublicActivityName),
+          nowMs: paidTs,
+        });
+        if (!payload) continue;
+        batch.set(doc(db, 'publicActivity', actId), {
+          ...payload,
+          createdAt: serverTimestamp(),
+        });
+        batch.update(doc(db, 'withdrawals', wd.id), {
+          publicActivityId: actId,
+          updatedAt: serverTimestamp(),
+        });
+        opCount += 2;
+      }
+
+      if (opCount > 0 && !cancelled) {
+        await batch.commit().catch(() => {});
       }
     })();
 
@@ -918,7 +1158,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
     dealSubUnsubs.push(
       onSnapshot(
-        collection(db, 'deals', selectedDealId, 'reports'),
+        query(collection(db, 'deals', selectedDealId, 'reports'), limit(80)),
         (snap) => {
           const list: DealReportRecord[] = snap.docs.map((d) => {
             const r = d.data();
@@ -948,7 +1188,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
     dealSubUnsubs.push(
       onSnapshot(
-        collection(db, 'deals', selectedDealId, 'transfers'),
+        query(collection(db, 'deals', selectedDealId, 'transfers'), limit(50)),
         (snap) => {
           const list: DealTransferSubmission[] = snap.docs.map((d) => {
             const tr = d.data();
@@ -1036,11 +1276,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     const authCapabilities = await detectFirebaseAuthCapabilities(true).catch(() => null);
     try {
       const idToken = auth.currentUser ? await auth.currentUser.getIdToken() : '';
-      let resp = await fetch('/api/admin/system-health?refresh=1', {
+      let resp = await fetch(buildApiUrl('/api/admin/system-health?refresh=1'), {
         headers: idToken ? { Authorization: `Bearer ${idToken}` } : undefined,
       });
       if (!resp.ok) {
-        resp = await fetch('/api/health');
+        resp = await fetch(buildApiUrl('/api/health'));
       }
       if (resp.ok) {
         const json = await resp.json();
@@ -1099,7 +1339,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     setRunningAiOcr(true);
     try {
       const idToken = auth.currentUser ? await auth.currentUser.getIdToken() : '';
-      const resp = await fetch('/api/ai/verify-evidence', {
+      const resp = await fetch(buildApiUrl('/api/ai/verify-evidence'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -1133,6 +1373,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   };
 
   const handleApproveListing = async (listing: MarketplaceListing) => {
+    const lockKey = `listing:${listing.id}`;
+    if (busyItemKey) return;
+    setBusyItemKey(lockKey);
     try {
       const nextVerState =
         listing.monetizationStatus === 'monetized'
@@ -1193,14 +1436,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         });
       }
 
+      void invalidateAndRefreshFinanceOverview();
       onFlash('Listing approved and published to Marketplace!');
       setSelectedListingId(null);
     } catch (err) {
       onFlash(err instanceof Error ? err.message : 'Failed to approve listing.');
+    } finally {
+      setBusyItemKey(null);
     }
   };
 
   const handleRejectListing = async (listing: MarketplaceListing) => {
+    const lockKey = `listing:${listing.id}`;
+    if (busyItemKey) return;
+    setBusyItemKey(lockKey);
     const cleanReason = rejectReason.trim() || 'Incomplete asset verification details.';
     try {
       await updateDoc(doc(db, 'listings', listing.id), {
@@ -1226,9 +1475,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       });
       setRejectReason('');
       setSelectedListingId(null);
+      void invalidateAndRefreshFinanceOverview();
       onFlash('Listing rejected with note sent to seller.');
     } catch (err) {
       onFlash(err instanceof Error ? err.message : 'Failed to reject listing.');
+    } finally {
+      setBusyItemKey(null);
     }
   };
 
@@ -1237,6 +1489,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       onFlash('Cannot suspend a listing that has an active reservation or completed escrow deal.');
       return;
     }
+    const lockKey = `listing:${listing.id}`;
+    if (busyItemKey) return;
+    setBusyItemKey(lockKey);
     const cleanReason =
       rejectReason.trim() || 'Listing temporarily suspended by BEXORA Moderation pending compliance review.';
     try {
@@ -1268,13 +1523,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       });
       setRejectReason('');
       setSelectedListingId(null);
+      void invalidateAndRefreshFinanceOverview();
       onFlash('Listing suspended from public marketplace.');
     } catch (err) {
       onFlash(err instanceof Error ? err.message : 'Failed to suspend listing.');
+    } finally {
+      setBusyItemKey(null);
     }
   };
 
   const handleRestoreSuspendedListing = async (listing: MarketplaceListing) => {
+    const lockKey = `listing:${listing.id}`;
+    if (busyItemKey) return;
+    setBusyItemKey(lockKey);
     try {
       await updateDoc(doc(db, 'listings', listing.id), {
         status: 'active',
@@ -1303,15 +1564,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         destination: `listing:${listing.id}`,
       });
       setSelectedListingId(null);
+      void invalidateAndRefreshFinanceOverview();
       onFlash('Suspended listing restored to live Marketplace!');
     } catch (err) {
       onFlash(err instanceof Error ? err.message : 'Failed to restore suspended listing.');
+    } finally {
+      setBusyItemKey(null);
     }
   };
 
   // --- NID Handlers ---
   const handleDecisionNid = async (uid: string, approve: boolean, reasonRaw = '') => {
-    const cleanNidReason = (reasonRaw || 'Images unclear or mismatched. Please upload clear Front & Back photos.').slice(0, 500);
+    const lockKey = `nid:${uid}`;
+    if (busyItemKey) return;
+    setBusyItemKey(lockKey);
+    const cleanNidReason = (reasonRaw.trim() || 'Images unclear or mismatched. Please upload clear Front & Back photos.').slice(0, 500);
     try {
       await runTransaction(db, async (tx) => {
         const idRef = doc(db, 'identityVerifications', uid);
@@ -1371,14 +1638,25 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         referenceLabel: 'NID Identity Verification',
         destination: 'profile:nid',
       });
+      setNidRejectReasons((prev) => {
+        const next = { ...prev };
+        delete next[uid];
+        return next;
+      });
+      void invalidateAndRefreshFinanceOverview();
       onFlash(approve ? 'User NID verified and badge granted!' : 'NID submission rejected.');
     } catch (err) {
       onFlash(err instanceof Error ? err.message : 'NID review update failed.');
+    } finally {
+      setBusyItemKey(null);
     }
   };
 
   // --- Deposit Approval / Rejection (Idempotent Transaction) ---
   const handleApproveDeposit = async (dep: DepositRequestRecord) => {
+    const lockKey = `dep:${dep.id}`;
+    if (busyItemKey) return;
+    setBusyItemKey(lockKey);
     try {
       await runTransaction(db, async (tx) => {
         const depRef = doc(db, 'deposits', dep.id);
@@ -1430,13 +1708,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         referenceLabel: `${dep.method.toUpperCase()} TrxID ${dep.transactionId}`,
         destination: 'wallet',
       });
+      void invalidateAndRefreshFinanceOverview();
       onFlash('Deposit approved and credited to user wallet!');
     } catch (err) {
       onFlash(err instanceof Error ? err.message : 'Failed to approve deposit.');
+    } finally {
+      setBusyItemKey(null);
     }
   };
 
   const handleRejectDeposit = async (dep: DepositRequestRecord, reason: string) => {
+    const lockKey = `dep:${dep.id}`;
+    if (busyItemKey) return;
+    setBusyItemKey(lockKey);
     const cleanDepReason = (reason.trim() || 'Transaction ID could not be verified.').slice(0, 500);
     try {
       await updateDoc(doc(db, 'deposits', dep.id), {
@@ -1461,15 +1745,26 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         referenceLabel: `${dep.method.toUpperCase()} TrxID ${dep.transactionId}`,
         destination: 'wallet',
       });
+      setDepositRejectReasons((prev) => {
+        const next = { ...prev };
+        delete next[dep.id];
+        return next;
+      });
+      void invalidateAndRefreshFinanceOverview();
       onFlash('Deposit request rejected.');
     } catch (err) {
       onFlash(err instanceof Error ? err.message : 'Failed to reject deposit.');
+    } finally {
+      setBusyItemKey(null);
     }
   };
 
   // --- Withdrawal Payout / Rejection ---
   const handleProcessWithdrawal = async (wd: WithdrawalRequestRecord, markPaid: boolean, noteOrRef: string) => {
-    const cleanRef = (noteOrRef.trim() || (markPaid ? 'MANUAL-PAYOUT' : 'Invalid payout account details.')).slice(0, markPaid ? 80 : 500);
+    const lockKey = `wd:${wd.id}`;
+    if (busyItemKey) return;
+    setBusyItemKey(lockKey);
+    const cleanRef = (noteOrRef.trim() || (markPaid ? `PAID-${Date.now()}` : 'Invalid payout account details.')).slice(0, markPaid ? 80 : 500);
     try {
       await runTransaction(db, async (tx) => {
         const wdRef = doc(db, 'withdrawals', wd.id);
@@ -1581,9 +1876,22 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         referenceLabel: `${wd.method.toUpperCase()} Withdrawal`,
         destination: 'wallet',
       });
+      setWdRefInputs((prev) => {
+        const next = { ...prev };
+        delete next[wd.id];
+        return next;
+      });
+      setWdRejectReasons((prev) => {
+        const next = { ...prev };
+        delete next[wd.id];
+        return next;
+      });
+      void invalidateAndRefreshFinanceOverview();
       onFlash(markPaid ? 'Withdrawal marked as Paid!' : 'Withdrawal rejected & funds restored to user.');
     } catch (err) {
       onFlash(err instanceof Error ? err.message : 'Withdrawal update failed.');
+    } finally {
+      setBusyItemKey(null);
     }
   };
 
@@ -2016,6 +2324,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         }),
       ]);
       setAdminDealNote('');
+      void invalidateAndRefreshFinanceOverview();
       onFlash(`Deal rejected! Buyer refunded ${refundFmt} (${retainedFmt} platform commission retained).`);
     } catch (err) {
       onFlash(err instanceof Error ? err.message : 'Deal refund failed.');
@@ -2233,6 +2542,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         }),
       ]);
       setAdminDealNote('');
+      void invalidateAndRefreshFinanceOverview();
       onFlash(`Deal completed! ${payoutFmt} credited to Seller Wallet and trade counters incremented.`);
     } catch (err) {
       onFlash(err instanceof Error ? err.message : 'Escrow settlement failed.');
@@ -2345,6 +2655,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         }),
       ]);
       setAdminDealNote('');
+      void invalidateAndRefreshFinanceOverview();
       onFlash('Unpaid reservation cancelled and listing restored to active Marketplace!');
     } catch (err) {
       onFlash(err instanceof Error ? err.message : 'Failed to cancel unpaid reservation.');
@@ -2540,7 +2851,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         siteUrl: urlCheck.normalizedUrl,
         bridgeEndpoint: wpBridgeEndpoint.trim() || '/wp-json/bexora/v1',
       });
-      const resp = await fetch(`/api/payments/wordpress/methods?${qs.toString()}`, {
+      const resp = await fetch(buildApiUrl(`/api/payments/wordpress/methods?${qs.toString()}`), {
         headers: idToken ? { Authorization: `Bearer ${idToken}` } : undefined,
       });
       if (!resp.ok) {
@@ -2560,34 +2871,132 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
   };
 
+  const handleSendAdminInvitation = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!isSuperAdmin || busyItemKey) return;
+    const cleanUid = targetRoleUid.trim();
+    if (!cleanUid || cleanUid.length < 4 || cleanUid.length > 128 || !/^[A-Za-z0-9_-]+$/.test(cleanUid)) {
+      onFlash('Enter a valid Firebase User UID.');
+      return;
+    }
+    if (cleanUid === adminUid) {
+      onFlash('You cannot send an admin role invitation to yourself.');
+      return;
+    }
+    setBusyItemKey(`invite:${cleanUid}`);
+    try {
+      const inviteId = `inv_${cleanUid}`;
+      const cleanName = targetInviteName.trim().slice(0, 80);
+      const cleanEmail = targetInviteEmail.trim().slice(0, 160);
+      const permissions = targetRoleLevel === 'superadmin' ? ['all'] : ['moderation', 'support'];
+      const nowMs = Date.now();
+      await setDoc(doc(db, 'adminInvitations', inviteId), {
+        targetUid: cleanUid,
+        ...(cleanName ? { targetName: cleanName } : {}),
+        ...(cleanEmail ? { targetEmail: cleanEmail } : {}),
+        role: targetRoleLevel,
+        permissions,
+        status: 'pending',
+        invitedBy: adminUid,
+        invitedByName: auth.currentUser?.displayName?.slice(0, 80) || 'BEXORA Superadmin',
+        createdAtMs: nowMs,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+      await writeAuditLog(
+        adminUid,
+        'send_admin_invitation',
+        'adminInvitation',
+        inviteId,
+        `Sent ${targetRoleLevel} invitation to UID ${cleanUid}`
+      );
+      await emitUserNotification({
+        recipientId: cleanUid,
+        actorRole: 'admin',
+        eventKey: `admin_invite_${inviteId}_${nowMs}`,
+        category: 'security',
+        severity: 'info',
+        title: `Admin Role Invitation (${targetRoleLevel.toUpperCase()})`,
+        preview: 'You have been invited to join BEXORA Administration. Review in Profile.',
+        body: `You received a ${targetRoleLevel.toUpperCase()} role invitation from BEXORA Superadmin. Open your Profile page to Accept or Decline this invitation.`,
+        refType: 'profile',
+        refId: cleanUid,
+        referenceLabel: 'Admin Governance Invitation',
+        destination: 'profile',
+      }).catch(() => {});
+      setTargetRoleUid('');
+      setTargetInviteName('');
+      setTargetInviteEmail('');
+      setRoleBucket('pending');
+      onFlash(`Admin invitation sent to UID ${cleanUid}. Admin access activates only after they accept.`);
+    } catch (err) {
+      onFlash(err instanceof Error ? err.message : 'Failed to send admin invitation.');
+    } finally {
+      setBusyItemKey(null);
+    }
+  };
+
+  const handleRevokePendingInvitation = async (inv: AdminInvitationRecord) => {
+    if (!isSuperAdmin || busyItemKey) return;
+    setBusyItemKey(`rev_inv:${inv.id}`);
+    try {
+      await updateDoc(doc(db, 'adminInvitations', inv.id), {
+        status: 'revoked',
+        updatedAt: serverTimestamp(),
+      });
+      await writeAuditLog(
+        adminUid,
+        'revoke_admin_invitation',
+        'adminInvitation',
+        inv.id,
+        `Revoked pending ${inv.role} invitation for ${inv.targetUid}`
+      );
+      onFlash(`Invitation for ${inv.targetUid} revoked.`);
+    } catch (err) {
+      onFlash(err instanceof Error ? err.message : 'Failed to revoke invitation.');
+    } finally {
+      setBusyItemKey(null);
+    }
+  };
+
   const handleGrantAdminRole = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!isSuperAdmin) return;
+    if (!isSuperAdmin || busyItemKey) return;
     const cleanUid = targetRoleUid.trim();
     if (!cleanUid) return;
+    setBusyItemKey(`grant:${cleanUid}`);
     try {
       await setDoc(doc(db, 'admins', cleanUid), {
         uid: cleanUid,
         role: targetRoleLevel,
+        permissions: targetRoleLevel === 'superadmin' ? ['all'] : ['moderation', 'support'],
         grantedBy: adminUid,
         createdAt: serverTimestamp(),
       });
       await writeAuditLog(adminUid, 'grant_admin_role', 'admin', cleanUid, `Granted ${targetRoleLevel}`);
       setTargetRoleUid('');
-      onFlash(`Granted ${targetRoleLevel} role to UID ${cleanUid}.`);
+      setTargetInviteName('');
+      setTargetInviteEmail('');
+      setRoleBucket('accepted');
+      onFlash(`Granted ${targetRoleLevel} role directly to UID ${cleanUid}.`);
     } catch (err) {
       onFlash(err instanceof Error ? err.message : 'Failed to grant role.');
+    } finally {
+      setBusyItemKey(null);
     }
   };
 
   const handleRevokeAdminRole = async (uid: string) => {
-    if (!isSuperAdmin) return;
+    if (!isSuperAdmin || busyItemKey) return;
+    setBusyItemKey(`revoke:${uid}`);
     try {
       await deleteDoc(doc(db, 'admins', uid));
       await writeAuditLog(adminUid, 'revoke_admin_role', 'admin', uid, 'Revoked admin document');
       onFlash(`Revoked admin role for ${uid}.`);
     } catch (err) {
       onFlash(err instanceof Error ? err.message : 'Failed to revoke role.');
+    } finally {
+      setBusyItemKey(null);
     }
   };
 
@@ -2668,7 +3077,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       }
 
       while (true) {
-        const resp = await fetch('/api/admin/migrate-listing-images', {
+        const resp = await fetch(buildApiUrl('/api/admin/migrate-listing-images'), {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -2764,36 +3173,48 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     buyerTotalMinor: liveSample.buyerTotalMinor,
   });
 
-  const pendingListingsCount = allListings.filter((l) => l.status === 'pending').length;
-  const pendingNidsCount = nidSubmissions.filter((n) => n.status === 'pending_review').length;
-  const pendingDepositsCount = deposits.filter((d) => d.status === 'pending').length;
-  const pendingWithdrawalsCount = withdrawals.filter((w) => w.status === 'pending').length;
-  const reportedDealsCount = deals.filter(
-    (d) => d.status === 'reported_under_review' || d.unresolvedReportCount > 0
-  ).length;
-  const readyToSettleDealsCount = deals.filter(
-    (d) =>
-      d.originalDeadlineMs > 0 &&
-      Date.now() >= d.originalDeadlineMs &&
-      d.unresolvedReportCount === 0 &&
-      (isDealSecurityTimerActiveStatus(d.status) || d.status === 'protection_expired')
-  ).length;
-
-  const filteredDeals = deals.filter((d) => {
-    const isReady =
-      d.originalDeadlineMs > 0 &&
-      Date.now() >= d.originalDeadlineMs &&
-      d.unresolvedReportCount === 0 &&
-      (isDealSecurityTimerActiveStatus(d.status) || d.status === 'protection_expired');
-    if (dealFilter === 'reported') return d.status === 'reported_under_review' || d.unresolvedReportCount > 0;
-    if (dealFilter === 'ready_to_settle') return isReady;
-    if (dealFilter === 'unpaid') return ['accepted_pending_payment', 'awaiting_payment'].includes(d.status);
-    if (dealFilter === 'finalized') return ['settled', 'refunded', 'cancelled'].includes(d.status);
-    if (dealFilter === 'active') {
-      return !['settled', 'refunded', 'cancelled', 'accepted_pending_payment', 'awaiting_payment'].includes(d.status);
-    }
-    return true;
+  const listingQueue = filterAndBucketListings(allListings, {
+    bucket: listingBucket,
+    query: listingSearch,
+    platform: listingPlatformFilter,
   });
+  const paginatedListings = paginateAdminItems(listingQueue.items, listingPage, 12);
+
+  const nidQueue = filterAndBucketNids(nidSubmissions, {
+    bucket: nidBucket,
+    query: nidSearch,
+  });
+  const paginatedNids = paginateAdminItems(nidQueue.items, nidPage, 10);
+
+  const depositQueue = filterAndBucketDeposits(deposits, {
+    bucket: depositBucket,
+    query: depositSearch,
+  });
+  const paginatedDeposits = paginateAdminItems(depositQueue.items, depositPage, 12);
+
+  const withdrawalQueue = filterAndBucketWithdrawals(withdrawals, {
+    bucket: withdrawalBucket,
+    query: withdrawalSearch,
+  });
+  const paginatedWithdrawals = paginateAdminItems(withdrawalQueue.items, withdrawalPage, 12);
+
+  const dealQueue = filterAdminDeals(deals, {
+    tab: dealFilter,
+    query: dealSearch,
+  });
+  const paginatedDeals = paginateAdminItems(dealQueue.items, dealsPage, 12);
+
+  const governanceQueue = filterAndBucketAdminGovernance(adminRoles, adminInvitations, {
+    bucket: roleBucket,
+    query: roleSearch,
+  });
+
+  const pendingListingsCount = listingQueue.counts.pending;
+  const pendingNidsCount = nidQueue.counts.pending_review;
+  const pendingDepositsCount = depositQueue.counts.pending;
+  const pendingWithdrawalsCount = withdrawalQueue.counts.pending;
+  const reportedDealsCount = dealQueue.counts.disputed;
+  const readyToSettleDealsCount = dealQueue.counts.ready;
 
   const selectedModerationListing = allListings.find((l) => l.id === selectedListingId) || null;
   const selectedDeal = deals.find((d) => d.id === selectedDealId) || null;
@@ -2849,7 +3270,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             type="button"
             onClick={() => {
               setSection('deals');
-              setDealFilter(reportedDealsCount > 0 ? 'reported' : 'ready_to_settle');
+              setDealFilter(reportedDealsCount > 0 ? 'disputed' : 'ready');
+              setDealsPage(1);
             }}
             className="bx-btn bx-btn-primary px-4 py-2 text-xs font-extrabold whitespace-nowrap shrink-0"
           >
@@ -2868,7 +3290,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             <div className="text-sm font-black truncate">{auth.currentUser?.email || adminUid}</div>
           </div>
 
-          <nav aria-label="Admin Navigation" className="bx-card p-2 flex flex-col gap-1">
+          <nav
+            aria-label="Admin Navigation"
+            className="bx-card p-2 flex flex-row overflow-x-auto lg:flex-col gap-1.5 lg:gap-1"
+          >
             {(
               [
                 { id: 'overview', label: 'Overview', icon: Activity },
@@ -2899,7 +3324,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   key={item.id}
                   type="button"
                   onClick={() => setSection(item.id)}
-                  className={`w-full px-3 py-2.5 text-left text-xs font-extrabold flex items-center gap-2.5 transition-colors ${
+                  className={`shrink-0 lg:w-full px-3 py-2.5 min-h-[44px] text-left text-xs font-extrabold flex items-center gap-2 transition-colors whitespace-nowrap ${
                     active
                       ? 'bg-[#FF6500] text-white border border-[#191919]'
                       : 'hover:bg-[var(--bx-surface-alt)]'
@@ -2915,330 +3340,27 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
         {/* RIGHT-SIDE CONTENT WORKBENCH */}
         <div className="flex-1 min-w-0 space-y-6">
+          <Suspense fallback={<PageShellSkeleton label="Loading Admin section…" />}>
           {/* 1. OVERVIEW */}
-          {section === 'overview' && (() => {
-            const financeRateUsed = financeOverview?.usdToBdtRateUsed || settings.usdToBdtRate || 120;
-            const fmtFinance = (bdtMinor: number) =>
-              formatMoneyFromMinor(bdtMinor, displayCurrency, 'BDT', financeRateUsed);
-            const isInitialFinanceLoad = financeLoading && !financeOverview;
-            const availableUserBalanceMinor = financeOverview?.users.availableWalletBdtMinor ?? 0;
-            const lockedInWithdrawalsMinor = financeOverview?.users.lockedInWithdrawalsBdtMinor ?? 0;
-            const payableIfAllWithdrawMinor = availableUserBalanceMinor + lockedInWithdrawalsMinor;
-            const escrowHeldMinor = financeOverview?.deals.escrowHeldBdtMinor ?? 0;
-            const totalPlatformObligationsMinor = payableIfAllWithdrawMinor + escrowHeldMinor;
-            const estimatedSurplusMinor =
-              ((financeOverview?.deposits.approvedBdtMinor ?? 0) -
-                (financeOverview?.withdrawals.paidBdtMinor ?? 0)) -
-              totalPlatformObligationsMinor;
-
-            return (
-              <div className="space-y-6">
-                <div className="bx-card p-6 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-                  <div>
-                    <h1 className="text-2xl font-black tracking-tight">BEXORA Operations Overview</h1>
-                    <p className="text-xs opacity-75 mt-1">
-                      Real-time Firebase Cloud Firestore telemetry — zero synthetic metrics.
-                      {financeOverview && (
-                        <span className="ml-2 font-bold">
-                          · Updated {new Date(financeOverview.generatedAtMs).toLocaleTimeString()} · 1 USD ={' '}
-                          {financeOverview.usdToBdtRateUsed} BDT
-                        </span>
-                      )}
-                    </p>
-                  </div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => void fetchFinanceOverview()}
-                      disabled={financeLoading}
-                      className="bx-btn bx-btn-primary px-3.5 py-2 text-xs font-extrabold inline-flex items-center gap-1.5 disabled:opacity-60"
-                    >
-                      <RefreshCw className={`w-3.5 h-3.5 ${financeLoading ? 'animate-spin' : ''}`} />
-                      <span>{financeLoading ? 'Refreshing…' : 'Refresh Totals'}</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        hideAllAdminNotices();
-                        onFlash('Admin tips hidden.');
-                      }}
-                      className="bx-btn bx-btn-ghost px-3 py-2 text-xs font-extrabold"
-                    >
-                      Hide tips
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        restoreAllAdminNotices();
-                        onFlash('Hidden admin tips restored.');
-                      }}
-                      className="bx-btn bx-btn-ghost px-3 py-2 text-xs font-extrabold"
-                    >
-                      Show hidden tips
-                    </button>
-                  </div>
-                </div>
-
-                {financeError && (
-                  <div
-                    role="alert"
-                    className="bx-card p-4 border-2 border-red-600 bg-red-50 dark:bg-red-950/30 text-xs font-bold text-red-700 dark:text-red-300"
-                  >
-                    Finance overview failed to load: {financeError}
-                  </div>
-                )}
-
-                {financeOverview && !financeOverview.complete && (
-                  <div
-                    role="status"
-                    className="bx-card p-4 border-2 border-amber-500 bg-amber-50 dark:bg-amber-950/30 text-xs font-bold text-amber-800 dark:text-amber-300"
-                  >
-                    Warning: Some Firestore collections could not be read completely. Displayed totals may be partial — click &ldquo;Refresh Totals&rdquo; to retry.
-                  </div>
-                )}
-
-                <div className="space-y-3">
-                  <h2 className="text-sm font-black uppercase tracking-wide">Action Queue</h2>
-                  <div className="grid grid-cols-2 lg:grid-cols-5 gap-4 tabular-nums">
-                    <button
-                      type="button"
-                      onClick={() => setSection('moderation')}
-                      className="bx-card p-4 text-left cursor-pointer hover:border-[#FF6500] transition-colors"
-                    >
-                      <div className="text-xs font-bold uppercase opacity-70">Pending Listings</div>
-                      <div className="text-2xl font-black mt-1">{pendingListingsCount}</div>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setSection('nid')}
-                      className="bx-card p-4 text-left cursor-pointer hover:border-[#FF6500] transition-colors"
-                    >
-                      <div className="text-xs font-bold uppercase opacity-70">Pending NIDs</div>
-                      <div className="text-2xl font-black mt-1">{pendingNidsCount}</div>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setSection('deposits')}
-                      className="bx-card p-4 text-left cursor-pointer hover:border-[#FF6500] transition-colors"
-                    >
-                      <div className="text-xs font-bold uppercase opacity-70">Pending Deposits</div>
-                      <div className="text-2xl font-black mt-1">{pendingDepositsCount}</div>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setSection('withdrawals')}
-                      className="bx-card p-4 text-left cursor-pointer hover:border-[#FF6500] transition-colors"
-                    >
-                      <div className="text-xs font-bold uppercase opacity-70">Pending Withdrawals</div>
-                      <div className="text-2xl font-black mt-1">{pendingWithdrawalsCount}</div>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setSection('deals')}
-                      className="bx-card p-4 text-left cursor-pointer hover:border-[#FF6500] transition-colors"
-                    >
-                      <div className="text-xs font-bold uppercase opacity-70">Disputes / Ready</div>
-                      <div className="text-2xl font-black mt-1 text-red-600">
-                        {reportedDealsCount} / <span className="text-emerald-600">{readyToSettleDealsCount}</span>
-                      </div>
-                    </button>
-                  </div>
-                </div>
-
-                <div className="space-y-3">
-                  <h2 className="text-sm font-black uppercase tracking-wide">Marketplace Value &amp; Earnings</h2>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 tabular-nums">
-                    <div className="bx-card p-4 space-y-1">
-                      <div className="text-xs font-bold uppercase opacity-70">Total Listing Value</div>
-                      <div className="text-2xl font-black">
-                        {isInitialFinanceLoad || !financeOverview
-                          ? '…'
-                          : fmtFinance(financeOverview.listings.liveValueBdtMinor)}
-                      </div>
-                      <p className="text-[11px] opacity-75">
-                        {financeOverview
-                          ? `${financeOverview.listings.liveCount} live · ${financeOverview.listings.pendingCount} pending (${fmtFinance(financeOverview.listings.pendingValueBdtMinor)})`
-                          : 'Live listings value'}
-                      </p>
-                    </div>
-
-                    <div className="bx-card p-4 space-y-1">
-                      <div className="text-xs font-bold uppercase opacity-70">Gross Merchandise Volume</div>
-                      <div className="text-2xl font-black">
-                        {isInitialFinanceLoad || !financeOverview
-                          ? '…'
-                          : fmtFinance(financeOverview.deals.grossSalesBdtMinor)}
-                      </div>
-                      <p className="text-[11px] opacity-75">
-                        {financeOverview
-                          ? `${financeOverview.deals.settledCount} completed deals (asset price only)`
-                          : 'Completed deals, asset price only'}
-                      </p>
-                    </div>
-
-                    <div className="bx-card p-4 space-y-1">
-                      <div className="text-xs font-bold uppercase opacity-70">Platform Revenue (Earned)</div>
-                      <div className="text-2xl font-black text-emerald-600 dark:text-emerald-400">
-                        {isInitialFinanceLoad || !financeOverview
-                          ? '…'
-                          : fmtFinance(
-                              financeOverview.deals.realizedRevenueBdtMinor +
-                                financeOverview.deals.refundRetainedRevenueBdtMinor
-                            )}
-                      </div>
-                      <p className="text-[11px] opacity-75">
-                        {financeOverview
-                          ? `Settled fees (${fmtFinance(financeOverview.deals.realizedRevenueBdtMinor)}) + dispute retained (${fmtFinance(financeOverview.deals.refundRetainedRevenueBdtMinor)})`
-                          : 'Settled commission + retained dispute fees'}
-                      </p>
-                    </div>
-
-                    <div className="bx-card p-4 space-y-1">
-                      <div className="text-xs font-bold uppercase opacity-70">Projected Revenue</div>
-                      <div className="text-2xl font-black text-[#FF6500]">
-                        {isInitialFinanceLoad || !financeOverview
-                          ? '…'
-                          : fmtFinance(financeOverview.deals.expectedRevenueBdtMinor)}
-                      </div>
-                      <p className="text-[11px] opacity-75">
-                        {financeOverview
-                          ? `Commission on ${financeOverview.deals.heldCount} funded deals still in escrow`
-                          : 'Commission on funded deals still in escrow'}
-                      </p>
-                    </div>
-
-                    <div className="bx-card p-4 space-y-1">
-                      <div className="text-xs font-bold uppercase opacity-70">Seller Payouts Released</div>
-                      <div className="text-2xl font-black">
-                        {isInitialFinanceLoad || !financeOverview
-                          ? '…'
-                          : fmtFinance(financeOverview.deals.sellerPayoutsReleasedBdtMinor)}
-                      </div>
-                      <p className="text-[11px] opacity-75">
-                        {financeOverview
-                          ? `Across ${financeOverview.deals.settledCount} settled deals`
-                          : 'Net payouts credited to sellers'}
-                      </p>
-                    </div>
-
-                    <div className="bx-card p-4 space-y-1">
-                      <div className="text-xs font-bold uppercase opacity-70">Funds in Escrow</div>
-                      <div className="text-2xl font-black">
-                        {isInitialFinanceLoad || !financeOverview ? '…' : fmtFinance(escrowHeldMinor)}
-                      </div>
-                      <p className="text-[11px] opacity-75">
-                        {financeOverview
-                          ? `${financeOverview.deals.heldCount} active funded deals in escrow`
-                          : 'Buyer funds currently held in escrow'}
-                      </p>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="space-y-3">
-                  <h2 className="text-sm font-black uppercase tracking-wide">User Balances &amp; Liabilities</h2>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 tabular-nums">
-                    <div className="bx-card p-4 space-y-1">
-                      <div className="text-xs font-bold uppercase opacity-70">Available User Balance</div>
-                      <div className="text-2xl font-black">
-                        {isInitialFinanceLoad || !financeOverview
-                          ? '…'
-                          : fmtFinance(availableUserBalanceMinor)}
-                      </div>
-                      <p className="text-[11px] opacity-75">
-                        {financeOverview
-                          ? `${financeOverview.users.usersWithBalance} of ${financeOverview.users.totalUsers} users hold a withdrawable balance`
-                          : 'Withdrawable user wallet balances'}
-                      </p>
-                    </div>
-
-                    <div className="bx-card p-4 space-y-1">
-                      <div className="text-xs font-bold uppercase opacity-70">Pending Seller Earnings</div>
-                      <div className="text-2xl font-black">
-                        {isInitialFinanceLoad || !financeOverview
-                          ? '…'
-                          : fmtFinance(financeOverview.deals.pendingSellerEarningsBdtMinor)}
-                      </div>
-                      <p className="text-[11px] opacity-75">
-                        Seller share of deals still in security period
-                      </p>
-                    </div>
-
-                    <div className="bx-card p-4 space-y-1">
-                      <div className="text-xs font-bold uppercase opacity-70">Locked in Withdrawals</div>
-                      <div className="text-2xl font-black">
-                        {isInitialFinanceLoad || !financeOverview
-                          ? '…'
-                          : fmtFinance(lockedInWithdrawalsMinor)}
-                      </div>
-                      <p className="text-[11px] opacity-75">
-                        {financeOverview
-                          ? `${financeOverview.withdrawals.pendingCount} pending requests (${fmtFinance(financeOverview.withdrawals.pendingBdtMinor)})`
-                          : 'Reserved for pending withdrawal requests'}
-                      </p>
-                    </div>
-
-                    <div className="bx-card p-4 space-y-1">
-                      <div className="text-xs font-bold uppercase opacity-70">Payable if All Withdraw</div>
-                      <div className="text-2xl font-black">
-                        {isInitialFinanceLoad || !financeOverview
-                          ? '…'
-                          : fmtFinance(payableIfAllWithdrawMinor)}
-                      </div>
-                      <p className="text-[11px] opacity-75">
-                        Available balance + locked withdrawal holds
-                      </p>
-                    </div>
-
-                    <div className="bx-card p-4 space-y-1">
-                      <div className="text-xs font-bold uppercase opacity-70">Total Platform Obligations</div>
-                      <div className="text-2xl font-black">
-                        {isInitialFinanceLoad || !financeOverview
-                          ? '…'
-                          : fmtFinance(totalPlatformObligationsMinor)}
-                      </div>
-                      <p className="text-[11px] opacity-75">
-                        Minimum amount to keep in reserve
-                      </p>
-                    </div>
-
-                    <div className="bx-card p-4 space-y-1">
-                      <div className="text-xs font-bold uppercase opacity-70">Estimated Surplus</div>
-                      <div
-                        className={`text-2xl font-black ${
-                          estimatedSurplusMinor < 0
-                            ? 'text-red-600 dark:text-red-400'
-                            : 'text-emerald-600 dark:text-emerald-400'
-                        }`}
-                      >
-                        {isInitialFinanceLoad || !financeOverview ? '…' : fmtFinance(estimatedSurplusMinor)}
-                      </div>
-                      <p className="text-[11px] opacity-75">
-                        {financeOverview
-                          ? `estimate only · Deposits (${fmtFinance(financeOverview.deposits.approvedBdtMinor)}) − Paid (${fmtFinance(financeOverview.withdrawals.paidBdtMinor)}) − Obligations`
-                          : 'estimate only'}
-                      </p>
-                    </div>
-                  </div>
-                </div>
-
-                <DismissibleNotice id="overview-policy" className="bx-card p-5 space-y-3">
-                  <h2 className="text-sm font-black uppercase">Active Fee, Dispute Refund &amp; Security Timer Policy</h2>
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs font-bold">
-                    <div className="p-3 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)]">
-                      Buyer Fee: {settings.buyerFeeEnabled ? `${settings.buyerFeePct}%` : 'Disabled (0%)'} · Dispute Refund: 100% Bid + Refundable Fee (3% Platform Retained)
-                    </div>
-                    <div className="p-3 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)]">
-                      Seller Commission: {settings.sellerFeeEnabled ? `${settings.sellerFeePct}%` : 'Disabled (0%)'}
-                    </div>
-                    <div className="p-3 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)]">
-                      Security Timers: YouTube {getProtectionDurationHours('youtube', settings)}h (7d) · Facebook &amp; Standard {getProtectionDurationHours('facebook', settings)}h
-                    </div>
-                  </div>
-                </DismissibleNotice>
-              </div>
-            );
-          })()}
+          {section === 'overview' && (
+            <AdminOverviewSection
+              settings={settings}
+              financeOverview={financeOverview}
+              financeLoading={financeLoading}
+              financeError={financeError}
+              settlingExpiredDeals={settlingExpiredDeals}
+              pendingListingsCount={pendingListingsCount}
+              pendingNidsCount={pendingNidsCount}
+              pendingDepositsCount={pendingDepositsCount}
+              pendingWithdrawalsCount={pendingWithdrawalsCount}
+              reportedDealsCount={reportedDealsCount}
+              readyToSettleDealsCount={readyToSettleDealsCount}
+              onRefreshFinance={() => void fetchFinanceOverview(true)}
+              onSettleAllExpiredDeals={() => void handleSettleAllExpiredDeals()}
+              onNavigateSection={(sec) => setSection(sec)}
+              onFlash={onFlash}
+            />
+          )}
 
           {/* 1B. ALL USERS MANAGEMENT DIRECTORY */}
           {section === 'users' && (
@@ -3248,6 +3370,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               displayCurrency={displayCurrency}
               usdToBdtRate={settings.usdToBdtRate}
               onOpenModerationTab={() => setSection('trust_safety')}
+              onOpenPublicProfile={onOpenPublicProfile}
               onFlash={onFlash}
             />
           )}
@@ -3255,7 +3378,82 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           {/* 2. LISTING MODERATION & VERIFICATION WORKBENCH */}
           {section === 'moderation' && (
             <div className="space-y-5">
-              <h1 className="text-xl font-black">Listing Moderation & Monetization Evidence Workbench</h1>
+              <div className="bx-card p-5 space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div>
+                    <h1 className="text-xl font-black">Listing Moderation &amp; Verification Queues</h1>
+                    <p className="text-xs opacity-75 mt-0.5">
+                      Review pending submissions, audit live approved listings, and inspect rejected/suspended items by status.
+                    </p>
+                  </div>
+                </div>
+
+                {!selectedModerationListing && (
+                  <>
+                    <div className="flex flex-wrap gap-1.5" role="tablist" aria-label="Listing Status Sections">
+                      {(
+                        [
+                          { id: 'pending', label: `Pending (${listingQueue.counts.pending})` },
+                          { id: 'approved', label: `Approved / Live (${listingQueue.counts.approved})` },
+                          { id: 'rejected', label: `Rejected (${listingQueue.counts.rejected})` },
+                          { id: 'other', label: `Other / Suspended (${listingQueue.counts.other})` },
+                        ] as { id: AdminListingBucket; label: string }[]
+                      ).map((tab) => (
+                        <button
+                          key={tab.id}
+                          type="button"
+                          role="tab"
+                          aria-selected={listingBucket === tab.id}
+                          onClick={() => {
+                            setListingBucket(tab.id);
+                            setListingPage(1);
+                          }}
+                          className={`px-3 py-1.5 text-xs font-extrabold border transition-colors whitespace-nowrap shrink-0 ${
+                            listingBucket === tab.id
+                              ? 'bg-[#FF6500] text-white border-[#191919]'
+                              : 'bg-[var(--bx-surface-alt)] border-[var(--bx-border)] hover:bg-[var(--bx-surface)]'
+                          }`}
+                        >
+                          {tab.label}
+                        </button>
+                      ))}
+                    </div>
+
+                    <div className="flex flex-col sm:flex-row gap-2">
+                      <div className="relative flex-1">
+                        <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 opacity-60" />
+                        <input
+                          type="search"
+                          value={listingSearch}
+                          onChange={(e) => {
+                            setListingSearch(e.target.value);
+                            setListingPage(1);
+                          }}
+                          placeholder="Search title, seller name, @username, ID…"
+                          aria-label="Search admin listings"
+                          className="bx-input w-full pl-8 pr-3 py-2 text-xs"
+                        />
+                      </div>
+                      <select
+                        value={listingPlatformFilter}
+                        onChange={(e) => {
+                          setListingPlatformFilter(e.target.value as PlatformId | 'all');
+                          setListingPage(1);
+                        }}
+                        aria-label="Filter listings by category"
+                        className="bx-input px-3 py-2 text-xs font-bold sm:w-48"
+                      >
+                        <option value="all">All Categories</option>
+                        {PLATFORM_LIST.map((p) => (
+                          <option key={p} value={p}>
+                            {PLATFORM_CATALOG[p].name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </>
+                )}
+              </div>
 
               {selectedModerationListing ? (
                 <div className="bx-card p-6 space-y-5">
@@ -3265,6 +3463,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                         {selectedModerationListing.platform} · {selectedModerationListing.subcategory}
                       </span>
                       <h2 className="text-lg font-black">{selectedModerationListing.title}</h2>
+                      <div className="text-xs opacity-80 mt-0.5">
+                        Seller:{' '}
+                        <UserProfileLink
+                          uid={selectedModerationListing.sellerId}
+                          name={selectedModerationListing.sellerName || selectedModerationListing.sellerUsername}
+                          username={selectedModerationListing.sellerUsername}
+                          onOpenProfile={onOpenPublicProfile}
+                          className="font-extrabold"
+                        />
+                      </div>
                     </div>
                     <button
                       type="button"
@@ -3431,8 +3639,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     {selectedModerationListing.status === 'suspended' ? (
                       <button
                         type="button"
+                        disabled={busyItemKey === `listing:${selectedModerationListing.id}`}
                         onClick={() => handleRestoreSuspendedListing(selectedModerationListing)}
-                        className="bx-btn bx-btn-primary px-5 py-2.5 text-xs font-extrabold inline-flex items-center justify-center gap-1.5"
+                        className="bx-btn bx-btn-primary px-5 py-2.5 text-xs font-extrabold inline-flex items-center justify-center gap-1.5 disabled:opacity-60"
                       >
                         <Check className="w-4 h-4" />
                         Restore Suspended Listing to Live
@@ -3440,11 +3649,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     ) : (
                       <button
                         type="button"
+                        disabled={busyItemKey === `listing:${selectedModerationListing.id}`}
                         onClick={() => handleApproveListing(selectedModerationListing)}
-                        className="bx-btn bx-btn-primary px-5 py-2.5 text-xs font-extrabold inline-flex items-center justify-center gap-1.5"
+                        className="bx-btn bx-btn-primary px-5 py-2.5 text-xs font-extrabold inline-flex items-center justify-center gap-1.5 disabled:opacity-60"
                       >
                         <Check className="w-4 h-4" />
-                        Approve & Publish Listing
+                        Approve &amp; Publish Listing
                       </button>
                     )}
                     <div className="flex-1 flex flex-wrap gap-2">
@@ -3458,55 +3668,104 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       {selectedModerationListing.status === 'active' && (
                         <button
                           type="button"
+                          disabled={busyItemKey === `listing:${selectedModerationListing.id}`}
                           onClick={() => handleSuspendListing(selectedModerationListing)}
-                          className="bx-btn px-4 py-2 text-xs font-extrabold bg-amber-600 text-white border-2 border-[#191919]"
+                          className="bx-btn px-4 py-2 text-xs font-extrabold bg-amber-600 text-white border-2 border-[#191919] disabled:opacity-60"
                         >
                           Suspend Listing
                         </button>
                       )}
                       <button
                         type="button"
+                        disabled={busyItemKey === `listing:${selectedModerationListing.id}`}
                         onClick={() => handleRejectListing(selectedModerationListing)}
-                        className="bx-btn px-4 py-2 text-xs font-extrabold bg-red-600 text-white border-2 border-[#191919]"
+                        className="bx-btn px-4 py-2 text-xs font-extrabold bg-red-600 text-white border-2 border-[#191919] disabled:opacity-60"
                       >
                         Reject
                       </button>
                     </div>
                   </div>
                 </div>
-              ) : allListings.length === 0 ? (
+              ) : paginatedListings.items.length === 0 ? (
                 <div className="bx-card p-8 text-center text-sm font-bold opacity-75">
-                  No listings submitted yet.
+                  No listings match this status section or search query.
                 </div>
               ) : (
                 <div className="space-y-3">
-                  {allListings.map((l) => {
+                  {paginatedListings.items.map((l) => {
                     const badge = getListingStatusBadgeMeta(l.status);
                     return (
                       <div key={l.id} className="bx-card p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                        <div>
-                          <div className="flex items-center gap-2">
+                        <div className="space-y-1 min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
                             <span className="text-[11px] font-black uppercase px-2 py-0.5 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)]">
                               {badge.label}
                             </span>
                             <span className="text-xs font-bold opacity-75">{l.platform.toUpperCase()}</span>
+                            {l.subcategory && (
+                              <span className="text-[11px] opacity-65">· {l.subcategory}</span>
+                            )}
                           </div>
-                          <h3 className="font-black text-sm mt-1">{l.title}</h3>
-                          <p className="text-xs opacity-75">
-                            Seller: @{l.sellerUsername} · {formatMoneyFromMinor(l.priceMinor, displayCurrency, l.currency, settings.usdToBdtRate)}
+                          <h3 className="font-black text-sm truncate">{l.title}</h3>
+                          <p className="text-xs opacity-80">
+                            Seller:{' '}
+                            <UserProfileLink
+                              uid={l.sellerId}
+                              name={l.sellerName || `@${l.sellerUsername}`}
+                              username={l.sellerUsername}
+                              onOpenProfile={onOpenPublicProfile}
+                              className="font-bold"
+                            />{' '}
+                            · {formatMoneyFromMinor(l.priceMinor, displayCurrency, l.currency, settings.usdToBdtRate)}
                           </p>
+                          {l.rejectionReason && (
+                            <p className="text-[11px] text-red-600 font-bold">
+                              Reason: {l.rejectionReason}
+                            </p>
+                          )}
                         </div>
                         <button
                           type="button"
                           onClick={() => setSelectedListingId(l.id)}
-                          className="bx-btn bx-btn-primary px-4 py-2 text-xs font-extrabold inline-flex items-center gap-1.5"
+                          className="bx-btn bx-btn-primary px-4 py-2 text-xs font-extrabold inline-flex items-center gap-1.5 shrink-0"
                         >
                           <Eye className="w-3.5 h-3.5" />
-                          Inspect & Moderate
+                          Inspect &amp; Moderate
                         </button>
                       </div>
                     );
                   })}
+
+                  {paginatedListings.totalPages > 1 && (
+                    <div className="bx-card p-3 flex items-center justify-between text-xs font-bold">
+                      <span>
+                        Showing {paginatedListings.startIndex}–{paginatedListings.endIndex} of {paginatedListings.totalItems}
+                      </span>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          disabled={paginatedListings.page <= 1}
+                          onClick={() => setListingPage((p) => Math.max(1, p - 1))}
+                          className="bx-btn bx-btn-ghost px-2.5 py-1 inline-flex items-center gap-1 disabled:opacity-40"
+                        >
+                          <ChevronLeft className="w-3.5 h-3.5" />
+                          Prev
+                        </button>
+                        <span>
+                          Page {paginatedListings.page} / {paginatedListings.totalPages}
+                        </span>
+                        <button
+                          type="button"
+                          disabled={paginatedListings.page >= paginatedListings.totalPages}
+                          onClick={() => setListingPage((p) => Math.min(paginatedListings.totalPages, p + 1))}
+                          className="bx-btn bx-btn-ghost px-2.5 py-1 inline-flex items-center gap-1 disabled:opacity-40"
+                        >
+                          Next
+                          <ChevronRight className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -3515,50 +3774,161 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           {/* 3. NID IDENTITY VERIFICATIONS */}
           {section === 'nid' && (
             <div className="space-y-4">
-              <h1 className="text-xl font-black">Private NID Front & Back Verification Queue</h1>
-              {nidSubmissions.length === 0 ? (
+              <div className="bx-card p-5 space-y-4">
+                <h1 className="text-xl font-black">Private NID Front &amp; Back Verification Queue</h1>
+                <div className="flex flex-wrap gap-1.5" role="tablist" aria-label="NID Status Sections">
+                  {(
+                    [
+                      { id: 'pending_review', label: `Pending Review (${nidQueue.counts.pending_review})` },
+                      { id: 'verified', label: `Verified (${nidQueue.counts.verified})` },
+                      { id: 'rejected', label: `Rejected (${nidQueue.counts.rejected})` },
+                    ] as { id: AdminNidBucket; label: string }[]
+                  ).map((tab) => (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      role="tab"
+                      aria-selected={nidBucket === tab.id}
+                      onClick={() => {
+                        setNidBucket(tab.id);
+                        setNidPage(1);
+                      }}
+                      className={`px-3 py-1.5 text-xs font-extrabold border transition-colors whitespace-nowrap shrink-0 ${
+                        nidBucket === tab.id
+                          ? 'bg-[#FF6500] text-white border-[#191919]'
+                          : 'bg-[var(--bx-surface-alt)] border-[var(--bx-border)] hover:bg-[var(--bx-surface)]'
+                      }`}
+                    >
+                      {tab.label}
+                    </button>
+                  ))}
+                </div>
+                <div className="relative">
+                  <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 opacity-60" />
+                  <input
+                    type="search"
+                    value={nidSearch}
+                    onChange={(e) => {
+                      setNidSearch(e.target.value);
+                      setNidPage(1);
+                    }}
+                    placeholder="Search user UID, reviewer, rejection note…"
+                    aria-label="Search NID submissions"
+                    className="bx-input w-full pl-8 pr-3 py-2 text-xs"
+                  />
+                </div>
+              </div>
+
+              {paginatedNids.items.length === 0 ? (
                 <div className="bx-card p-8 text-center text-sm font-bold opacity-75">
-                  No NID identity verification submissions yet.
+                  No NID identity verification submissions in this section.
                 </div>
               ) : (
-                nidSubmissions.map((item) => (
-                  <div key={item.uid} className="bx-card p-5 space-y-4">
-                    <div className="flex items-center justify-between">
-                      <div className="text-sm font-black">User UID: {item.uid}</div>
-                      <span className="text-xs font-extrabold uppercase px-2.5 py-1 border border-[var(--bx-border)]">
-                        {item.status}
+                <div className="space-y-4">
+                  {paginatedNids.items.map((item) => {
+                    const isBusy = busyItemKey === `nid:${item.uid}`;
+                    return (
+                      <div key={item.uid} className="bx-card p-5 space-y-4">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="text-sm font-black">
+                            Member:{' '}
+                            <UserProfileLink
+                              uid={item.uid}
+                              name={item.uid}
+                              onOpenProfile={onOpenPublicProfile}
+                              className="font-mono text-xs"
+                            />
+                          </div>
+                          <span className="text-xs font-extrabold uppercase px-2.5 py-1 border border-[var(--bx-border)]">
+                            {item.status}
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                          <div>
+                            <div className="text-xs font-bold mb-1">Front Document</div>
+                            <img src={item.frontImageData} alt="NID Front" className="w-full h-44 object-contain border border-[var(--bx-border)] bg-black/5" />
+                          </div>
+                          <div>
+                            <div className="text-xs font-bold mb-1">Back Document</div>
+                            <img src={item.backImageData} alt="NID Back" className="w-full h-44 object-contain border border-[var(--bx-border)] bg-black/5" />
+                          </div>
+                        </div>
+                        {item.rejectionReason && (
+                          <p className="text-xs font-bold text-red-600">
+                            Rejection Reason: {item.rejectionReason}
+                          </p>
+                        )}
+                        {item.status === 'pending_review' && (
+                          <div className="flex flex-col sm:flex-row flex-wrap gap-2 pt-1">
+                            <input
+                              type="text"
+                              value={nidRejectReasons[item.uid] || ''}
+                              onChange={(e) =>
+                                setNidRejectReasons((prev) => ({ ...prev, [item.uid]: e.target.value }))
+                              }
+                              placeholder="Optional rejection reason…"
+                              aria-label={`NID rejection reason for ${item.uid}`}
+                              className="bx-input flex-1 min-w-[200px] px-3 py-2 text-xs"
+                            />
+                            <button
+                              type="button"
+                              disabled={isBusy}
+                              onClick={() => handleDecisionNid(item.uid, true)}
+                              className="bx-btn bx-btn-primary px-4 py-2 text-xs font-extrabold disabled:opacity-60"
+                            >
+                              {isBusy ? 'Processing…' : 'Approve NID & Grant Badge'}
+                            </button>
+                            <button
+                              type="button"
+                              disabled={isBusy}
+                              onClick={() =>
+                                handleDecisionNid(
+                                  item.uid,
+                                  false,
+                                  nidRejectReasons[item.uid] || 'Document photo blurry or incomplete.'
+                                )
+                              }
+                              className="bx-btn px-4 py-2 text-xs font-extrabold bg-red-600 text-white border-2 border-[#191919] disabled:opacity-60"
+                            >
+                              Reject Submission
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+
+                  {paginatedNids.totalPages > 1 && (
+                    <div className="bx-card p-3 flex items-center justify-between text-xs font-bold">
+                      <span>
+                        Showing {paginatedNids.startIndex}–{paginatedNids.endIndex} of {paginatedNids.totalItems}
                       </span>
-                    </div>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                      <div>
-                        <div className="text-xs font-bold mb-1">Front Document</div>
-                        <img src={item.frontImageData} alt="NID Front" className="w-full h-44 object-contain border border-[var(--bx-border)] bg-black/5" />
-                      </div>
-                      <div>
-                        <div className="text-xs font-bold mb-1">Back Document</div>
-                        <img src={item.backImageData} alt="NID Back" className="w-full h-44 object-contain border border-[var(--bx-border)] bg-black/5" />
-                      </div>
-                    </div>
-                    {item.status === 'pending_review' && (
-                      <div className="flex flex-wrap gap-2">
+                      <div className="flex items-center gap-2">
                         <button
                           type="button"
-                          onClick={() => handleDecisionNid(item.uid, true)}
-                          className="bx-btn bx-btn-primary px-4 py-2 text-xs font-extrabold"
+                          disabled={paginatedNids.page <= 1}
+                          onClick={() => setNidPage((p) => Math.max(1, p - 1))}
+                          className="bx-btn bx-btn-ghost px-2.5 py-1 inline-flex items-center gap-1 disabled:opacity-40"
                         >
-                          Approve NID & Grant Badge
+                          <ChevronLeft className="w-3.5 h-3.5" />
+                          Prev
                         </button>
+                        <span>
+                          Page {paginatedNids.page} / {paginatedNids.totalPages}
+                        </span>
                         <button
                           type="button"
-                          onClick={() => handleDecisionNid(item.uid, false, 'Document photo blurry or incomplete.')}
-                          className="bx-btn px-4 py-2 text-xs font-extrabold bg-red-600 text-white border-2 border-[#191919]"
+                          disabled={paginatedNids.page >= paginatedNids.totalPages}
+                          onClick={() => setNidPage((p) => Math.min(paginatedNids.totalPages, p + 1))}
+                          className="bx-btn bx-btn-ghost px-2.5 py-1 inline-flex items-center gap-1 disabled:opacity-40"
                         >
-                          Reject Submission
+                          Next
+                          <ChevronRight className="w-3.5 h-3.5" />
                         </button>
                       </div>
-                    )}
-                  </div>
-                ))
+                    </div>
+                  )}
+                </div>
               )}
             </div>
           )}
@@ -3566,55 +3936,159 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           {/* 4. MANUAL DEPOSIT REQUESTS */}
           {section === 'deposits' && (
             <div className="space-y-4">
-              <h1 className="text-xl font-black">Manual Wallet Deposit Requests (bKash / Nagad / Rocket)</h1>
-              {deposits.length === 0 ? (
+              <div className="bx-card p-5 space-y-4">
+                <h1 className="text-xl font-black">Manual Wallet Deposit Requests (bKash / Nagad / Rocket)</h1>
+                <div className="flex flex-wrap gap-1.5" role="tablist" aria-label="Deposit Status Sections">
+                  {(
+                    [
+                      { id: 'pending', label: `Pending (${depositQueue.counts.pending})` },
+                      { id: 'approved', label: `Approved (${depositQueue.counts.approved})` },
+                      { id: 'rejected', label: `Rejected (${depositQueue.counts.rejected})` },
+                    ] as { id: AdminDepositBucket; label: string }[]
+                  ).map((tab) => (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      role="tab"
+                      aria-selected={depositBucket === tab.id}
+                      onClick={() => {
+                        setDepositBucket(tab.id);
+                        setDepositPage(1);
+                      }}
+                      className={`px-3 py-1.5 text-xs font-extrabold border transition-colors whitespace-nowrap shrink-0 ${
+                        depositBucket === tab.id
+                          ? 'bg-[#FF6500] text-white border-[#191919]'
+                          : 'bg-[var(--bx-surface-alt)] border-[var(--bx-border)] hover:bg-[var(--bx-surface)]'
+                      }`}
+                    >
+                      {tab.label}
+                    </button>
+                  ))}
+                </div>
+                <div className="relative">
+                  <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 opacity-60" />
+                  <input
+                    type="search"
+                    value={depositSearch}
+                    onChange={(e) => {
+                      setDepositSearch(e.target.value);
+                      setDepositPage(1);
+                    }}
+                    placeholder="Search user name, UID, sender number, TrxID…"
+                    aria-label="Search deposits"
+                    className="bx-input w-full pl-8 pr-3 py-2 text-xs"
+                  />
+                </div>
+              </div>
+
+              {paginatedDeposits.items.length === 0 ? (
                 <div className="bx-card p-8 text-center text-sm font-bold opacity-75">
-                  No manual deposit requests submitted yet.
+                  No manual deposit requests in this section.
                 </div>
               ) : (
-                deposits.map((dep) => (
-                  <div key={dep.id} className="bx-card p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                    <div className="space-y-1">
+                <div className="space-y-4">
+                  {paginatedDeposits.items.map((dep) => {
+                    const isBusy = busyItemKey === `dep:${dep.id}`;
+                    return (
+                      <div key={dep.id} className="bx-card p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                        <div className="space-y-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="text-xs font-black uppercase px-2 py-0.5 bg-[#FFD400] text-[#191919] border border-[#191919]">
+                              {dep.method}
+                            </span>
+                            <span className="font-black text-base">
+                              {formatMoneyFromMinor(dep.amountMinor, 'BDT', 'BDT')}
+                            </span>
+                            <span className="text-xs font-bold uppercase opacity-75">({dep.status})</span>
+                          </div>
+                          <p className="text-xs font-bold">
+                            User:{' '}
+                            <UserProfileLink
+                              uid={dep.userId}
+                              name={dep.userName}
+                              onOpenProfile={onOpenPublicProfile}
+                              className="font-extrabold"
+                            />{' '}
+                            · Sender: {dep.senderNumber} · TrxID: {dep.transactionId}
+                          </p>
+                          {dep.rejectionReason && (
+                            <p className="text-xs font-bold text-red-600">Reason: {dep.rejectionReason}</p>
+                          )}
+                          {dep.screenshotData && (
+                            <img
+                              src={dep.screenshotData}
+                              alt="Payment proof"
+                              className="w-40 h-24 object-cover border border-[var(--bx-border)] mt-2"
+                            />
+                          )}
+                        </div>
+                        {dep.status === 'pending' && (
+                          <div className="flex flex-col sm:flex-row flex-wrap gap-2 lg:max-w-md w-full lg:justify-end">
+                            <input
+                              type="text"
+                              value={depositRejectReasons[dep.id] || ''}
+                              onChange={(e) =>
+                                setDepositRejectReasons((prev) => ({ ...prev, [dep.id]: e.target.value }))
+                              }
+                              placeholder="Optional rejection reason…"
+                              aria-label={`Rejection reason for deposit ${dep.transactionId}`}
+                              className="bx-input flex-1 min-w-[160px] px-3 py-2 text-xs"
+                            />
+                            <button
+                              type="button"
+                              disabled={isBusy}
+                              onClick={() => handleApproveDeposit(dep)}
+                              className="bx-btn bx-btn-primary px-4 py-2 text-xs font-extrabold disabled:opacity-60"
+                            >
+                              {isBusy ? 'Processing…' : 'Approve & Credit'}
+                            </button>
+                            <button
+                              type="button"
+                              disabled={isBusy}
+                              onClick={() =>
+                                handleRejectDeposit(dep, depositRejectReasons[dep.id] || 'Unmatched TrxID')
+                              }
+                              className="bx-btn px-4 py-2 text-xs font-extrabold bg-red-600 text-white border-2 border-[#191919] disabled:opacity-60"
+                            >
+                              Reject
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+
+                  {paginatedDeposits.totalPages > 1 && (
+                    <div className="bx-card p-3 flex items-center justify-between text-xs font-bold">
+                      <span>
+                        Showing {paginatedDeposits.startIndex}–{paginatedDeposits.endIndex} of {paginatedDeposits.totalItems}
+                      </span>
                       <div className="flex items-center gap-2">
-                        <span className="text-xs font-black uppercase px-2 py-0.5 bg-[#FFD400] text-[#191919] border border-[#191919]">
-                          {dep.method}
+                        <button
+                          type="button"
+                          disabled={paginatedDeposits.page <= 1}
+                          onClick={() => setDepositPage((p) => Math.max(1, p - 1))}
+                          className="bx-btn bx-btn-ghost px-2.5 py-1 inline-flex items-center gap-1 disabled:opacity-40"
+                        >
+                          <ChevronLeft className="w-3.5 h-3.5" />
+                          Prev
+                        </button>
+                        <span>
+                          Page {paginatedDeposits.page} / {paginatedDeposits.totalPages}
                         </span>
-                        <span className="font-black text-base">
-                          {formatMoneyFromMinor(dep.amountMinor, 'BDT', 'BDT')}
-                        </span>
-                        <span className="text-xs font-bold uppercase opacity-75">({dep.status})</span>
+                        <button
+                          type="button"
+                          disabled={paginatedDeposits.page >= paginatedDeposits.totalPages}
+                          onClick={() => setDepositPage((p) => Math.min(paginatedDeposits.totalPages, p + 1))}
+                          className="bx-btn bx-btn-ghost px-2.5 py-1 inline-flex items-center gap-1 disabled:opacity-40"
+                        >
+                          Next
+                          <ChevronRight className="w-3.5 h-3.5" />
+                        </button>
                       </div>
-                      <p className="text-xs font-bold">
-                        User: {dep.userName} · Sender: {dep.senderNumber} · TrxID: {dep.transactionId}
-                      </p>
-                      {dep.screenshotData && (
-                        <img
-                          src={dep.screenshotData}
-                          alt="Payment proof"
-                          className="w-40 h-24 object-cover border border-[var(--bx-border)] mt-2"
-                        />
-                      )}
                     </div>
-                    {dep.status === 'pending' && (
-                      <div className="flex gap-2">
-                        <button
-                          type="button"
-                          onClick={() => handleApproveDeposit(dep)}
-                          className="bx-btn bx-btn-primary px-4 py-2 text-xs font-extrabold"
-                        >
-                          Approve & Credit
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleRejectDeposit(dep, 'Unmatched TrxID')}
-                          className="bx-btn px-4 py-2 text-xs font-extrabold bg-red-600 text-white border-2 border-[#191919]"
-                        >
-                          Reject
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                ))
+                  )}
+                </div>
               )}
             </div>
           )}
@@ -3622,48 +4096,175 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           {/* 5. WITHDRAWAL REQUESTS */}
           {section === 'withdrawals' && (
             <div className="space-y-4">
-              <h1 className="text-xl font-black">Seller & Wallet Withdrawal Queue</h1>
-              {withdrawals.length === 0 ? (
+              <div className="bx-card p-5 space-y-4">
+                <h1 className="text-xl font-black">Seller &amp; Wallet Withdrawal Queue</h1>
+                <div className="flex flex-wrap gap-1.5" role="tablist" aria-label="Withdrawal Status Sections">
+                  {(
+                    [
+                      { id: 'pending', label: `Pending (${withdrawalQueue.counts.pending})` },
+                      { id: 'paid', label: `Paid (${withdrawalQueue.counts.paid})` },
+                      { id: 'rejected', label: `Rejected (${withdrawalQueue.counts.rejected})` },
+                    ] as { id: AdminWithdrawalBucket; label: string }[]
+                  ).map((tab) => (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      role="tab"
+                      aria-selected={withdrawalBucket === tab.id}
+                      onClick={() => {
+                        setWithdrawalBucket(tab.id);
+                        setWithdrawalPage(1);
+                      }}
+                      className={`px-3 py-1.5 text-xs font-extrabold border transition-colors whitespace-nowrap shrink-0 ${
+                        withdrawalBucket === tab.id
+                          ? 'bg-[#FF6500] text-white border-[#191919]'
+                          : 'bg-[var(--bx-surface-alt)] border-[var(--bx-border)] hover:bg-[var(--bx-surface)]'
+                      }`}
+                    >
+                      {tab.label}
+                    </button>
+                  ))}
+                </div>
+                <div className="relative">
+                  <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 opacity-60" />
+                  <input
+                    type="search"
+                    value={withdrawalSearch}
+                    onChange={(e) => {
+                      setWithdrawalSearch(e.target.value);
+                      setWithdrawalPage(1);
+                    }}
+                    placeholder="Search member name, UID, payout account, reference ID…"
+                    aria-label="Search withdrawals"
+                    className="bx-input w-full pl-8 pr-3 py-2 text-xs"
+                  />
+                </div>
+              </div>
+
+              {paginatedWithdrawals.items.length === 0 ? (
                 <div className="bx-card p-8 text-center text-sm font-bold opacity-75">
-                  No withdrawal requests submitted yet.
+                  No withdrawal requests in this section.
                 </div>
               ) : (
-                withdrawals.map((wd) => (
-                  <div key={wd.id} className="bx-card p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                    <div className="space-y-1">
+                <div className="space-y-4">
+                  {paginatedWithdrawals.items.map((wd) => {
+                    const isBusy = busyItemKey === `wd:${wd.id}`;
+                    return (
+                      <div key={wd.id} className="bx-card p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                        <div className="space-y-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="text-xs font-black uppercase px-2 py-0.5 border border-[var(--bx-border)]">
+                              {wd.method}
+                            </span>
+                            <span className="font-black text-base">
+                              {formatMoneyFromMinor(wd.amountMinor, wd.currency, wd.currency)}
+                            </span>
+                            <span className="text-xs font-bold uppercase opacity-75">({wd.status})</span>
+                          </div>
+                          <p className="text-xs font-bold">
+                            Member:{' '}
+                            <UserProfileLink
+                              uid={wd.userId}
+                              name={wd.userName}
+                              onOpenProfile={onOpenPublicProfile}
+                              className="font-extrabold"
+                            />{' '}
+                            · Destination: {wd.payoutAccount}
+                          </p>
+                          {wd.referenceId && (
+                            <p className="text-xs font-mono text-emerald-700 dark:text-emerald-400 font-bold">
+                              Payout Reference: {wd.referenceId}
+                            </p>
+                          )}
+                          {wd.rejectionReason && (
+                            <p className="text-xs font-bold text-red-600">
+                              Rejection Reason: {wd.rejectionReason}
+                            </p>
+                          )}
+                        </div>
+                        {wd.status === 'pending' && (
+                          <div className="flex flex-col sm:flex-row flex-wrap gap-2 lg:max-w-lg w-full lg:justify-end">
+                            <input
+                              type="text"
+                              value={wdRefInputs[wd.id] || ''}
+                              onChange={(e) =>
+                                setWdRefInputs((prev) => ({ ...prev, [wd.id]: e.target.value }))
+                              }
+                              placeholder="Payout TrxID / Reference…"
+                              aria-label={`Payout reference for ${wd.userName}`}
+                              className="bx-input flex-1 min-w-[140px] px-3 py-2 text-xs"
+                            />
+                            <input
+                              type="text"
+                              value={wdRejectReasons[wd.id] || ''}
+                              onChange={(e) =>
+                                setWdRejectReasons((prev) => ({ ...prev, [wd.id]: e.target.value }))
+                              }
+                              placeholder="Optional rejection reason…"
+                              aria-label={`Rejection reason for withdrawal ${wd.id}`}
+                              className="bx-input flex-1 min-w-[140px] px-3 py-2 text-xs"
+                            />
+                            <button
+                              type="button"
+                              disabled={isBusy}
+                              onClick={() =>
+                                handleProcessWithdrawal(wd, true, wdRefInputs[wd.id] || `PAID-${Date.now()}`)
+                              }
+                              className="bx-btn bx-btn-primary px-4 py-2 text-xs font-extrabold disabled:opacity-60"
+                            >
+                              {isBusy ? 'Processing…' : 'Mark Paid'}
+                            </button>
+                            <button
+                              type="button"
+                              disabled={isBusy}
+                              onClick={() =>
+                                handleProcessWithdrawal(
+                                  wd,
+                                  false,
+                                  wdRejectReasons[wd.id] || 'Payout account unreachable'
+                                )
+                              }
+                              className="bx-btn px-4 py-2 text-xs font-extrabold bg-red-600 text-white border-2 border-[#191919] disabled:opacity-60"
+                            >
+                              Reject &amp; Restore
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+
+                  {paginatedWithdrawals.totalPages > 1 && (
+                    <div className="bx-card p-3 flex items-center justify-between text-xs font-bold">
+                      <span>
+                        Showing {paginatedWithdrawals.startIndex}–{paginatedWithdrawals.endIndex} of {paginatedWithdrawals.totalItems}
+                      </span>
                       <div className="flex items-center gap-2">
-                        <span className="text-xs font-black uppercase px-2 py-0.5 border border-[var(--bx-border)]">
-                          {wd.method}
+                        <button
+                          type="button"
+                          disabled={paginatedWithdrawals.page <= 1}
+                          onClick={() => setWithdrawalPage((p) => Math.max(1, p - 1))}
+                          className="bx-btn bx-btn-ghost px-2.5 py-1 inline-flex items-center gap-1 disabled:opacity-40"
+                        >
+                          <ChevronLeft className="w-3.5 h-3.5" />
+                          Prev
+                        </button>
+                        <span>
+                          Page {paginatedWithdrawals.page} / {paginatedWithdrawals.totalPages}
                         </span>
-                        <span className="font-black text-base">
-                          {formatMoneyFromMinor(wd.amountMinor, wd.currency, wd.currency)}
-                        </span>
-                        <span className="text-xs font-bold uppercase opacity-75">({wd.status})</span>
+                        <button
+                          type="button"
+                          disabled={paginatedWithdrawals.page >= paginatedWithdrawals.totalPages}
+                          onClick={() => setWithdrawalPage((p) => Math.min(paginatedWithdrawals.totalPages, p + 1))}
+                          className="bx-btn bx-btn-ghost px-2.5 py-1 inline-flex items-center gap-1 disabled:opacity-40"
+                        >
+                          Next
+                          <ChevronRight className="w-3.5 h-3.5" />
+                        </button>
                       </div>
-                      <p className="text-xs font-bold">
-                        Member: {wd.userName} · Destination: {wd.payoutAccount}
-                      </p>
                     </div>
-                    {wd.status === 'pending' && (
-                      <div className="flex gap-2">
-                        <button
-                          type="button"
-                          onClick={() => handleProcessWithdrawal(wd, true, `PAID-${Date.now()}`)}
-                          className="bx-btn bx-btn-primary px-4 py-2 text-xs font-extrabold"
-                        >
-                          Mark Paid
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleProcessWithdrawal(wd, false, 'Payout account unreachable')}
-                          className="bx-btn px-4 py-2 text-xs font-extrabold bg-red-600 text-white border-2 border-[#191919]"
-                        >
-                          Reject & Restore
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                ))
+                  )}
+                </div>
               )}
             </div>
           )}
@@ -3674,7 +4275,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               <div className="bx-card p-5 space-y-3">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                   <div>
-                    <h1 className="text-xl font-black">3-Party Deal Room, Transfer Proof & Dispute Review</h1>
+                    <h1 className="text-xl font-black">3-Party Deal Room, Transfer Proof &amp; Dispute Review</h1>
                     <p className="text-xs opacity-80 mt-0.5">
                       Inspect Seller transfer-proof screenshots, Buyer approvals/rejections, immutable security timers (168h YouTube · 40h Standard), and execute atomic escrow settlements or 102%/3% dispute refunds.
                     </p>
@@ -3685,20 +4286,23 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 <div className="flex flex-wrap gap-1.5 pt-1" role="tablist" aria-label="Filter Escrow Deals">
                   {(
                     [
-                      { id: 'all', label: `All (${deals.length})` },
-                      { id: 'reported', label: `Disputed / On Hold (${reportedDealsCount})` },
-                      { id: 'ready_to_settle', label: `Timer Complete (${readyToSettleDealsCount})` },
-                      { id: 'active', label: 'In Progress' },
-                      { id: 'unpaid', label: 'Reserved Unpaid' },
-                      { id: 'finalized', label: 'Settled / Refunded' },
-                    ] as const
+                      { id: 'all', label: `All (${dealQueue.counts.all})` },
+                      { id: 'disputed', label: `Disputed / On Hold (${dealQueue.counts.disputed})` },
+                      { id: 'ready', label: `Timer Complete (${dealQueue.counts.ready})` },
+                      { id: 'active', label: `In Progress (${dealQueue.counts.active})` },
+                      { id: 'unpaid', label: `Reserved Unpaid (${dealQueue.counts.unpaid})` },
+                      { id: 'settled', label: `Settled / Refunded (${dealQueue.counts.settled})` },
+                    ] as { id: AdminDealQueueTab; label: string }[]
                   ).map((f) => (
                     <button
                       key={f.id}
                       type="button"
                       role="tab"
                       aria-selected={dealFilter === f.id}
-                      onClick={() => setDealFilter(f.id)}
+                      onClick={() => {
+                        setDealFilter(f.id);
+                        setDealsPage(1);
+                      }}
                       className={`px-3 py-1.5 text-xs font-extrabold border transition-colors whitespace-nowrap shrink-0 ${
                         dealFilter === f.id
                           ? 'bg-[#FF6500] text-white border-[#191919]'
@@ -3709,14 +4313,29 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     </button>
                   ))}
                 </div>
+
+                <div className="relative">
+                  <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 opacity-60" />
+                  <input
+                    type="search"
+                    value={dealSearch}
+                    onChange={(e) => {
+                      setDealSearch(e.target.value);
+                      setDealsPage(1);
+                    }}
+                    placeholder="Search deal ID, listing title, buyer, seller, category…"
+                    aria-label="Search escrow deals"
+                    className="bx-input w-full pl-8 pr-3 py-2 text-xs"
+                  />
+                </div>
               </div>
 
-              {filteredDeals.length === 0 ? (
+              {paginatedDeals.items.length === 0 ? (
                 <div className="bx-card p-8 text-center text-sm font-bold opacity-75">
-                  No deals match the selected filter.
+                  No deals match the selected filter or search query.
                 </div>
               ) : (
-                filteredDeals.map((dl) => {
+                paginatedDeals.items.map((dl) => {
                   const isExpanded = selectedDeal?.id === dl.id;
                   const expired = dl.originalDeadlineMs > 0 && Date.now() >= dl.originalDeadlineMs;
                   const readyToSettle =
@@ -3764,8 +4383,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
                           <h3 className="font-black text-base">{dl.listingTitle}</h3>
                           <p className="text-xs opacity-85 tabular-nums">
-                            Buyer: <span className="font-bold">{dl.buyerName}</span> ({dl.buyerId.slice(0, 8)}…) · Seller:{' '}
-                            <span className="font-bold">{dl.sellerName}</span> ({dl.sellerId.slice(0, 8)}…) · Agreed Price:{' '}
+                            Buyer:{' '}
+                            <UserProfileLink
+                              uid={dl.buyerId}
+                              name={dl.buyerName}
+                              onOpenProfile={onOpenPublicProfile}
+                              className="font-bold"
+                            />{' '}
+                            ({dl.buyerId.slice(0, 8)}…) · Seller:{' '}
+                            <UserProfileLink
+                              uid={dl.sellerId}
+                              name={dl.sellerName}
+                              onOpenProfile={onOpenPublicProfile}
+                              className="font-bold"
+                            />{' '}
+                            ({dl.sellerId.slice(0, 8)}…) · Agreed Price:{' '}
                             <span className="font-extrabold">
                               {formatMoneyFromMinor(dl.baseAmountMinor, 'BDT', dl.currency)}
                             </span>{' '}
@@ -4298,437 +4930,104 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   );
                 })
               )}
+
+              {paginatedDeals.totalPages > 1 && (
+                <div className="bx-card p-3 flex items-center justify-between text-xs font-bold">
+                  <span>
+                    Showing {paginatedDeals.startIndex}–{paginatedDeals.endIndex} of {paginatedDeals.totalItems}
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={paginatedDeals.page <= 1}
+                      onClick={() => setDealsPage((p) => Math.max(1, p - 1))}
+                      className="bx-btn bx-btn-ghost px-2.5 py-1 inline-flex items-center gap-1 disabled:opacity-40"
+                    >
+                      <ChevronLeft className="w-3.5 h-3.5" />
+                      Prev
+                    </button>
+                    <span>
+                      Page {paginatedDeals.page} / {paginatedDeals.totalPages}
+                    </span>
+                    <button
+                      type="button"
+                      disabled={paginatedDeals.page >= paginatedDeals.totalPages}
+                      onClick={() => setDealsPage((p) => Math.min(paginatedDeals.totalPages, p + 1))}
+                      className="bx-btn bx-btn-ghost px-2.5 py-1 inline-flex items-center gap-1 disabled:opacity-40"
+                    >
+                      Next
+                      <ChevronRight className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
           {/* 7. MARKETPLACE FEES & COMMISSION ENGINE */}
           {section === 'commissions' && (
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-              <form onSubmit={handleSaveCommissions} className="bx-card p-6 space-y-5">
-                <h1 className="text-xl font-black">Configurable Commission Engine</h1>
-                <p className="text-xs opacity-75">
-                  Standard BEXORA Buyer Fee is 5% on the exact accepted bid or Buy Now price. Fees are locked immutably into each deal snapshot at creation.
-                </p>
-
-                <div className="p-4 border-2 border-[var(--bx-border)] bg-[var(--bx-surface-alt)] space-y-3">
-                  <label className="flex items-center justify-between cursor-pointer">
-                    <span className="text-sm font-black">Enable Buyer Fee (Default 5%)</span>
-                    <input
-                      type="checkbox"
-                      checked={buyerFeeEnabled}
-                      onChange={(e) => setBuyerFeeEnabled(e.target.checked)}
-                      className="w-4 h-4"
-                    />
-                  </label>
-                  <div>
-                    <label htmlFor="bx-admin-buyer-pct" className="block text-xs font-bold mb-1">
-                      Buyer Commission Percentage (0% – 50%)
-                    </label>
-                    <input
-                      id="bx-admin-buyer-pct"
-                      type="number"
-                      step="0.1"
-                      min="0"
-                      max="50"
-                      value={buyerFeePct}
-                      onChange={(e) => setBuyerFeePct(e.target.value)}
-                      className="bx-input w-full px-3 py-2 text-sm"
-                    />
-                  </div>
-                </div>
-
-                <div className="p-4 border-2 border-[var(--bx-border)] bg-[var(--bx-surface-alt)] space-y-3">
-                  <label className="flex items-center justify-between cursor-pointer">
-                    <span className="text-sm font-black">Enable Seller Fee</span>
-                    <input
-                      type="checkbox"
-                      checked={sellerFeeEnabled}
-                      onChange={(e) => setSellerFeeEnabled(e.target.checked)}
-                      className="w-4 h-4"
-                    />
-                  </label>
-                  <div>
-                    <label htmlFor="bx-admin-seller-pct" className="block text-xs font-bold mb-1">
-                      Seller Commission Percentage (0% – 50%)
-                    </label>
-                    <input
-                      id="bx-admin-seller-pct"
-                      type="number"
-                      step="0.1"
-                      min="0"
-                      max="50"
-                      value={sellerFeePct}
-                      onChange={(e) => setSellerFeePct(e.target.value)}
-                      className="bx-input w-full px-3 py-2 text-sm"
-                    />
-                  </div>
-                </div>
-
-                <div>
-                  <label htmlFor="bx-admin-usd-rate" className="block text-xs font-bold mb-1">
-                    Display Conversion Rate (1 USD in BDT)
-                  </label>
-                  <input
-                    id="bx-admin-usd-rate"
-                    type="number"
-                    step="0.5"
-                    min="1"
-                    max="500"
-                    value={usdRate}
-                    onChange={(e) => setUsdRate(e.target.value)}
-                    className="bx-input w-full px-3 py-2 text-sm"
-                  />
-                </div>
-
-                <button type="submit" className="bx-btn bx-btn-primary w-full py-2.5 text-sm font-extrabold">
-                  Save Commission Settings
-                </button>
-              </form>
-
-              {/* Live Sample Commission & Dispute Refund Calculator */}
-              <div className="bx-card p-6 space-y-4 tabular-nums">
-                <div className="flex items-center gap-2">
-                  <Calculator className="w-5 h-5 text-[#FF6500]" />
-                  <h2 className="text-lg font-black">Live Payment & Dispute Refund Preview</h2>
-                </div>
-                <div>
-                  <label htmlFor="bx-sample-deal" className="block text-xs font-bold mb-1">
-                    Accepted Bid / Deal Base Price (BDT)
-                  </label>
-                  <input
-                    id="bx-sample-deal"
-                    type="number"
-                    min="10"
-                    value={calcSampleBdt}
-                    onChange={(e) => setCalcSampleBdt(e.target.value)}
-                    className="bx-input w-full px-3 py-2 text-sm"
-                  />
-                </div>
-
-                <div className="space-y-2.5 text-sm border-t-2 border-[var(--bx-border)] pt-4">
-                  <div className="flex justify-between">
-                    <span>Accepted Bid / Deal Price (P):</span>
-                    <span className="font-bold">{formatMoneyFromMinor(liveSample.baseAmountMinor, 'BDT', 'BDT')}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span>Buyer Fee ({liveSample.buyerFeePct}%):</span>
-                    <span className="font-bold">+{formatMoneyFromMinor(liveSample.buyerFeeMinor, 'BDT', 'BDT')}</span>
-                  </div>
-                  <div className="flex justify-between font-black text-[#FF6500] border-b border-[var(--bx-border)] pb-2">
-                    <span>Buyer Total Charge (P + BuyerFee):</span>
-                    <span>{formatMoneyFromMinor(liveSample.buyerTotalMinor, 'BDT', 'BDT')}</span>
-                  </div>
-                  <div className="flex justify-between pt-1">
-                    <span>Seller Fee ({liveSample.sellerFeePct}%):</span>
-                    <span className="font-bold">-{formatMoneyFromMinor(liveSample.sellerFeeMinor, 'BDT', 'BDT')}</span>
-                  </div>
-                  <div className="flex justify-between font-black text-emerald-600">
-                    <span>If Completed → Seller Net Payout:</span>
-                    <span>{formatMoneyFromMinor(liveSample.sellerPayoutMinor, 'BDT', 'BDT')}</span>
-                  </div>
-                  <div className="flex justify-between pt-2 border-t border-[var(--bx-border)] text-red-600 font-black">
-                    <span>If Admin Rejects Deal → Buyer Refund:</span>
-                    <span>{formatMoneyFromMinor(liveSampleRefund.buyerRefundMinor, 'BDT', 'BDT')}</span>
-                  </div>
-                  <div className="flex justify-between text-xs opacity-85 font-bold">
-                    <span>If Admin Rejects Deal → Retained BEXORA Commission (3%):</span>
-                    <span>{formatMoneyFromMinor(liveSampleRefund.platformRetainedCommissionMinor, 'BDT', 'BDT')}</span>
-                  </div>
-                </div>
-              </div>
-            </div>
+            <AdminCommissionsSection
+              buyerFeeEnabled={buyerFeeEnabled}
+              setBuyerFeeEnabled={setBuyerFeeEnabled}
+              buyerFeePct={buyerFeePct}
+              setBuyerFeePct={setBuyerFeePct}
+              sellerFeeEnabled={sellerFeeEnabled}
+              setSellerFeeEnabled={setSellerFeeEnabled}
+              sellerFeePct={sellerFeePct}
+              setSellerFeePct={setSellerFeePct}
+              usdRate={usdRate}
+              setUsdRate={setUsdRate}
+              calcSampleBdt={calcSampleBdt}
+              setCalcSampleBdt={setCalcSampleBdt}
+              liveSample={liveSample}
+              liveSampleRefund={liveSampleRefund}
+              onSubmit={handleSaveCommissions}
+            />
           )}
 
           {/* 8. CATEGORIES, MONETIZATION & GAMING TITLES */}
           {section === 'categories' && (
-            <form onSubmit={handleSaveCategoriesConfig} className="bx-card p-6 space-y-6">
-              <h1 className="text-xl font-black">Categories, Gaming List & Asset Security Windows</h1>
-
-              <div className="p-4 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)] space-y-2">
-                <label className="flex items-center justify-between cursor-pointer">
-                  <span className="text-xs font-black">
-                    Allow Custom Override of Mandatory Security Windows (Default Off: Enforces 168h YouTube & 40h Standard)
-                  </span>
-                  <input
-                    type="checkbox"
-                    checked={customProtEnabled}
-                    onChange={(e) => setCustomProtEnabled(e.target.checked)}
-                    className="w-4 h-4"
-                  />
-                </label>
-                <p className="text-[11px] opacity-75">
-                  When unchecked, YouTube channels strictly lock a 7-day (168h) Google Brand/Primary-Owner hold and Facebook & all other standard assets lock a 40-hour security hold upon Buyer transfer approval.
-                </p>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                <div>
-                  <label htmlFor="bx-prot-yt" className="block text-xs font-extrabold mb-1">
-                    YouTube Security Window (Hours)
-                  </label>
-                  <input
-                    id="bx-prot-yt"
-                    type="number"
-                    min="1"
-                    max="720"
-                    value={protYt}
-                    onChange={(e) => setProtYt(e.target.value)}
-                    className="bx-input w-full px-3 py-2 text-sm"
-                  />
-                  <p className="text-[11px] opacity-70 mt-1">Mandatory Policy: 168h (7 days)</p>
-                </div>
-                <div>
-                  <label htmlFor="bx-prot-fb" className="block text-xs font-extrabold mb-1">
-                    Facebook Security Window (Hours)
-                  </label>
-                  <input
-                    id="bx-prot-fb"
-                    type="number"
-                    min="1"
-                    max="720"
-                    value={protFb}
-                    onChange={(e) => setProtFb(e.target.value)}
-                    className="bx-input w-full px-3 py-2 text-sm"
-                  />
-                  <p className="text-[11px] opacity-70 mt-1">Mandatory Policy: 40h</p>
-                </div>
-                <div>
-                  <label htmlFor="bx-prot-def" className="block text-xs font-extrabold mb-1">
-                    Other Standard Assets (Hours)
-                  </label>
-                  <input
-                    id="bx-prot-def"
-                    type="number"
-                    min="1"
-                    max="720"
-                    value={protDef}
-                    onChange={(e) => setProtDef(e.target.value)}
-                    className="bx-input w-full px-3 py-2 text-sm"
-                  />
-                  <p className="text-[11px] opacity-70 mt-1">Mandatory Policy: 40h</p>
-                </div>
-              </div>
-
-              <div>
-                <label htmlFor="bx-gaming-list" className="block text-xs font-extrabold mb-1">
-                  Supported Gaming Titles (One game per line)
-                </label>
-                <textarea
-                  id="bx-gaming-list"
-                  rows={5}
-                  value={gamingText}
-                  onChange={(e) => setGamingText(e.target.value)}
-                  className="bx-input w-full px-3 py-2 text-sm font-mono"
-                />
-              </div>
-
-              <div className="space-y-3">
-                <div className="text-xs font-extrabold uppercase">Toggle Platform Monetization Programs</div>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                  {PLATFORM_LIST.filter((p) => PLATFORM_CATALOG[p].monetizationOptions.length > 0).map((p) => (
-                    <div key={p} className="p-3 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)] space-y-2">
-                      <div className="text-xs font-black uppercase">{PLATFORM_CATALOG[p].name}</div>
-                      <div className="flex flex-wrap gap-2">
-                        {PLATFORM_CATALOG[p].monetizationOptions.map((opt) => {
-                          const enabled = !disabledMonIds.includes(opt.id);
-                          return (
-                            <label key={opt.id} className="inline-flex items-center gap-1.5 text-xs font-bold cursor-pointer">
-                              <input
-                                type="checkbox"
-                                checked={enabled}
-                                onChange={() =>
-                                  setDisabledMonIds((prev) =>
-                                    enabled ? [...prev, opt.id] : prev.filter((x) => x !== opt.id)
-                                  )
-                                }
-                              />
-                              <span>{opt.name}</span>
-                            </label>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <button type="submit" className="bx-btn bx-btn-primary px-6 py-2.5 text-sm font-extrabold">
-                Save Category & Protection Configuration
-              </button>
-            </form>
+            <AdminCategoriesSection
+              customProtEnabled={customProtEnabled}
+              setCustomProtEnabled={setCustomProtEnabled}
+              protYt={protYt}
+              setProtYt={setProtYt}
+              protFb={protFb}
+              setProtFb={setProtFb}
+              protDef={protDef}
+              setProtDef={setProtDef}
+              gamingText={gamingText}
+              setGamingText={setGamingText}
+              disabledMonIds={disabledMonIds}
+              setDisabledMonIds={setDisabledMonIds}
+              onSubmit={handleSaveCategoriesConfig}
+            />
           )}
 
           {/* 9. SUPPORT CONTACTS, BRANDING, NOTICE BANNER & LANGUAGES */}
           {section === 'support' && (
-            <div className="space-y-6 max-w-3xl">
-              <form onSubmit={handleSaveSupportContacts} className="bx-card p-6 space-y-5">
-                <h1 className="text-xl font-black">Support Contact Settings</h1>
-                <p className="text-xs opacity-75">
-                  Updates immediately sync with the Floating Support Button across all pages. Leave blank to hide an unconfigured channel.
-                </p>
-
-                <div>
-                  <label htmlFor="bx-sup-wa" className="block text-xs font-extrabold mb-1">
-                    WhatsApp Support Number (with country code)
-                  </label>
-                  <input
-                    id="bx-sup-wa"
-                    type="text"
-                    value={supWa}
-                    onChange={(e) => setSupWa(e.target.value)}
-                    placeholder="+8801700000000"
-                    className="bx-input w-full px-3.5 py-2.5 text-sm"
-                  />
-                </div>
-
-                <div>
-                  <label htmlFor="bx-sup-tg" className="block text-xs font-extrabold mb-1">
-                    Telegram Support URL or @Handle
-                  </label>
-                  <input
-                    id="bx-sup-tg"
-                    type="text"
-                    value={supTg}
-                    onChange={(e) => setSupTg(e.target.value)}
-                    placeholder="https://t.me/bexorasupport"
-                    className="bx-input w-full px-3.5 py-2.5 text-sm"
-                  />
-                </div>
-
-                <div>
-                  <label htmlFor="bx-sup-email" className="block text-xs font-extrabold mb-1">
-                    Support Desk Email Address
-                  </label>
-                  <input
-                    id="bx-sup-email"
-                    type="email"
-                    value={supEmail}
-                    onChange={(e) => setSupEmail(e.target.value)}
-                    placeholder="support@bexora.com"
-                    className="bx-input w-full px-3.5 py-2.5 text-sm"
-                  />
-                </div>
-
-                <button type="submit" className="bx-btn bx-btn-primary px-6 py-2.5 text-sm font-extrabold">
-                  Save Support Channels
-                </button>
-              </form>
-
-              <form onSubmit={handleSaveBrandingAndNotice} className="bx-card p-6 space-y-5">
-                <div>
-                  <h2 className="text-lg font-black">
-                    Platform Branding, Top Notice Banner &amp; Active Languages
-                  </h2>
-                  <DismissibleNotice id="branding-intro" className="mt-1">
-                    <p className="text-xs opacity-75">
-                      Customize site display name, custom HTTPS brand logo URL (leave blank to use the default BEXORA geometric emblem), top announcement notice bar, and enabled customer languages.
-                    </p>
-                  </DismissibleNotice>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <div>
-                    <label htmlFor="bx-brand-name" className="block text-xs font-extrabold mb-1">
-                      Platform Display Name
-                    </label>
-                    <input
-                      id="bx-brand-name"
-                      type="text"
-                      value={siteNameInput}
-                      onChange={(e) => setSiteNameInput(e.target.value)}
-                      placeholder="BEXORA"
-                      maxLength={60}
-                      className="bx-input w-full px-3.5 py-2.5 text-sm"
-                    />
-                  </div>
-                  <div>
-                    <label htmlFor="bx-brand-logo" className="block text-xs font-extrabold mb-1">
-                      Custom Logo Image URL (Optional HTTPS)
-                    </label>
-                    <input
-                      id="bx-brand-logo"
-                      type="text"
-                      value={logoUrlInput}
-                      onChange={(e) => setLogoUrlInput(e.target.value)}
-                      placeholder="Leave blank for default BEXORA emblem"
-                      maxLength={300}
-                      className="bx-input w-full px-3.5 py-2.5 text-sm"
-                    />
-                  </div>
-                </div>
-
-                <div>
-                  <label htmlFor="bx-brand-tagline" className="block text-xs font-extrabold mb-1">
-                    Footer / Brand Tagline
-                  </label>
-                  <input
-                    id="bx-brand-tagline"
-                    type="text"
-                    value={brandTaglineInput}
-                    onChange={(e) => setBrandTaglineInput(e.target.value)}
-                    placeholder="Verified Digital Asset Marketplace & Protected Escrow"
-                    maxLength={140}
-                    className="bx-input w-full px-3.5 py-2.5 text-sm"
-                  />
-                </div>
-
-                <div className="p-4 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)] space-y-3">
-                  <label className="flex items-center gap-2.5 text-xs font-extrabold cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={noticeBannerEnabledInput}
-                      onChange={(e) => setNoticeBannerEnabledInput(e.target.checked)}
-                      className="w-4 h-4 accent-[#FF6500]"
-                    />
-                    <span>Show Top Sitewide Notice Banner Above Header</span>
-                  </label>
-                  <input
-                    type="text"
-                    value={noticeBannerTextInput}
-                    onChange={(e) => setNoticeBannerTextInput(e.target.value)}
-                    placeholder="e.g., Escrow payouts & manual bKash/Nagad deposits are processed 24/7."
-                    maxLength={280}
-                    className="bx-input w-full px-3 py-2 text-xs"
-                  />
-                </div>
-
-                <div className="space-y-2">
-                  <div className="text-xs font-extrabold">Enabled Header Languages</div>
-                  <div className="flex flex-wrap gap-2">
-                    {SUPPORTED_LANGUAGES.map((lMeta) => {
-                      const active = enabledLanguagesInput.includes(lMeta.code);
-                      return (
-                        <label
-                          key={lMeta.code}
-                          className="inline-flex items-center gap-2 px-3 py-1.5 border border-[var(--bx-border)] bg-[var(--bx-surface)] text-xs font-bold cursor-pointer"
-                        >
-                          <input
-                            type="checkbox"
-                            checked={active}
-                            onChange={() =>
-                              setEnabledLanguagesInput((prev) => {
-                                if (active) {
-                                  const next = prev.filter((x) => x !== lMeta.code);
-                                  return next.length > 0 ? next : ['en'];
-                                }
-                                return [...prev, lMeta.code];
-                              })
-                            }
-                          />
-                          <span>
-                            {lMeta.label} ({lMeta.code.toUpperCase()})
-                          </span>
-                        </label>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                <button type="submit" className="bx-btn bx-btn-primary px-6 py-2.5 text-sm font-extrabold">
-                  Save Branding, Notice & Languages
-                </button>
-              </form>
-            </div>
+            <AdminSupportAndBrandingSection
+              supWa={supWa}
+              setSupWa={setSupWa}
+              supTg={supTg}
+              setSupTg={setSupTg}
+              supEmail={supEmail}
+              setSupEmail={setSupEmail}
+              siteNameInput={siteNameInput}
+              setSiteNameInput={setSiteNameInput}
+              logoUrlInput={logoUrlInput}
+              setLogoUrlInput={setLogoUrlInput}
+              brandTaglineInput={brandTaglineInput}
+              setBrandTaglineInput={setBrandTaglineInput}
+              noticeBannerEnabledInput={noticeBannerEnabledInput}
+              setNoticeBannerEnabledInput={setNoticeBannerEnabledInput}
+              noticeBannerTextInput={noticeBannerTextInput}
+              setNoticeBannerTextInput={setNoticeBannerTextInput}
+              enabledLanguagesInput={enabledLanguagesInput}
+              setEnabledLanguagesInput={setEnabledLanguagesInput}
+              onSaveSupportContacts={handleSaveSupportContacts}
+              onSaveBrandingAndNotice={handleSaveBrandingAndNotice}
+            />
           )}
 
           {/* 10. COMPLETE PAYMENT MANAGEMENT SYSTEM */}
@@ -4743,55 +5042,207 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           {/* 11. SUPERADMIN ROLE MANAGEMENT & AUDIT LOGS */}
           {section === 'roles' && (
             <div className="space-y-6">
-              <div className="bx-card p-6 space-y-4">
-                <h1 className="text-xl font-black">Superadmin & Role Governance</h1>
-                <p className="text-xs opacity-75">
-                  Bootstrapped Superadmin Email: <strong>{BOOTSTRAPPED_SUPERADMIN_EMAIL}</strong> (enforced directly in Firestore Security Rules).
-                </p>
+              <div className="bx-card p-6 space-y-5">
+                <div>
+                  <h1 className="text-xl font-black">Superadmin &amp; Admin Governance</h1>
+                  <p className="text-xs opacity-75 mt-1">
+                    Bootstrapped Superadmin Email: <strong>{BOOTSTRAPPED_SUPERADMIN_EMAIL}</strong> (enforced directly in Firestore Security Rules). Pending or rejected invitations never grant administrator permissions until explicitly accepted by the invited user.
+                  </p>
+                </div>
 
                 {isSuperAdmin ? (
-                  <form onSubmit={handleGrantAdminRole} className="flex flex-col sm:flex-row gap-2">
-                    <input
-                      type="text"
-                      value={targetRoleUid}
-                      onChange={(e) => setTargetRoleUid(e.target.value)}
-                      placeholder="Target Firebase User UID"
-                      className="bx-input flex-1 px-3 py-2 text-xs"
-                    />
-                    <select
-                      value={targetRoleLevel}
-                      onChange={(e) => setTargetRoleLevel(e.target.value as 'admin' | 'superadmin')}
-                      className="bx-input px-3 py-2 text-xs font-bold"
-                    >
-                      <option value="admin">Admin</option>
-                      <option value="superadmin">Superadmin</option>
-                    </select>
-                    <button type="submit" className="bx-btn bx-btn-primary px-4 py-2 text-xs font-extrabold">
-                      Grant Role
-                    </button>
+                  <form onSubmit={handleSendAdminInvitation} className="p-4 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)] space-y-3">
+                    <div className="text-xs font-black uppercase">Invite or Assign Administrator Role</div>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                      <input
+                        type="text"
+                        required
+                        value={targetRoleUid}
+                        onChange={(e) => setTargetRoleUid(e.target.value)}
+                        placeholder="Target Firebase User UID *"
+                        className="bx-input px-3 py-2 text-xs font-mono"
+                      />
+                      <input
+                        type="text"
+                        value={targetInviteName}
+                        onChange={(e) => setTargetInviteName(e.target.value)}
+                        placeholder="Display Name (optional)"
+                        maxLength={80}
+                        className="bx-input px-3 py-2 text-xs"
+                      />
+                      <input
+                        type="email"
+                        value={targetInviteEmail}
+                        onChange={(e) => setTargetInviteEmail(e.target.value)}
+                        placeholder="Email (optional)"
+                        maxLength={160}
+                        className="bx-input px-3 py-2 text-xs"
+                      />
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <select
+                        value={targetRoleLevel}
+                        onChange={(e) => setTargetRoleLevel(e.target.value as 'admin' | 'superadmin')}
+                        className="bx-input px-3 py-2 text-xs font-bold"
+                      >
+                        <option value="admin">Admin</option>
+                        <option value="superadmin">Superadmin</option>
+                      </select>
+                      <button
+                        type="submit"
+                        disabled={Boolean(busyItemKey)}
+                        className="bx-btn bx-btn-primary px-4 py-2 text-xs font-extrabold disabled:opacity-60"
+                      >
+                        Send Role Invitation
+                      </button>
+                      <button
+                        type="button"
+                        disabled={Boolean(busyItemKey) || !targetRoleUid.trim()}
+                        onClick={(e) => void handleGrantAdminRole(e as unknown as React.FormEvent)}
+                        className="bx-btn bx-btn-ghost px-4 py-2 text-xs font-extrabold disabled:opacity-60"
+                      >
+                        Direct Grant (Instant)
+                      </button>
+                    </div>
                   </form>
                 ) : (
-                  <p className="text-xs font-bold text-amber-600">Only Superadmins can grant or revoke admin roles.</p>
+                  <p className="text-xs font-bold text-amber-600">Only Superadmins can invite, grant, or revoke admin roles.</p>
                 )}
 
-                {adminRoles.length > 0 && (
-                  <div className="space-y-2 pt-2">
-                    {adminRoles.map((r) => (
-                      <div key={r.uid} className="p-3 border border-[var(--bx-border)] flex items-center justify-between text-xs font-bold">
-                        <span>
-                          UID: {r.uid} · Role: {r.role.toUpperCase()}
-                        </span>
-                        {isSuperAdmin && (
-                          <button
-                            type="button"
-                            onClick={() => handleRevokeAdminRole(r.uid)}
-                            className="text-red-600 underline"
-                          >
-                            Revoke
-                          </button>
-                        )}
-                      </div>
-                    ))}
+                <div className="flex flex-wrap gap-1.5" role="tablist" aria-label="Admin Governance Sections">
+                  {(
+                    [
+                      { id: 'pending', label: `Pending Invitations (${governanceQueue.counts.pending})` },
+                      { id: 'accepted', label: `Accepted / Active (${governanceQueue.counts.accepted})` },
+                      { id: 'rejected', label: `Rejected (${governanceQueue.counts.rejected})` },
+                    ] as { id: AdminRoleBucket; label: string }[]
+                  ).map((tab) => (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      role="tab"
+                      aria-selected={roleBucket === tab.id}
+                      onClick={() => setRoleBucket(tab.id)}
+                      className={`px-3 py-1.5 text-xs font-extrabold border transition-colors whitespace-nowrap shrink-0 ${
+                        roleBucket === tab.id
+                          ? 'bg-[#FF6500] text-white border-[#191919]'
+                          : 'bg-[var(--bx-surface-alt)] border-[var(--bx-border)] hover:bg-[var(--bx-surface)]'
+                      }`}
+                    >
+                      {tab.label}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="relative">
+                  <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 opacity-60" />
+                  <input
+                    type="search"
+                    value={roleSearch}
+                    onChange={(e) => setRoleSearch(e.target.value)}
+                    placeholder="Search UID, name, email, role…"
+                    aria-label="Search admin governance records"
+                    className="bx-input w-full pl-8 pr-3 py-2 text-xs"
+                  />
+                </div>
+
+                {roleBucket === 'pending' && (
+                  <div className="space-y-2">
+                    {governanceQueue.pendingInvites.length === 0 ? (
+                      <p className="text-xs opacity-75">No pending admin invitations.</p>
+                    ) : (
+                      governanceQueue.pendingInvites.map((inv) => (
+                        <div key={inv.id} className="p-3 border border-[var(--bx-border)] flex flex-wrap items-center justify-between gap-2 text-xs font-bold">
+                          <div className="space-y-0.5">
+                            <div>
+                              <UserProfileLink
+                                uid={inv.targetUid}
+                                name={inv.targetName || inv.targetUid}
+                                onOpenProfile={onOpenPublicProfile}
+                                className="font-extrabold"
+                              />{' '}
+                              · Role: <span className="text-[#FF6500]">{inv.role.toUpperCase()}</span>
+                              {inv.targetEmail && <span className="opacity-75"> · {inv.targetEmail}</span>}
+                            </div>
+                            <div className="text-[11px] opacity-70 font-mono">
+                              UID: {inv.targetUid} · Sent {new Date(inv.createdAtMs).toLocaleString()}
+                            </div>
+                          </div>
+                          {isSuperAdmin && (
+                            <button
+                              type="button"
+                              disabled={busyItemKey === `rev_inv:${inv.id}`}
+                              onClick={() => void handleRevokePendingInvitation(inv)}
+                              className="text-red-600 underline font-extrabold disabled:opacity-50"
+                            >
+                              Revoke Invite
+                            </button>
+                          )}
+                        </div>
+                      ))
+                    )}
+                  </div>
+                )}
+
+                {roleBucket === 'accepted' && (
+                  <div className="space-y-2">
+                    {governanceQueue.acceptedAdmins.length === 0 ? (
+                      <p className="text-xs opacity-75">No active admin records match this search.</p>
+                    ) : (
+                      governanceQueue.acceptedAdmins.map((r) => (
+                        <div key={r.uid} className="p-3 border border-[var(--bx-border)] flex flex-wrap items-center justify-between gap-2 text-xs font-bold">
+                          <div>
+                            <UserProfileLink
+                              uid={r.uid}
+                              name={r.displayName || r.uid}
+                              onOpenProfile={onOpenPublicProfile}
+                              className="font-extrabold"
+                            />{' '}
+                            · Role: <span className="text-emerald-700 dark:text-emerald-400">{r.role.toUpperCase()}</span>
+                            {r.email && <span className="opacity-75"> · {r.email}</span>}
+                            <div className="text-[11px] opacity-70 font-mono">UID: {r.uid}</div>
+                          </div>
+                          {isSuperAdmin && (
+                            <button
+                              type="button"
+                              disabled={busyItemKey === `revoke:${r.uid}`}
+                              onClick={() => handleRevokeAdminRole(r.uid)}
+                              className="text-red-600 underline font-extrabold disabled:opacity-50"
+                            >
+                              Revoke
+                            </button>
+                          )}
+                        </div>
+                      ))
+                    )}
+                  </div>
+                )}
+
+                {roleBucket === 'rejected' && (
+                  <div className="space-y-2">
+                    {governanceQueue.rejectedInvites.length === 0 ? (
+                      <p className="text-xs opacity-75">No declined admin invitations.</p>
+                    ) : (
+                      governanceQueue.rejectedInvites.map((inv) => (
+                        <div key={inv.id} className="p-3 border border-[var(--bx-border)] space-y-1 text-xs font-bold">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div>
+                              <UserProfileLink
+                                uid={inv.targetUid}
+                                name={inv.targetName || inv.targetUid}
+                                onOpenProfile={onOpenPublicProfile}
+                                className="font-extrabold"
+                              />{' '}
+                              · Invited Role: {inv.role.toUpperCase()}
+                            </div>
+                            <span className="text-[11px] text-red-600 uppercase">Declined</span>
+                          </div>
+                          {inv.rejectionReason && (
+                            <p className="text-[11px] opacity-80">Reason: {inv.rejectionReason}</p>
+                          )}
+                        </div>
+                      ))
+                    )}
                   </div>
                 )}
               </div>
@@ -4870,201 +5321,30 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
           {/* ANNOUNCEMENTS & USER ALERTS COMPOSER */}
           {section === 'notifications' && (
-            <div className="space-y-6">
-              <div className="bx-card p-6 space-y-5">
-                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--bx-border)] pb-3">
-                  <div className="w-full">
-                    <h1 className="text-xl font-black flex items-center gap-2">
-                      <Megaphone className="w-5 h-5 text-[#FF6500]" />
-                      Platform Announcements &amp; Targeted User Alerts
-                    </h1>
-                    <DismissibleNotice id="announcements-intro" className="mt-1">
-                      <p className="text-xs opacity-75">
-                        Publish official BEXORA announcements to the Header Notification Center or send direct notices to an individual member UID.
-                      </p>
-                    </DismissibleNotice>
-                  </div>
-                </div>
-
-                <form onSubmit={handlePublishAdminAlert} className="space-y-4">
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                    <label className="block space-y-1 text-xs font-bold">
-                      <span>Delivery Mode</span>
-                      <select
-                        value={notifMode}
-                        onChange={(e) => setNotifMode(e.target.value as 'broadcast_announcement' | 'targeted_user')}
-                        className="bx-input w-full px-3 py-2 text-xs font-bold"
-                      >
-                        <option value="broadcast_announcement">Platform Broadcast Announcement</option>
-                        <option value="targeted_user">Targeted Single User (by UID)</option>
-                      </select>
-                    </label>
-
-                    <label className="block space-y-1 text-xs font-bold">
-                      <span>Severity</span>
-                      <select
-                        value={notifSeverity}
-                        onChange={(e) => setNotifSeverity(e.target.value as NotificationSeverity)}
-                        className="bx-input w-full px-3 py-2 text-xs font-bold"
-                      >
-                        <option value="info">Info</option>
-                        <option value="success">Success</option>
-                        <option value="warning">Warning</option>
-                        <option value="critical">Critical Security / Maintenance</option>
-                      </select>
-                    </label>
-
-                    <label className="block space-y-1 text-xs font-bold">
-                      <span>Optional Destination Button</span>
-                      <select
-                        value={notifDestination}
-                        onChange={(e) => setNotifDestination(e.target.value)}
-                        className="bx-input w-full px-3 py-2 text-xs font-bold"
-                      >
-                        <option value="">None (Read-Only Message)</option>
-                        <option value="marketplace">Marketplace Home</option>
-                        <option value="deals">Escrow Deals</option>
-                        <option value="wallet">Wallet</option>
-                        <option value="profile">Account Profile</option>
-                        <option value="profile:nid">NID Verification</option>
-                      </select>
-                    </label>
-                  </div>
-
-                  {notifMode === 'targeted_user' ? (
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                      <label className="block space-y-1 text-xs font-bold">
-                        <span>Target User UID</span>
-                        <input
-                          type="text"
-                          required
-                          value={notifTargetUid}
-                          onChange={(e) => setNotifTargetUid(e.target.value)}
-                          placeholder="Paste member Firebase UID"
-                          className="bx-input w-full px-3 py-2 text-xs font-mono"
-                        />
-                      </label>
-                      <label className="block space-y-1 text-xs font-bold">
-                        <span>Category</span>
-                        <select
-                          value={notifCategory}
-                          onChange={(e) => setNotifCategory(e.target.value as NotificationCategory)}
-                          className="bx-input w-full px-3 py-2 text-xs font-bold"
-                        >
-                          <option value="system">System Notice</option>
-                          <option value="security">Security Alert</option>
-                          <option value="verification">Verification</option>
-                          <option value="deal">Escrow Deal</option>
-                          <option value="wallet">Wallet</option>
-                          <option value="listing">Listing Moderation</option>
-                        </select>
-                      </label>
-                    </div>
-                  ) : (
-                    <label className="inline-flex items-center gap-2 text-xs font-bold cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={notifPersistBanner}
-                        onChange={(e) => setNotifPersistBanner(e.target.checked)}
-                      />
-                      <span>Also keep active in public `/announcements` feed for visitors and future sign-ups</span>
-                    </label>
-                  )}
-
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <label className="block space-y-1 text-xs font-bold">
-                      <span>Notification Title (max 140 chars)</span>
-                      <input
-                        type="text"
-                        required
-                        maxLength={140}
-                        value={notifTitle}
-                        onChange={(e) => setNotifTitle(e.target.value)}
-                        placeholder="e.g. Scheduled Escrow Verification Upgrade"
-                        className="bx-input w-full px-3 py-2 text-xs"
-                      />
-                    </label>
-                    <label className="block space-y-1 text-xs font-bold">
-                      <span>Short List Preview (optional, max 240 chars)</span>
-                      <input
-                        type="text"
-                        maxLength={240}
-                        value={notifPreview}
-                        onChange={(e) => setNotifPreview(e.target.value)}
-                        placeholder="Concise summary shown in the header dropdown"
-                        className="bx-input w-full px-3 py-2 text-xs"
-                      />
-                    </label>
-                  </div>
-
-                  <label className="block space-y-1 text-xs font-bold">
-                    <span>Full Notification Content (shown when user clicks View, max 2000 chars)</span>
-                    <textarea
-                      required
-                      rows={4}
-                      maxLength={2000}
-                      value={notifBody}
-                      onChange={(e) => setNotifBody(e.target.value)}
-                      placeholder="Write the complete notification message..."
-                      className="bx-input w-full px-3 py-2 text-xs"
-                    />
-                  </label>
-
-                  <button
-                    type="submit"
-                    disabled={sendingAdminNotif}
-                    className="bx-btn bx-btn-primary px-5 py-2.5 text-xs font-extrabold inline-flex items-center gap-2"
-                  >
-                    <Send className="w-4 h-4" />
-                    {sendingAdminNotif
-                      ? 'Publishing Notification…'
-                      : notifMode === 'broadcast_announcement'
-                      ? 'Publish Broadcast Announcement'
-                      : 'Send Direct User Notification'}
-                  </button>
-                </form>
-              </div>
-
-              <div className="bx-card p-6 space-y-4">
-                <h2 className="text-base font-black">Broadcast Announcements History ({announcements.length})</h2>
-                {announcements.length === 0 ? (
-                  <p className="text-xs opacity-75">No broadcast announcements published yet.</p>
-                ) : (
-                  <div className="space-y-3">
-                    {announcements.map((ann) => (
-                      <div
-                        key={ann.id}
-                        className="p-4 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)] flex flex-col sm:flex-row sm:items-center justify-between gap-3"
-                      >
-                        <div className="space-y-1 min-w-0">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <span
-                              className={`text-[10px] font-black uppercase px-2 py-0.5 border border-black ${
-                                ann.active ? 'bg-emerald-600 text-white' : 'bg-zinc-500 text-white'
-                              }`}
-                            >
-                              {ann.active ? 'Active' : 'Archived'}
-                            </span>
-                            <span className="text-[11px] font-bold uppercase opacity-75">{ann.severity}</span>
-                            <span className="text-sm font-black truncate">{ann.title}</span>
-                          </div>
-                          <p className="text-xs opacity-80 line-clamp-2">{ann.body}</p>
-                        </div>
-                        {ann.active && (
-                          <button
-                            type="button"
-                            onClick={() => handleArchiveAnnouncement(ann.id)}
-                            className="bx-btn bx-btn-ghost px-3 py-1.5 text-xs font-extrabold shrink-0"
-                          >
-                            Archive
-                          </button>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
+            <AdminAnnouncementsSection
+              notifMode={notifMode}
+              setNotifMode={setNotifMode}
+              notifTargetUid={notifTargetUid}
+              setNotifTargetUid={setNotifTargetUid}
+              notifCategory={notifCategory}
+              setNotifCategory={setNotifCategory}
+              notifSeverity={notifSeverity}
+              setNotifSeverity={setNotifSeverity}
+              notifTitle={notifTitle}
+              setNotifTitle={setNotifTitle}
+              notifPreview={notifPreview}
+              setNotifPreview={setNotifPreview}
+              notifBody={notifBody}
+              setNotifBody={setNotifBody}
+              notifDestination={notifDestination}
+              setNotifDestination={setNotifDestination}
+              notifPersistBanner={notifPersistBanner}
+              setNotifPersistBanner={setNotifPersistBanner}
+              sendingAdminNotif={sendingAdminNotif}
+              announcements={announcements}
+              onPublishAdminAlert={handlePublishAdminAlert}
+              onArchiveAnnouncement={(annId) => void handleArchiveAnnouncement(annId)}
+            />
           )}
 
           {section === 'trust_safety' && (
@@ -5073,6 +5353,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               onFlash={(_type, text) => onFlash(text)}
             />
           )}
+          </Suspense>
         </div>
       </div>
     </div>

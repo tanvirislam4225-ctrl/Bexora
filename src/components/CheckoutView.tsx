@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { doc, runTransaction, serverTimestamp } from 'firebase/firestore';
 import {
   AlertCircle,
@@ -58,6 +58,7 @@ import {
   emitPaidDealRoomCreatedAlerts,
   emitUserNotification,
 } from '../lib/notificationService';
+import { buildApiUrl, createIdempotencyKey } from '../lib/apiClient';
 import { PlatformIcon } from './Icons';
 
 interface CheckoutViewProps {
@@ -108,6 +109,7 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
 }) => {
   const [selectedMethod, setSelectedMethod] = useState<SelectedCheckoutMethod>({ type: 'wallet' });
   const [submitting, setSubmitting] = useState(false);
+  const submittingLockRef = useRef(false);
   const [errorMessage, setErrorMessage] = useState('');
 
   // Secure Pay BD Gateway Configuration State
@@ -123,7 +125,7 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
 
   useEffect(() => {
     let isCancelled = false;
-    fetch('/api/payments/securepay/config')
+    fetch(buildApiUrl('/api/payments/securepay/config'))
       .then((r) => r.json())
       .then((data) => {
         if (!isCancelled && data && data.ok) {
@@ -164,7 +166,7 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
   const loadWordPressGateways = useCallback(async () => {
     setLoadingGateways(true);
     try {
-      const resp = await fetch('/api/payments/wordpress/methods');
+      const resp = await fetch(buildApiUrl('/api/payments/wordpress/methods'));
       if (resp.ok) {
         const data = await resp.json();
         if (data && typeof data === 'object' && Array.isArray(data.methods)) {
@@ -287,9 +289,12 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
         if (window.location.search.includes('mock_gateway=1')) queryParams.set('mock_gateway', '1');
         if (spPaymentStatus) queryParams.set('payment_status', spPaymentStatus);
 
-        const resp = await fetch(`/api/payments/securepay/verify-session?${queryParams.toString()}`, {
-          method: 'POST',
-        });
+        const resp = await fetch(
+          buildApiUrl(`/api/payments/securepay/verify-session?${queryParams.toString()}`),
+          {
+            method: 'POST',
+          }
+        );
         const data = await resp.json().catch(() => null);
         if (cancelled) return;
 
@@ -387,6 +392,8 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
       return;
     }
 
+    if (submittingLockRef.current) return;
+    submittingLockRef.current = true;
     setSubmitting(true);
     try {
       if (mode === 'buy_now' && listing) {
@@ -635,11 +642,13 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
         extractUserFacingFirestoreError(err, 'Checkout payment could not be completed.')
       );
     } finally {
+      submittingLockRef.current = false;
       setSubmitting(false);
     }
   };
 
   const handleWordPressLiveCheckout = async (gatewayId: string) => {
+    if (submittingLockRef.current) return;
     setErrorMessage('');
     if (!userUid || !profile || !auth.currentUser) {
       onRequireAuthForCheckout();
@@ -654,6 +663,7 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
       return;
     }
 
+    submittingLockRef.current = true;
     setSubmitting(true);
     try {
       const returnUrl = `${window.location.origin}${window.location.pathname}?view=checkout&${
@@ -661,11 +671,13 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
           ? `dealId=${encodeURIComponent(deal.id)}`
           : `listingId=${encodeURIComponent(quote.listingId)}`
       }`;
+      const idemKey = createIdempotencyKey('wp_checkout');
 
       const resp = await fetchWithFreshBearerToken('/api/payments/wordpress/create-session', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          'X-Idempotency-Key': idemKey,
         },
         body: JSON.stringify({
           mode,
@@ -673,6 +685,7 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
           dealId: mode === 'accepted_bid_deal' ? quote.dealId : undefined,
           gatewayId,
           returnUrl,
+          idempotencyKey: idemKey,
         }),
       });
 
@@ -698,11 +711,13 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
           ? err.message
           : 'Unable to start external WordPress gateway session.'
       );
+      submittingLockRef.current = false;
       setSubmitting(false);
     }
   };
 
   const handleSecurePayLiveCheckout = async () => {
+    if (submittingLockRef.current) return;
     setErrorMessage('');
     if (!userUid || !profile || !auth.currentUser) {
       onRequireAuthForCheckout();
@@ -725,17 +740,21 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
       return;
     }
 
+    submittingLockRef.current = true;
     setSubmitting(true);
     try {
+      const idemKey = createIdempotencyKey('sp_checkout');
       const resp = await fetchWithFreshBearerToken('/api/payments/securepay/create-session', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          'X-Idempotency-Key': idemKey,
         },
         body: JSON.stringify({
           mode,
           listingId: mode === 'buy_now' ? quote.listingId : undefined,
           dealId: mode === 'accepted_bid_deal' ? quote.dealId : undefined,
+          idempotencyKey: idemKey,
         }),
       });
 
@@ -755,6 +774,7 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
           ? err.message
           : 'Unable to start external payment gateway session.'
       );
+      submittingLockRef.current = false;
       setSubmitting(false);
     }
   };

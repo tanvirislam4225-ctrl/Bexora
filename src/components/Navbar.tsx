@@ -63,6 +63,7 @@ interface NavbarProps {
   signingOut: boolean;
   onOpenAuth: () => void;
   onPrefetchAuth?: () => void;
+  onPrefetchRoute?: (p: NavPage) => void;
   onOpenCreateListing: () => void;
   onOpenWallet: (mode?: 'deposit' | 'withdraw' | 'history') => void;
   onOpenPublicSelf?: () => void;
@@ -94,6 +95,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   signingOut,
   onOpenAuth,
   onPrefetchAuth,
+  onPrefetchRoute,
   onOpenCreateListing,
   onOpenWallet,
   onOpenPublicSelf,
@@ -276,9 +278,9 @@ export const Navbar: React.FC<NavbarProps> = ({
       <header
         className="sticky top-0 z-50 border-b-2 border-[var(--border-strong)] bg-[var(--bg)]/92 backdrop-blur-md"
       >
-        <div className="bx-wrap h-16 flex items-center justify-between gap-4">
+        <div className="bx-wrap h-16 flex items-center justify-between gap-2 sm:gap-4">
           {/* Left: Hamburger on mobile/tablet + Official BEXORA Logo */}
-          <div className="flex items-center gap-2.5 shrink-0">
+          <div className="flex items-center gap-1.5 sm:gap-2.5 shrink-0 min-w-0">
             <button
               type="button"
               onClick={() => {
@@ -311,6 +313,8 @@ export const Navbar: React.FC<NavbarProps> = ({
                   key={item.id}
                   type="button"
                   onClick={() => onNavigate(item.id)}
+                  onMouseEnter={() => onPrefetchRoute?.(item.id)}
+                  onFocus={() => onPrefetchRoute?.(item.id)}
                   className={`text-sm font-bold whitespace-nowrap shrink-0 py-1.5 border-b-2 transition-colors ${
                     active
                       ? 'text-[var(--orange)] border-[var(--orange)]'
@@ -325,6 +329,8 @@ export const Navbar: React.FC<NavbarProps> = ({
               <button
                 type="button"
                 onClick={() => onNavigate('admin')}
+                onMouseEnter={() => onPrefetchRoute?.('admin')}
+                onFocus={() => onPrefetchRoute?.('admin')}
                 className={`text-sm font-bold whitespace-nowrap shrink-0 py-1.5 border-b-2 transition-colors ${
                   page === 'admin'
                     ? 'text-[var(--purple)] border-[var(--purple)]'
@@ -337,7 +343,7 @@ export const Navbar: React.FC<NavbarProps> = ({
           </nav>
 
           {/* Right: 1. Notification Bell -> 2. Theme Toggle -> 3. Sign In / Account Profile Menu */}
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
             {notificationSlot}
 
             <button
@@ -350,10 +356,10 @@ export const Navbar: React.FC<NavbarProps> = ({
               {theme === 'light' ? <Moon className="w-5 h-5" /> : <Sun className="w-5 h-5" />}
             </button>
 
-            <div className="min-w-[84px] sm:min-w-[168px] flex items-center justify-end gap-2">
+            <div className="flex items-center justify-end gap-1.5 sm:gap-2 sm:min-w-[168px]">
               {effectiveAuthStatus === 'initializing' ? (
                 <div
-                  className="w-[84px] sm:w-[168px] h-9 invisible pointer-events-none"
+                  className="w-16 sm:w-[168px] h-9 invisible pointer-events-none"
                   aria-hidden="true"
                 />
               ) : isAuthenticatedUi ? (
@@ -494,10 +500,10 @@ export const Navbar: React.FC<NavbarProps> = ({
                   onClick={onOpenAuth}
                   onMouseEnter={onPrefetchAuth}
                   onFocus={onPrefetchAuth}
-                  className="bx-btn bx-btn-orange bx-btn-sm inline-flex items-center gap-1.5"
+                  className="bx-btn bx-btn-orange bx-btn-sm inline-flex items-center gap-1 sm:gap-1.5 !px-2.5 sm:!px-3.5 whitespace-nowrap"
                   data-testid="navbar-login-btn"
                 >
-                  <UserIcon className="w-4 h-4" />
+                  <UserIcon className="w-4 h-4 shrink-0" />
                   <span>{t(language, 'btn_login')}</span>
                 </button>
               )}
@@ -710,11 +716,12 @@ export const Navbar: React.FC<NavbarProps> = ({
 export const BottomNav: React.FC<{
   page: NavPage;
   onNavigate: (p: NavPage) => void;
+  onPrefetchRoute?: (p: NavPage) => void;
   language: LanguageCode;
   cachedUser?: CachedUser | null;
   hasCachedUser?: boolean;
   authStatus?: AuthStateLifecycle;
-}> = ({ page, onNavigate, language, cachedUser, hasCachedUser, authStatus }) => {
+}> = ({ page, onNavigate, onPrefetchRoute, language, cachedUser, hasCachedUser, authStatus }) => {
   const showAccountAvatar =
     (authStatus === 'authenticated' || Boolean(hasCachedUser)) && Boolean(cachedUser?.avatarUrl);
 
@@ -743,7 +750,7 @@ export const BottomNav: React.FC<{
 
   return (
     <nav
-      className="fixed bottom-0 inset-x-0 z-40 grid grid-cols-5 border-t-2 border-[var(--bx-border)] bg-[var(--bx-bg)]/95 lg:hidden backdrop-blur-md"
+      className="fixed bottom-0 inset-x-0 z-40 grid grid-cols-5 border-t-2 border-[var(--bx-border)] bg-[var(--bx-bg)]/95 lg:hidden backdrop-blur-md pb-[env(safe-area-inset-bottom)]"
       aria-label="Mobile bottom navigation"
     >
       {items.map((it) => {
@@ -754,6 +761,8 @@ export const BottomNav: React.FC<{
             key={it.id}
             type="button"
             onClick={() => onNavigate(it.id)}
+            onTouchStart={() => onPrefetchRoute?.(it.id)}
+            onFocus={() => onPrefetchRoute?.(it.id)}
             className={`flex flex-col items-center justify-center gap-1 min-h-[56px] px-1 text-[11px] font-bold transition-colors ${
               active ? 'text-[var(--orange)]' : 'text-[var(--text-3)]'
             } ${hideInitializingProfile ? 'invisible pointer-events-none' : ''}`}

@@ -67,7 +67,7 @@ export default defineConfig(() => {
       : fcmOfficialDefaultVapidPublicKey;
 
   return {
-    base: './',
+    base: process.env.VITE_BASE_PATH || '/',
     define: {
       'import.meta.env.VITE_FIREBASE_VAPID_KEY': JSON.stringify(resolvedPublicVapidKey),
     },
@@ -128,14 +128,14 @@ export default defineConfig(() => {
           cleanupOutdatedCaches: true,
           skipWaiting: true,
           clientsClaim: true,
-          globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2,wav}'],
+          globPatterns: ['**/*.{ico,png,svg,webmanifest,wav}', 'registerSW.js'],
           globIgnores: [
+            '**/index.html',
+            '**/assets/**',
             '**/firebase-messaging-sw.js',
             '**/vendor/firebase/**',
-            '**/AdminDashboard-*.js',
-            '**/Admin*-*.js',
-            '**/PhoneCountryInput-*.js',
           ],
+          navigateFallback: null,
           navigateFallbackDenylist: [
             /^\/api\//,
             /^\/__\//,
@@ -144,6 +144,26 @@ export default defineConfig(() => {
             /^\/sounds\/.*\.wav$/,
           ],
           runtimeCaching: [
+            {
+              urlPattern: ({ request }) => request.mode === 'navigate',
+              handler: 'NetworkFirst',
+              options: {
+                cacheName: 'bexora-html-navigation',
+                networkTimeoutSeconds: 4,
+                expiration: { maxEntries: 5, maxAgeSeconds: 60 * 60 * 24 },
+                cacheableResponse: { statuses: [200] },
+              },
+            },
+            {
+              urlPattern: ({ url, sameOrigin }) =>
+                sameOrigin && /\/assets\/[^/]+\.(?:js|css|woff2?|png|svg|webp)$/i.test(url.pathname),
+              handler: 'CacheFirst',
+              options: {
+                cacheName: 'bexora-hashed-assets',
+                expiration: { maxEntries: 150, maxAgeSeconds: 60 * 60 * 24 * 7 },
+                cacheableResponse: { statuses: [200] },
+              },
+            },
             {
               urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,
               handler: 'CacheFirst',

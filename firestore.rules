@@ -186,6 +186,32 @@ service cloud.firestore {
         && data.createdAt is timestamp;
     }
 
+    function isValidAdminInvitation(data, inviteId) {
+      return data.keys().hasAll([
+          'targetUid', 'role', 'permissions', 'status', 'invitedBy', 'createdAtMs', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'targetUid', 'targetName', 'targetEmail', 'role', 'permissions', 'status',
+          'invitedBy', 'invitedByName', 'rejectionReason', 'respondedAtMs',
+          'createdAtMs', 'createdAt', 'updatedAt'
+        ])
+        && inviteId == ('inv_' + data.targetUid)
+        && isValidId(data.targetUid)
+        && (!('targetName' in data) || (data.targetName is string && data.targetName.size() <= 80))
+        && (!('targetEmail' in data) || (data.targetEmail is string && data.targetEmail.size() <= 160))
+        && data.role in ['admin', 'superadmin']
+        && data.permissions is list && data.permissions.size() <= 20
+        && (data.permissions.size() == 0 || (data.permissions[0] is string && data.permissions[0].size() <= 64))
+        && data.status in ['pending', 'accepted', 'rejected', 'revoked']
+        && isValidId(data.invitedBy)
+        && (!('invitedByName' in data) || (data.invitedByName is string && data.invitedByName.size() <= 80))
+        && (!('rejectionReason' in data) || (data.rejectionReason is string && data.rejectionReason.size() <= 300))
+        && (!('respondedAtMs' in data) || (data.respondedAtMs is int && data.respondedAtMs >= 0))
+        && data.createdAtMs is int && data.createdAtMs >= 0
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
     function isValidIdentityVerification(data, uid) {
       return data.keys().hasAll(['uid', 'frontImageData', 'backImageData', 'status', 'submittedAt', 'updatedAt'])
         && data.keys().hasOnly(['uid', 'frontImageData', 'backImageData', 'status', 'rejectionReason', 'reviewedBy', 'submittedAt', 'updatedAt'])
@@ -224,7 +250,7 @@ service cloud.firestore {
         && data.sellerName is string && data.sellerName.size() >= 1 && data.sellerName.size() <= 80
         && data.sellerUsername is string && data.sellerUsername.size() >= 1 && data.sellerUsername.size() <= 24
         && data.sellerVerified is bool
-        && data.platform in ['youtube', 'facebook', 'instagram', 'tiktok', 'telegram', 'website', 'domain', 'gaming']
+        && data.platform in ['youtube', 'facebook', 'instagram', 'tiktok', 'telegram', 'website', 'domain', 'gaming', 'others']
         && data.subcategory is string && data.subcategory.size() >= 1 && data.subcategory.size() <= 60
         && data.title is string && data.title.size() >= 8 && data.title.size() <= 120
         && data.description is string && data.description.size() >= 20 && data.description.size() <= 4000
@@ -617,7 +643,7 @@ service cloud.firestore {
         && (!('sellerName' in data) || (data.sellerName is string && data.sellerName.size() <= 80))
         && (!('listingId' in data) || isValidId(data.listingId))
         && (!('listingTitle' in data) || (data.listingTitle is string && data.listingTitle.size() <= 120))
-        && (!('platform' in data) || data.platform in ['youtube', 'facebook', 'instagram', 'tiktok', 'telegram', 'website', 'domain', 'gaming'])
+        && (!('platform' in data) || data.platform in ['youtube', 'facebook', 'instagram', 'tiktok', 'telegram', 'website', 'domain', 'gaming', 'others'])
         && data.reviewerId is string && data.reviewerId.size() <= 128
         && data.reviewerId != data.sellerId
         && data.reviewerName is string && data.reviewerName.size() <= 80
@@ -804,7 +830,7 @@ service cloud.firestore {
         && data.sellerName is string && data.sellerName.size() >= 1 && data.sellerName.size() <= 80
         && data.sellerUsername is string && data.sellerUsername.size() >= 1 && data.sellerUsername.size() <= 40
         && data.title is string && data.title.size() >= 1 && data.title.size() <= 140
-        && data.platform in ['youtube', 'facebook', 'instagram', 'tiktok', 'telegram', 'website', 'domain', 'gaming']
+        && data.platform in ['youtube', 'facebook', 'instagram', 'tiktok', 'telegram', 'website', 'domain', 'gaming', 'others']
         && data.subcategory is string && data.subcategory.size() >= 1 && data.subcategory.size() <= 80
         && data.priceMinor is int && data.priceMinor >= 100
         && data.currency in ['BDT', 'USD']
@@ -939,7 +965,7 @@ service cloud.firestore {
         ])
         && data.uid == uid
         && data.query is string && data.query.size() <= 120
-        && data.platform in ['all', 'youtube', 'facebook', 'instagram', 'tiktok', 'telegram', 'website', 'domain', 'gaming']
+        && data.platform in ['all', 'youtube', 'facebook', 'instagram', 'tiktok', 'telegram', 'website', 'domain', 'gaming', 'others']
         && data.subcategory is string && data.subcategory.size() <= 80
         && data.monetization in ['all', 'monetized', 'non-monetized']
         && data.verifiedOnly is bool
@@ -962,7 +988,7 @@ service cloud.firestore {
         && data.actorDisplayName is string && data.actorDisplayName.size() >= 2 && data.actorDisplayName.size() <= 80
         && data.actorVerified is bool
         && (!('assetTitle' in data) || (data.assetTitle is string && data.assetTitle.size() >= 2 && data.assetTitle.size() <= 120))
-        && (!('platform' in data) || data.platform in ['youtube', 'facebook', 'instagram', 'tiktok', 'telegram', 'website', 'domain', 'gaming'])
+        && (!('platform' in data) || data.platform in ['youtube', 'facebook', 'instagram', 'tiktok', 'telegram', 'website', 'domain', 'gaming', 'others'])
         && data.amountMinor is int && data.amountMinor > 0
         && data.currency in ['BDT', 'USD']
         && data.completedAtMs is int && data.completedAtMs > 0
@@ -1422,20 +1448,66 @@ service cloud.firestore {
         && (existing().uid == request.auth.uid || isAdmin());
     }
 
-    // 4. Admins Registry (Only SuperAdmin can manage roles)
+    // 4. Admins Registry (Active Admins ONLY — pending/rejected invitations live in /adminInvitations and NEVER grant isAdmin())
     match /admins/{userId} {
       allow get: if isSignedIn() && isValidId(userId) && (request.auth.uid == userId || isAdmin());
       allow list: if isAdmin();
-      allow create: if isSuperAdmin()
-        && isValidId(userId)
+      allow create: if isValidId(userId)
         && isValidAdminRecord(incoming(), userId)
-        && incoming().createdAt == request.time;
+        && incoming().createdAt == request.time
+        && (
+          isSuperAdmin()
+          || (
+            isSignedIn()
+            && request.auth.uid == userId
+            && exists(/databases/$(database)/documents/adminInvitations/$('inv_' + userId))
+            && get(/databases/$(database)/documents/adminInvitations/$('inv_' + userId)).data.status == 'pending'
+            && incoming().role == get(/databases/$(database)/documents/adminInvitations/$('inv_' + userId)).data.role
+            && incoming().grantedBy == get(/databases/$(database)/documents/adminInvitations/$('inv_' + userId)).data.invitedBy
+            && getAfter(/databases/$(database)/documents/adminInvitations/$('inv_' + userId)).data.status == 'accepted'
+          )
+        );
       allow update: if isSuperAdmin()
         && isValidId(userId)
         && isValidAdminRecord(incoming(), userId)
         && incoming().createdAt == existing().createdAt
         && incoming().diff(existing()).affectedKeys().hasOnly(['role', 'permissions']);
       allow delete: if isSuperAdmin() && isValidId(userId);
+    }
+
+    // 4b. Admin Role Invitations (Pending / Accepted / Rejected / Revoked)
+    match /adminInvitations/{inviteId} {
+      allow get: if isSignedIn() && isValidId(inviteId) && (isSuperAdmin() || resource.data.targetUid == request.auth.uid);
+      allow list: if isSignedIn() && (isSuperAdmin() || resource.data.targetUid == request.auth.uid);
+      allow create: if isSuperAdmin()
+        && isValidId(inviteId)
+        && isValidAdminInvitation(incoming(), inviteId)
+        && incoming().status == 'pending'
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isSignedIn()
+        && isValidId(inviteId)
+        && isValidAdminInvitation(incoming(), inviteId)
+        && incoming().targetUid == existing().targetUid
+        && incoming().invitedBy == existing().invitedBy
+        && incoming().createdAt == existing().createdAt
+        && incoming().createdAtMs == existing().createdAtMs
+        && incoming().updatedAt == request.time
+        && (
+          isSuperAdmin()
+          || (
+            request.auth.uid == existing().targetUid
+            && existing().status == 'pending'
+            && incoming().role == existing().role
+            && incoming().permissions == existing().permissions
+            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'rejectionReason', 'respondedAtMs', 'updatedAt'])
+            && (
+              (incoming().status == 'accepted' && existsAfter(/databases/$(database)/documents/admins/$(request.auth.uid)))
+              || incoming().status == 'rejected'
+            )
+          )
+        );
+      allow delete: if isSuperAdmin() && isValidId(inviteId);
     }
 
     // 5. Private Identity Verifications (NID Front & Back)
@@ -2494,7 +2566,9 @@ service cloud.firestore {
             && incoming().diff(existing()).affectedKeys().hasOnly(['read', 'readAt', 'updatedAt'])
           )
         );
-      allow delete: if false;
+      allow delete: if isSignedIn()
+        && isValidId(notificationId)
+        && (existing().recipientId == request.auth.uid || isAdmin());
     }
 
     // 19. Admin-Managed Public Broadcast Announcements
@@ -2701,7 +2775,7 @@ service cloud.firestore {
         request.auth.uid == userId
         || isAdmin()
       );
-      allow list: if isAdmin() && resource.data.userId is string;
+      allow list: if isAdmin();
       allow create: if isAdmin()
         && isValidId(userId)
         && isValidUserRestriction(incoming(), userId)

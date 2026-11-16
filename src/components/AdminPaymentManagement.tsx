@@ -30,6 +30,7 @@ import {
 } from '../lib/countryCurrencyCatalog';
 import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
 import { db } from '../lib/firebase';
+import { buildApiUrl } from '../lib/apiClient';
 
 interface AdminPaymentManagementProps {
   getIdToken: () => Promise<string>;
@@ -174,7 +175,7 @@ export function AdminPaymentManagement({ getIdToken }: AdminPaymentManagementPro
     try {
       const token = await getIdToken();
       // Try API route first
-      const res = await fetch('/api/admin/payments/settings', {
+      const res = await fetch(buildApiUrl('/api/admin/payments/settings'), {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -210,7 +211,7 @@ export function AdminPaymentManagement({ getIdToken }: AdminPaymentManagementPro
       const nagad = manualMethods.find((m) => m.type === 'nagad');
       const rocket = manualMethods.find((m) => m.type === 'rocket');
 
-      await fetch('/api/admin/payments/settings', {
+      await fetch(buildApiUrl('/api/admin/payments/settings'), {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -271,7 +272,7 @@ export function AdminPaymentManagement({ getIdToken }: AdminPaymentManagementPro
         payload.usdtToBdtRate = countryInputRate;
       }
 
-      await fetch('/api/admin/payments/settings', {
+      await fetch(buildApiUrl('/api/admin/payments/settings'), {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',

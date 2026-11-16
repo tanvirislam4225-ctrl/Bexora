@@ -38,12 +38,15 @@ test('Firestore Rules: auditLogs and walletLedger are strictly append-only (no u
   assert.match(rules, /match\s+\/auditLogs\/\{logId\}[\s\S]*?allow\s+update,\s*delete:\s*if\s+false;/);
 });
 
-test('Firestore Rules: notifications enforce recipient-scoped reads, verified counterparty writes, mark-read-only updates, and forbid delete', () => {
+test('Firestore Rules: notifications enforce recipient-scoped reads, verified counterparty writes, mark-read-only updates, and recipient-or-admin delete', () => {
   assert.match(rules, /match\s+\/notifications\/\{notificationId\}/);
   assert.match(rules, /resource\.data\.recipientId\s*==\s*request\.auth\.uid/);
   assert.match(rules, /incoming\(\)\.diff\(existing\(\)\)\.affectedKeys\(\)\.hasOnly\(\['read',\s*'readAt',\s*'updatedAt'\]\)/);
   assert.match(rules, /existing\(\)\.read\s*==\s*false\s*&&\s*incoming\(\)\.read\s*==\s*true/);
-  assert.match(rules, /match\s+\/notifications\/\{notificationId\}[\s\S]*?allow\s+delete:\s*if\s+false;/);
+  assert.match(
+    rules,
+    /match\s+\/notifications\/\{notificationId\}[\s\S]*?allow\s+delete:\s*if\s+isSignedIn\(\)[\s\S]*?existing\(\)\.recipientId\s*==\s*request\.auth\.uid\s*\|\|\s*isAdmin\(\)/
+  );
 });
 
 test('Firestore Rules: pushTokens are strictly owner-only with parent Master Gate and announcements require isAdmin() to write', () => {
@@ -290,3 +293,13 @@ test('Firestore Rules: enforces userPresence and per-session heartbeat validatio
   assert.match(rules, /incoming\(\)\.diff\(existing\(\)\)\.affectedKeys\(\)\.hasOnly\(\['state',\s*'lastSeenMs',\s*'activeSessions',\s*'updatedAt'\]\)/);
   assert.match(rules, /incoming\(\)\.diff\(existing\(\)\)\.affectedKeys\(\)\.hasOnly\(\['state',\s*'lastHeartbeatAtMs',\s*'updatedAt'\]\)/);
 });
+
+test('Firestore Rules: supports others category across all platform allowlists and enforces active-only admins via adminInvitations', () => {
+  const othersMatches = rules.match(/'others'/g) || [];
+  assert.ok(othersMatches.length >= 5, 'Expected others in listings, reviews, favorites, recentSearches, and publicActivity');
+  assert.match(rules, /function\s+isValidAdminInvitation\(data,\s*inviteId\)/);
+  assert.match(rules, /match\s+\/adminInvitations\/\{inviteId\}/);
+  assert.match(rules, /existsAfter\(\/databases\/\$\(database\)\/documents\/admins\/\$\(request\.auth\.uid\)\)/);
+  assert.match(rules, /getAfter\(\/databases\/\$\(database\)\/documents\/adminInvitations\/\$\('inv_'\s*\+\s*userId\)\)\.data\.status\s*==\s*'accepted'/);
+});
+

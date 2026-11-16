@@ -29,6 +29,21 @@ import {
   VIEW_DEDUPLICATION_WINDOW_MS,
 } from '../lib/viewCountLogic';
 import { recordSecurityEvent, SlidingWindowRateLimiter } from '../lib/serverSecurity';
+import {
+  computeAdminFinanceOverview,
+  isDealEligibleForAutoRelease,
+  sanitizeUsdToBdtRate,
+  type AdminFinanceOverviewResult,
+  type FinanceDealInput,
+} from '../lib/adminFinanceLogic';
+import { convertOrderMinorToWalletBdtMinor } from '../lib/checkoutAndIntentLogic';
+import {
+  buildSanitizedSoldTickerPayload,
+  generateOpaquePublicActivityId,
+} from '../lib/activityTickerLogic';
+import { buildNotificationId } from '../lib/notificationLogic';
+import { formatMoneyFromMinor } from '../lib/marketplaceLogic';
+import { TtlCache } from './ttlCache';
 
 export interface VerifiedFirebaseRuntimeConfig {
   configValid: boolean;
@@ -649,7 +664,7 @@ export function registerMarketplaceManagementRoutes<
         }
       }
 
-      const ageCheck = validateAccountAge(ageYears, ageMonths, platform !== 'gaming' && !saveAsDraft);
+      const ageCheck = validateAccountAge(ageYears, ageMonths, platform !== 'gaming' && platform !== 'others' && !saveAsDraft);
       if (!saveAsDraft && !ageCheck.valid) {
         return res.status(400).json({ ok: false, error: ageCheck.error || 'Invalid account age.' });
       }
@@ -1357,11 +1372,11 @@ export function registerMarketplaceManagementRoutes<
 
     if (!loadedViaAdminSdk) {
       [publicDocs, privateDocs, restrictionDocs, listingDocs, dealDocs] = await Promise.all([
-        restRunStructuredQuery(cfg, { from: [{ collectionId: 'publicProfiles' }], limit: 100 }, adminIdToken),
-        restRunStructuredQuery(cfg, { from: [{ collectionId: 'privateUsers' }], limit: 300 }, adminIdToken),
-        restRunStructuredQuery(cfg, { from: [{ collectionId: 'userRestrictions' }], limit: 300 }, adminIdToken),
-        restRunStructuredQuery(cfg, { from: [{ collectionId: 'listings' }], limit: 400 }, adminIdToken),
-        restRunStructuredQuery(cfg, { from: [{ collectionId: 'deals' }], limit: 400 }, adminIdToken),
+        restListCollectionPaged(cfg, adminIdToken, 'publicProfiles', [], false).catch(() => []),
+        restListCollectionPaged(cfg, adminIdToken, 'privateUsers', [], false).catch(() => []),
+        restListCollectionPaged(cfg, adminIdToken, 'userRestrictions', [], false).catch(() => []),
+        restListCollectionPaged(cfg, adminIdToken, 'listings', [], false).catch(() => []),
+        restListCollectionPaged(cfg, adminIdToken, 'deals', [], false).catch(() => []),
       ]);
     }
 
@@ -1375,12 +1390,109 @@ export function registerMarketplaceManagementRoutes<
     };
   }
 
+  async function restListCollectionPaged(
+    cfg: VerifiedFirebaseRuntimeConfig,
+    adminIdToken: string,
+    collectionName: string,
+    fields: string[],
+    useMask: boolean
+  ): Promise<Array<Record<string, unknown>>> {
+    const docs: Array<Record<string, unknown>> = [];
+    let pageToken = '';
+    const base = `${buildFirestoreRestBase(cfg)}/${encodeURIComponent(collectionName)}`;
+    while (true) {
+      const params = new URLSearchParams();
+      params.set('pageSize', '300');
+      if (pageToken) {
+        params.set('pageToken', pageToken);
+      }
+      if (useMask && fields.length > 0) {
+        for (const f of fields) {
+          params.append('mask.fieldPaths', f);
+        }
+      }
+      const res = await fetch(`${base}?${params.toString()}`, {
+        headers: { Authorization: `Bearer ${adminIdToken}` },
+      });
+      if (!res.ok) {
+        const bodyText = await res.text().catch(() => '');
+        throw new Error(`REST listDocuments ${collectionName} HTTP ${res.status}${bodyText ? `: ${bodyText.slice(0, 140)}` : ''}`);
+      }
+      const json = (await res.json()) as {
+        documents?: FirestoreRestDoc[];
+        nextPageToken?: string;
+      };
+      const pageDocs = Array.isArray(json.documents) ? json.documents : [];
+      for (const d of pageDocs) {
+        const parsed = parseRestDoc(d);
+        if (parsed) docs.push(parsed);
+      }
+      if (!json.nextPageToken || pageDocs.length === 0) break;
+      pageToken = json.nextPageToken;
+    }
+    return docs;
+  }
+
+  async function restRunQueryCursorPaged(
+    cfg: VerifiedFirebaseRuntimeConfig,
+    adminIdToken: string,
+    collectionName: string,
+    fields: string[]
+  ): Promise<Array<Record<string, unknown>>> {
+    const docs: Array<Record<string, unknown>> = [];
+    let lastResourceName = '';
+    const parentUrl = `${buildFirestoreRestBase(cfg)}:runQuery`;
+    while (true) {
+      const structuredQuery: Record<string, unknown> = {
+        from: [{ collectionId: collectionName }],
+        select: { fields: fields.map((fieldPath) => ({ fieldPath })) },
+        orderBy: [{ field: { fieldPath: '__name__' }, direction: 'ASCENDING' }],
+        limit: 300,
+      };
+      if (lastResourceName) {
+        structuredQuery.startAt = {
+          values: [{ referenceValue: lastResourceName }],
+          before: false,
+        };
+      }
+      const res = await fetch(parentUrl, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${adminIdToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ structuredQuery }),
+      });
+      if (!res.ok) {
+        const bodyText = await res.text().catch(() => '');
+        throw new Error(`REST runQuery ${collectionName} HTTP ${res.status}${bodyText ? `: ${bodyText.slice(0, 140)}` : ''}`);
+      }
+      const rows = (await res.json()) as Array<{ document?: FirestoreRestDoc }>;
+      let pageCount = 0;
+      let lastInPage = '';
+      for (const row of rows) {
+        if (row.document?.name) {
+          lastInPage = row.document.name;
+        }
+        const parsed = parseRestDoc(row.document);
+        if (parsed) {
+          docs.push(parsed);
+          pageCount += 1;
+        }
+      }
+      if (pageCount < 300 || !lastInPage || lastInPage === lastResourceName) break;
+      lastResourceName = lastInPage;
+    }
+    return docs;
+  }
+
   async function readCollectionPagedForFinanceOverview(
     cfg: VerifiedFirebaseRuntimeConfig,
     adminIdToken: string,
     collectionName: string,
     fields: string[]
-  ): Promise<{ docs: Array<Record<string, unknown>>; complete: boolean }> {
+  ): Promise<{ docs: Array<Record<string, unknown>>; complete: boolean; source: string; error?: string }> {
+    let adminErrMsg = '';
     try {
       const adminApp = getOrInitFirebaseAdminApp(cfg.projectId);
       const db = getAdminFirestore(adminApp, cfg.firestoreDatabaseId);
@@ -1403,39 +1515,53 @@ export function registerMarketplaceManagementRoutes<
         if (snap.docs.length < 500) break;
         lastId = snap.docs[snap.docs.length - 1].id;
       }
-      return { docs, complete: true };
-    } catch {
-      // Fallback to Firestore REST structuredQuery with 300/page offset pagination
+      return { docs, complete: true, source: 'admin_sdk' };
+    } catch (err) {
+      adminErrMsg = err instanceof Error ? err.message : String(err);
     }
 
-    const docs: Array<Record<string, unknown>> = [];
-    let offset = 0;
+    // Fallback 1: Firestore REST listDocuments with native pageToken cursor & field mask
     try {
-      while (true) {
-        const page = await restRunStructuredQuery(
-          cfg,
-          {
-            from: [{ collectionId: collectionName }],
-            select: { fields: fields.map((fieldPath) => ({ fieldPath })) },
-            orderBy: [{ field: { fieldPath: '__name__' }, direction: 'ASCENDING' }],
-            limit: 300,
-            offset,
-          },
-          adminIdToken,
-          '',
-          true
-        );
-        docs.push(...page);
-        if (page.length < 300) break;
-        offset += 300;
-      }
-      return { docs, complete: true };
+      const docs = await restListCollectionPaged(cfg, adminIdToken, collectionName, fields, true);
+      return { docs, complete: true, source: 'rest_list' };
     } catch {
-      return { docs, complete: false };
+      // Retry without mask.fieldPaths in case a field mask rule rejects partial selection
+      try {
+        const docs = await restListCollectionPaged(cfg, adminIdToken, collectionName, fields, false);
+        return { docs, complete: true, source: 'rest_list_full' };
+      } catch (listErr) {
+        const listErrMsg = listErr instanceof Error ? listErr.message : String(listErr);
+        // Fallback 2: Firestore REST structuredQuery with __name__ reference cursor (no fragile offset)
+        try {
+          const docs = await restRunQueryCursorPaged(cfg, adminIdToken, collectionName, fields);
+          return { docs, complete: true, source: 'rest_query' };
+        } catch (queryErr) {
+          const queryErrMsg = queryErr instanceof Error ? queryErr.message : String(queryErr);
+          return {
+            docs: [],
+            complete: false,
+            source: 'failed',
+            error: `${queryErrMsg} (list fallback: ${listErrMsg}; sdk: ${adminErrMsg})`,
+          };
+        }
+      }
     }
   }
 
-  app.get('/api/admin/finance-overview', async (req, res) => {
+  const FINANCE_OVERVIEW_CACHE_TTL_MS = 15_000;
+  const financeOverviewCache = new TtlCache<AdminFinanceOverviewResult>(
+    FINANCE_OVERVIEW_CACHE_TTL_MS,
+    24
+  );
+
+  function invalidateFinanceOverviewCache(): void {
+    financeOverviewCache.invalidate();
+  }
+
+  async function handleAdminFinanceOverview(
+    req: express.Request,
+    res: express.Response
+  ): Promise<express.Response> {
     res.setHeader('Cache-Control', 'no-store');
     const cfg = loadVerifiedFirebaseConfig();
     const adminCaller = await verifyAdminCaller(req, cfg);
@@ -1453,198 +1579,134 @@ export function registerMarketplaceManagementRoutes<
           error: 'usdToBdtRate must be greater than 0 and less than 100000.',
         });
       }
-      usdToBdtRateUsed = parsed;
+      usdToBdtRateUsed = sanitizeUsdToBdtRate(parsed, 120);
     }
 
-    const toBdtMinor = (rawAmount: unknown, rawCurrency: unknown): number => {
-      const num = Number(rawAmount);
-      if (!Number.isFinite(num) || num === 0) return 0;
-      const minor = Math.round(num);
-      const currency = String(rawCurrency || 'BDT').trim().toUpperCase();
-      if (currency === 'USD') {
-        return Math.round(minor * usdToBdtRateUsed);
-      }
-      return minor;
-    };
+    const forceRefresh = req.query.refresh === '1' || req.query.refresh === 'true';
+    const cacheKey = String(usdToBdtRateUsed);
 
     try {
-      const [privRes, listRes, dealRes, wdrRes, depRes] = await Promise.all([
-        readCollectionPagedForFinanceOverview(cfg, adminCaller.idToken, 'privateUsers', [
-          'walletBalanceMinor',
-          'reservedBalanceMinor',
-        ]),
-        readCollectionPagedForFinanceOverview(cfg, adminCaller.idToken, 'listings', [
-          'status',
-          'priceMinor',
-          'currency',
-        ]),
-        readCollectionPagedForFinanceOverview(cfg, adminCaller.idToken, 'deals', [
-          'status',
-          'currency',
-          'baseAmountMinor',
-          'platformCommissionMinor',
-          'refundPlatformRetainedMinor',
-          'sellerPayoutMinor',
-          'buyerTotalMinor',
-        ]),
-        readCollectionPagedForFinanceOverview(cfg, adminCaller.idToken, 'withdrawals', [
-          'status',
-          'amountMinor',
-          'currency',
-        ]),
-        readCollectionPagedForFinanceOverview(cfg, adminCaller.idToken, 'deposits', [
-          'status',
-          'amountMinor',
-          'currency',
-        ]),
-      ]);
+      const payload = await financeOverviewCache.getOrCompute(
+        cacheKey,
+        async () => {
+          const [privRes, restRes, listRes, dealRes, wdrRes, depRes, nidRes] = await Promise.all([
+            readCollectionPagedForFinanceOverview(cfg, adminCaller.idToken, 'privateUsers', [
+              'uid',
+              'walletBalanceMinor',
+              'reservedBalanceMinor',
+            ]),
+            readCollectionPagedForFinanceOverview(cfg, adminCaller.idToken, 'userRestrictions', [
+              'userId',
+              'accountStatus',
+              'restrictWithdrawals',
+              'financialHoldActive',
+              'expiresAtMs',
+            ]),
+            readCollectionPagedForFinanceOverview(cfg, adminCaller.idToken, 'listings', [
+              'status',
+              'priceMinor',
+              'currency',
+            ]),
+            readCollectionPagedForFinanceOverview(cfg, adminCaller.idToken, 'deals', [
+              'status',
+              'currency',
+              'baseAmountMinor',
+              'platformCommissionMinor',
+              'refundPlatformRetainedMinor',
+              'sellerPayoutMinor',
+              'buyerTotalMinor',
+              'originalDeadlineMs',
+              'unresolvedReportCount',
+              'settlementLedgerId',
+            ]),
+            readCollectionPagedForFinanceOverview(cfg, adminCaller.idToken, 'withdrawals', [
+              'status',
+              'amountMinor',
+              'currency',
+            ]),
+            readCollectionPagedForFinanceOverview(cfg, adminCaller.idToken, 'deposits', [
+              'status',
+              'amountMinor',
+              'currency',
+            ]),
+            readCollectionPagedForFinanceOverview(cfg, adminCaller.idToken, 'identityVerifications', [
+              'status',
+            ]),
+          ]);
 
-      const complete =
-        privRes.complete &&
-        listRes.complete &&
-        dealRes.complete &&
-        wdrRes.complete &&
-        depRes.complete;
+          const readResults = {
+            privateUsers: privRes,
+            userRestrictions: restRes,
+            listings: listRes,
+            deals: dealRes,
+            withdrawals: wdrRes,
+            deposits: depRes,
+            identityVerifications: nidRes,
+          };
+          const failedCollections: string[] = [];
+          const collectionDiagnostics: Record<
+            string,
+            { complete: boolean; count: number; source: string; error?: string }
+          > = {};
+          for (const [colName, colRes] of Object.entries(readResults)) {
+            collectionDiagnostics[colName] = {
+              complete: colRes.complete,
+              count: colRes.docs.length,
+              source: colRes.source,
+              ...(colRes.error ? { error: colRes.error } : {}),
+            };
+            if (!colRes.complete) {
+              failedCollections.push(colName);
+            }
+          }
 
-      let liveCount = 0;
-      let liveValueBdtMinor = 0;
-      let pendingListingCount = 0;
-      let pendingValueBdtMinor = 0;
-      for (const l of listRes.docs) {
-        const st = String(l.status || '');
-        if (st === 'active' || st === 'reserved') {
-          liveCount += 1;
-          liveValueBdtMinor += toBdtMinor(l.priceMinor, l.currency);
-        } else if (st === 'pending') {
-          pendingListingCount += 1;
-          pendingValueBdtMinor += toBdtMinor(l.priceMinor, l.currency);
+          const complete = failedCollections.length === 0;
+
+          return computeAdminFinanceOverview({
+            privateUsers: privRes.docs,
+            userRestrictions: restRes.docs,
+            listings: listRes.docs,
+            deals: dealRes.docs as FinanceDealInput[],
+            withdrawals: wdrRes.docs,
+            deposits: depRes.docs,
+            identityVerifications: nidRes.docs,
+            usdToBdtRate: usdToBdtRateUsed,
+            nowMs: Date.now(),
+            complete,
+            failedCollections,
+            collectionDiagnostics,
+          });
+        },
+        {
+          forceRefresh,
+          shouldCache: (result) => Boolean(result.complete),
         }
-      }
+      );
 
-      const HELD_ESCROW_STATUSES = new Set([
-        'paid_deal_room_active',
-        'paid',
-        'transfer_in_progress',
-        'transfer_submitted',
-        'awaiting_buyer_confirmation',
-        'transfer_rejected',
-        'security_period_active',
-        'protection_active',
-        'reported_under_review',
-        'protection_expired',
-      ]);
-
-      let settledCount = 0;
-      let grossSalesBdtMinor = 0;
-      let realizedRevenueBdtMinor = 0;
-      let refundRetainedRevenueBdtMinor = 0;
-      let sellerPayoutsReleasedBdtMinor = 0;
-      let heldCount = 0;
-      let escrowHeldBdtMinor = 0;
-      let pendingSellerEarningsBdtMinor = 0;
-      let expectedRevenueBdtMinor = 0;
-
-      for (const d of dealRes.docs) {
-        const st = String(d.status || '');
-        if (st === 'settled') {
-          settledCount += 1;
-          grossSalesBdtMinor += toBdtMinor(d.baseAmountMinor, d.currency);
-          realizedRevenueBdtMinor += toBdtMinor(d.platformCommissionMinor, d.currency);
-          sellerPayoutsReleasedBdtMinor += toBdtMinor(d.sellerPayoutMinor, d.currency);
-        } else if (st === 'refunded') {
-          refundRetainedRevenueBdtMinor += toBdtMinor(d.refundPlatformRetainedMinor, d.currency);
-        } else if (HELD_ESCROW_STATUSES.has(st)) {
-          heldCount += 1;
-          escrowHeldBdtMinor += toBdtMinor(d.buyerTotalMinor, d.currency);
-          pendingSellerEarningsBdtMinor += toBdtMinor(d.sellerPayoutMinor, d.currency);
-          expectedRevenueBdtMinor += toBdtMinor(d.platformCommissionMinor, d.currency);
-        }
-      }
-
-      let usersWithBalance = 0;
-      let availableWalletBdtMinor = 0;
-      let lockedInWithdrawalsBdtMinor = 0;
-      for (const u of privRes.docs) {
-        const walletNum = Number(u.walletBalanceMinor);
-        const wallet = Number.isFinite(walletNum) ? Math.round(walletNum) : 0;
-        const reservedNum = Number(u.reservedBalanceMinor);
-        const reserved = Number.isFinite(reservedNum) ? Math.round(reservedNum) : 0;
-        if (wallet > 0) usersWithBalance += 1;
-        availableWalletBdtMinor += wallet;
-        lockedInWithdrawalsBdtMinor += reserved;
-      }
-
-      let pendingWithdrawalsCount = 0;
-      let pendingWithdrawalsBdtMinor = 0;
-      let paidWithdrawalsBdtMinor = 0;
-      for (const w of wdrRes.docs) {
-        const st = String(w.status || '');
-        if (st === 'pending') {
-          pendingWithdrawalsCount += 1;
-          pendingWithdrawalsBdtMinor += toBdtMinor(w.amountMinor, w.currency);
-        } else if (st === 'paid') {
-          paidWithdrawalsBdtMinor += toBdtMinor(w.amountMinor, w.currency);
-        }
-      }
-
-      let pendingDepositsCount = 0;
-      let pendingDepositsBdtMinor = 0;
-      let approvedDepositsBdtMinor = 0;
-      for (const dep of depRes.docs) {
-        const st = String(dep.status || '');
-        if (st === 'pending') {
-          pendingDepositsCount += 1;
-          pendingDepositsBdtMinor += toBdtMinor(dep.amountMinor, dep.currency);
-        } else if (st === 'approved') {
-          approvedDepositsBdtMinor += toBdtMinor(dep.amountMinor, dep.currency);
-        }
-      }
-
-      return res.json({
-        ok: true,
-        generatedAtMs: Date.now(),
-        usdToBdtRateUsed,
-        complete,
-        listings: {
-          liveCount,
-          liveValueBdtMinor,
-          pendingCount: pendingListingCount,
-          pendingValueBdtMinor,
-        },
-        deals: {
-          settledCount,
-          grossSalesBdtMinor,
-          realizedRevenueBdtMinor,
-          refundRetainedRevenueBdtMinor,
-          sellerPayoutsReleasedBdtMinor,
-          heldCount,
-          escrowHeldBdtMinor,
-          pendingSellerEarningsBdtMinor,
-          expectedRevenueBdtMinor,
-        },
-        users: {
-          totalUsers: privRes.docs.length,
-          usersWithBalance,
-          availableWalletBdtMinor,
-          lockedInWithdrawalsBdtMinor,
-        },
-        withdrawals: {
-          pendingCount: pendingWithdrawalsCount,
-          pendingBdtMinor: pendingWithdrawalsBdtMinor,
-          paidBdtMinor: paidWithdrawalsBdtMinor,
-        },
-        deposits: {
-          pendingCount: pendingDepositsCount,
-          pendingBdtMinor: pendingDepositsBdtMinor,
-          approvedBdtMinor: approvedDepositsBdtMinor,
-        },
-      });
+      return res.json(payload);
     } catch (err) {
       return res.status(500).json({
         ok: false,
         error: err instanceof Error ? err.message : 'Unable to compute finance overview.',
       });
     }
+  }
+
+  app.get('/api/admin/finance-overview', (req, res) => {
+    void handleAdminFinanceOverview(req, res);
+  });
+  app.get('/api/admin/finance/overview', (req, res) => {
+    void handleAdminFinanceOverview(req, res);
+  });
+  app.post('/api/admin/finance-overview/invalidate', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const cfg = loadVerifiedFirebaseConfig();
+    const adminCaller = await verifyAdminCaller(req, cfg);
+    if (!adminCaller) {
+      return res.status(403).json({ ok: false, error: 'Administrator authentication is required.' });
+    }
+    invalidateFinanceOverviewCache();
+    return res.json({ ok: true });
   });
 
   app.get('/api/admin/users', async (req, res) => {
@@ -2951,4 +3013,456 @@ export function registerMarketplaceManagementRoutes<
       });
     }
   });
+
+  /**
+   * Executes an idempotent, atomic Pending Seller Balance -> Available Wallet Balance release
+   * for a single escrow deal whose security period has completed with zero open disputes.
+   * Uses deterministic `walletLedger/led_release_${dealId}` guard inside a Firestore transaction
+   * so retries, concurrent timers, or simultaneous callers can NEVER double-credit a seller.
+   */
+  async function executeAtomicDealReleaseIfReady(
+    cfg: TCfg,
+    dealId: string,
+    actorUid = 'system'
+  ): Promise<{
+    released: boolean;
+    alreadySettled?: boolean;
+    reason?: string;
+    dealId: string;
+    sellerId?: string;
+    creditedBdtMinor?: number;
+    ledgerId?: string;
+  }> {
+    if (!VALID_ID_REGEX.test(dealId)) {
+      return { released: false, reason: 'invalid_deal_id', dealId };
+    }
+
+    const adminApp = getOrInitFirebaseAdminApp(cfg.projectId);
+    const db = getAdminFirestore(adminApp, cfg.firestoreDatabaseId);
+    const ledgerId = `led_release_${dealId}`;
+
+    const settingsSnap = await db.collection('publicConfig').doc('settings').get().catch(() => null);
+    const usdToBdtRate = sanitizeUsdToBdtRate(settingsSnap?.data()?.usdToBdtRate, 120);
+
+    const reportsQuery = db
+      .collection('deals')
+      .doc(dealId)
+      .collection('reports')
+      .where('status', 'in', ['open', 'evidence_requested'])
+      .limit(5);
+
+    const dealRef = db.collection('deals').doc(dealId);
+    const ledgerRef = db.collection('walletLedger').doc(ledgerId);
+
+    const txResult = await db.runTransaction(async (tx) => {
+      const [dSnap, ledSnap, openReportsSnap] = await Promise.all([
+        tx.get(dealRef),
+        tx.get(ledgerRef),
+        tx.get(reportsQuery),
+      ]);
+
+      if (!dSnap.exists) {
+        return { released: false, reason: 'deal_not_found' as const };
+      }
+
+      const dData = dSnap.data() || {};
+      if (dData.status === 'settled' || ledSnap.exists) {
+        return { released: false, alreadySettled: true, reason: 'already_settled' as const };
+      }
+
+      const nowMs = Date.now();
+      const dealInput: FinanceDealInput = {
+        id: dealId,
+        listingId: String(dData.listingId || ''),
+        listingTitle: String(dData.listingTitle || 'Digital Asset'),
+        platform: String(dData.platform || 'other'),
+        buyerId: String(dData.buyerId || ''),
+        buyerName: String(dData.buyerName || ''),
+        sellerId: String(dData.sellerId || ''),
+        sellerName: String(dData.sellerName || ''),
+        status: String(dData.status || ''),
+        currency: (String(dData.currency || 'BDT') === 'USD' ? 'USD' : 'BDT') as 'BDT' | 'USD',
+        baseAmountMinor: Number(dData.baseAmountMinor || 0),
+        sellerPayoutMinor: Number(dData.sellerPayoutMinor || 0),
+        originalDeadlineMs: Number(dData.originalDeadlineMs || 0),
+        unresolvedReportCount: Number(dData.unresolvedReportCount || 0),
+        settlementLedgerId: dData.settlementLedgerId ? String(dData.settlementLedgerId) : undefined,
+      };
+
+      if (!isDealEligibleForAutoRelease(dealInput, openReportsSnap.size, nowMs)) {
+        return { released: false, reason: 'not_eligible_yet' as const };
+      }
+
+      const sellerId = String(dData.sellerId || '').trim();
+      const buyerId = String(dData.buyerId || '').trim();
+      if (!sellerId || !buyerId) {
+        return { released: false, reason: 'missing_participants' as const };
+      }
+
+      const sellerPrivRef = db.collection('privateUsers').doc(sellerId);
+      const sellerPubRef = db.collection('publicProfiles').doc(sellerId);
+      const buyerPubRef = db.collection('publicProfiles').doc(buyerId);
+
+      const [sPrivSnap, sPubSnap, bPubSnap] = await Promise.all([
+        tx.get(sellerPrivRef),
+        tx.get(sellerPubRef),
+        tx.get(buyerPubRef),
+      ]);
+
+      if (!sPrivSnap.exists) {
+        return { released: false, reason: 'seller_wallet_missing' as const };
+      }
+
+      const sellerPayoutOrderMinor = Math.max(0, Math.round(Number(dData.sellerPayoutMinor || 0)));
+      const orderCurrency = (String(dData.currency || 'BDT') === 'USD' ? 'USD' : 'BDT') as
+        | 'BDT'
+        | 'USD';
+      const sellerPayoutWalletBdtMinor = convertOrderMinorToWalletBdtMinor(
+        sellerPayoutOrderMinor,
+        orderCurrency,
+        usdToBdtRate
+      );
+      const curSellerBal = Number(sPrivSnap.data()?.walletBalanceMinor || 0);
+
+      const actId = generateOpaquePublicActivityId(nowMs);
+      const soldPayload = buildSanitizedSoldTickerPayload({
+        deal: {
+          id: dealId,
+          listingId: String(dData.listingId || ''),
+          listingTitle: String(dData.listingTitle || 'Digital Asset'),
+          platform: (String(dData.platform || 'other') as never),
+          buyerId,
+          buyerName: String(dData.buyerName || ''),
+          sellerId,
+          sellerName: String(dData.sellerName || ''),
+          baseAmountMinor: Number(dData.baseAmountMinor || 0),
+          buyerFeePct: Number(dData.buyerFeePct || 0),
+          sellerFeePct: Number(dData.sellerFeePct || 0),
+          buyerFeeMinor: Number(dData.buyerFeeMinor || 0),
+          sellerFeeMinor: Number(dData.sellerFeeMinor || 0),
+          buyerTotalMinor: Number(dData.buyerTotalMinor || 0),
+          sellerPayoutMinor: sellerPayoutOrderMinor,
+          platformCommissionMinor: Number(dData.platformCommissionMinor || 0),
+          currency: orderCurrency,
+          protectionDurationHours: Number(dData.protectionDurationHours || 40),
+          confirmedAtMs: Number(dData.confirmedAtMs || 0),
+          originalDeadlineMs: Number(dData.originalDeadlineMs || 0),
+          unresolvedReportCount: 0,
+          status: 'settled',
+          settledAtMs: nowMs,
+          createdAtMs: Number(dData.paidAtMs || nowMs),
+        },
+        sellerDisplayName: sPubSnap.exists
+          ? String(sPubSnap.data()?.displayName || dData.sellerName || '')
+          : String(dData.sellerName || ''),
+        sellerNidVerified: Boolean(sPubSnap.exists && sPubSnap.data()?.nidVerified),
+        hidePublicActivityName: Boolean(
+          sPubSnap.exists && sPubSnap.data()?.hidePublicActivityName
+        ),
+        nowMs,
+      });
+
+      const autoNote =
+        'Automatic security-period release: timer elapsed with zero unresolved disputes; seller payout credited atomically.';
+
+      tx.update(dealRef, {
+        status: 'settled',
+        unresolvedReportCount: 0,
+        settlementLedgerId: ledgerId,
+        settledAtMs: nowMs,
+        adminHoldNote: autoNote,
+        ...(soldPayload ? { publicActivityId: actId } : {}),
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+
+      if (soldPayload) {
+        tx.set(db.collection('publicActivity').doc(actId), {
+          ...soldPayload,
+          createdAt: FieldValue.serverTimestamp(),
+        });
+      }
+
+      tx.update(sellerPrivRef, {
+        walletBalanceMinor: curSellerBal + sellerPayoutWalletBdtMinor,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+
+      if (sPubSnap.exists) {
+        tx.update(sellerPubRef, {
+          completedSales: Number(sPubSnap.data()?.completedSales || 0) + 1,
+          completedTrader: true,
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+      }
+      if (bPubSnap.exists) {
+        tx.update(buyerPubRef, {
+          completedPurchases: Number(bPubSnap.data()?.completedPurchases || 0) + 1,
+          completedTrader: true,
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+      }
+
+      tx.set(ledgerRef, {
+        userId: sellerId,
+        kind: 'escrow_release',
+        amountMinor: sellerPayoutOrderMinor,
+        currency: orderCurrency,
+        referenceId: dealId,
+        note: `Automatic security-timer release for "${String(dData.listingTitle || '')}"`.slice(0, 300),
+        createdAt: FieldValue.serverTimestamp(),
+      });
+
+      return {
+        released: true as const,
+        sellerId,
+        buyerId,
+        listingTitle: String(dData.listingTitle || 'Digital Asset'),
+        sellerPayoutOrderMinor,
+        orderCurrency,
+        creditedBdtMinor: sellerPayoutWalletBdtMinor,
+        nowMs,
+      };
+    });
+
+    if (!txResult.released || !txResult.sellerId || !txResult.buyerId) {
+      return {
+        released: false,
+        alreadySettled: Boolean((txResult as { alreadySettled?: boolean }).alreadySettled),
+        reason: (txResult as { reason?: string }).reason,
+        dealId,
+      };
+    }
+
+    invalidateFinanceOverviewCache();
+
+    const sellerId = txResult.sellerId;
+    const buyerId = txResult.buyerId;
+    const listingTitle = String(txResult.listingTitle || 'Digital Asset');
+    const sellerPayoutOrderMinor = Number(txResult.sellerPayoutOrderMinor || 0);
+    const orderCurrency = (txResult.orderCurrency === 'USD' ? 'USD' : 'BDT') as 'BDT' | 'USD';
+    const creditedBdtMinor = Number(txResult.creditedBdtMinor || 0);
+    const nowMs = Number(txResult.nowMs || Date.now());
+
+    const payoutFmt = formatMoneyFromMinor(sellerPayoutOrderMinor, orderCurrency, orderCurrency);
+    const walletFmt = formatMoneyFromMinor(creditedBdtMinor, 'BDT', 'BDT');
+
+    // Non-blocking audit trail, system message, and recipient notifications
+    await Promise.allSettled([
+      db
+        .collection('deals')
+        .doc(dealId)
+        .collection('messages')
+        .add({
+          senderId: actorUid,
+          senderName: 'BEXORA Escrow System',
+          senderRole: 'system',
+          kind: 'system',
+          text: `AUTOMATIC ESCROW SETTLEMENT: Security protection period elapsed cleanly with 0 open disputes. ${payoutFmt} credited to Seller Available Wallet (Ledger: ${ledgerId}).`,
+          createdAt: FieldValue.serverTimestamp(),
+        }),
+      db
+        .collection('deals')
+        .doc(dealId)
+        .collection('events')
+        .add({
+          dealId,
+          actorId: actorUid,
+          actorRole: 'system',
+          actorName: 'BEXORA Escrow System',
+          eventType: 'auto_escrow_released',
+          summary: `Security countdown elapsed with 0 unresolved reports. ${payoutFmt} released to Seller Wallet (${ledgerId}).`,
+          createdAtMs: nowMs,
+          createdAt: FieldValue.serverTimestamp(),
+        }),
+      db
+        .collection('notifications')
+        .doc(buildNotificationId(sellerId, `deal_settled_seller_${dealId}`))
+        .set(
+          {
+            recipientId: sellerId,
+            actorId: actorUid,
+            actorRole: 'system',
+            category: 'wallet',
+            severity: 'success',
+            alertKind: 'normal',
+            title: `Pending Balance Released: ${walletFmt}`,
+            preview: `Security period completed for "${listingTitle}" — ${walletFmt} is now available to withdraw.`,
+            body: `The security period for Deal #${dealId.slice(0, 10)} ("${listingTitle}") completed with zero unresolved disputes. ${walletFmt} (${payoutFmt}) moved from Pending Seller Balance into your Available Wallet Balance (Ledger: ${ledgerId}).`,
+            refType: 'deal',
+            refId: dealId,
+            referenceLabel: `Deal #${dealId.slice(0, 10)}`,
+            destination: 'wallet',
+            read: false,
+            createdAtMs: nowMs,
+            createdAt: FieldValue.serverTimestamp(),
+            updatedAt: FieldValue.serverTimestamp(),
+          },
+          { merge: true }
+        ),
+      db
+        .collection('notifications')
+        .doc(buildNotificationId(buyerId, `deal_settled_buyer_${dealId}`))
+        .set(
+          {
+            recipientId: buyerId,
+            actorId: actorUid,
+            actorRole: 'system',
+            category: 'deal',
+            severity: 'success',
+            alertKind: 'normal',
+            title: 'Escrow Deal Completed & Settled',
+            preview: `"${listingTitle}" security period completed cleanly.`,
+            body: `Escrow Deal #${dealId.slice(0, 10)} ("${listingTitle}") completed its security protection period cleanly and is now settled. You can leave a verified review in Escrow Deals.`,
+            refType: 'deal',
+            refId: dealId,
+            referenceLabel: `Deal #${dealId.slice(0, 10)}`,
+            destination: `deal:${dealId}`,
+            read: false,
+            createdAtMs: nowMs,
+            createdAt: FieldValue.serverTimestamp(),
+            updatedAt: FieldValue.serverTimestamp(),
+          },
+          { merge: true }
+        ),
+    ]);
+
+    return {
+      released: true,
+      dealId,
+      sellerId,
+      creditedBdtMinor,
+      ledgerId,
+    };
+  }
+
+  // Trigger atomic pending-balance release for a specific deal once its security timer elapses cleanly.
+  // Strictly callable only by the deal's verified buyer, seller, or an authenticated administrator.
+  app.post('/api/deals/:dealId/release-if-ready', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const cfg = loadVerifiedFirebaseConfig();
+    if (!cfg.configValid) {
+      return res.status(503).json({ ok: false, error: 'Firebase configuration unavailable.' });
+    }
+    const caller = await verifyCallerFirebaseToken(req, cfg);
+    if (!caller) {
+      return res.status(401).json({ ok: false, error: 'Authentication required.' });
+    }
+
+    const dealId = String(req.params.dealId || '').trim();
+    if (!VALID_ID_REGEX.test(dealId)) {
+      return res.status(400).json({ ok: false, error: 'Invalid deal ID.' });
+    }
+
+    try {
+      const adminApp = getOrInitFirebaseAdminApp(cfg.projectId);
+      const db = getAdminFirestore(adminApp, cfg.firestoreDatabaseId);
+      const dealSnap = await db.collection('deals').doc(dealId).get();
+      if (!dealSnap.exists) {
+        return res.status(404).json({ ok: false, error: 'Deal not found.' });
+      }
+      const dealData = dealSnap.data() || {};
+      const isParticipant =
+        dealData.buyerId === caller.uid || dealData.sellerId === caller.uid;
+      if (!isParticipant) {
+        const adminCaller = await verifyAdminCaller(req, cfg);
+        if (!adminCaller) {
+          return res.status(403).json({ ok: false, error: 'Access denied for this deal.' });
+        }
+      }
+
+      const result = await executeAtomicDealReleaseIfReady(cfg, dealId, caller.uid);
+      return res.json({ ok: true, ...result });
+    } catch {
+      return res.json({ ok: false, released: false, dealId, reason: 'service_unavailable' });
+    }
+  });
+
+  // Admin batch sweep: settles all eligible expired-timer escrow deals with zero unresolved disputes.
+  app.post('/api/admin/deals/settle-expired', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const cfg = loadVerifiedFirebaseConfig();
+    if (!cfg.configValid) {
+      return res.status(503).json({ ok: false, error: 'Firebase configuration unavailable.' });
+    }
+    const adminCaller = await verifyAdminCaller(req, cfg);
+    if (!adminCaller) {
+      return res.status(403).json({ ok: false, error: 'Administrator authentication required.' });
+    }
+
+    try {
+      const adminApp = getOrInitFirebaseAdminApp(cfg.projectId);
+      const db = getAdminFirestore(adminApp, cfg.firestoreDatabaseId);
+      const nowMs = Date.now();
+      const candidateSnap = await db
+        .collection('deals')
+        .where('status', 'in', ['security_period_active', 'protection_active', 'protection_expired'])
+        .limit(100)
+        .get();
+
+      const releasedDealIds: string[] = [];
+      let checked = 0;
+
+      for (const d of candidateSnap.docs) {
+        checked += 1;
+        const data = d.data() || {};
+        if (
+          Number(data.originalDeadlineMs || 0) > 0 &&
+          nowMs >= Number(data.originalDeadlineMs || 0) &&
+          Number(data.unresolvedReportCount || 0) === 0
+        ) {
+          const r = await executeAtomicDealReleaseIfReady(cfg, d.id, adminCaller.uid);
+          if (r.released) {
+            releasedDealIds.push(d.id);
+          }
+        }
+      }
+
+      if (releasedDealIds.length > 0) {
+        invalidateFinanceOverviewCache();
+      }
+
+      return res.json({
+        ok: true,
+        checked,
+        releasedCount: releasedDealIds.length,
+        releasedDealIds,
+      });
+    } catch (err) {
+      return res.status(500).json({
+        ok: false,
+        error: err instanceof Error ? err.message : 'Unable to sweep expired escrow deals.',
+      });
+    }
+  });
+
+  // Background helper for periodic expired-deal settlement sweep in server.ts
+  const appWithSweep = app as unknown as {
+    locals: Record<string, unknown>;
+  };
+  appWithSweep.locals.runEscrowAutoReleaseSweep = async () => {
+    const cfg = loadVerifiedFirebaseConfig();
+    if (!cfg.configValid) return;
+    try {
+      const adminApp = getOrInitFirebaseAdminApp(cfg.projectId);
+      const db = getAdminFirestore(adminApp, cfg.firestoreDatabaseId);
+      const nowMs = Date.now();
+      const snap = await db
+        .collection('deals')
+        .where('status', 'in', ['security_period_active', 'protection_active', 'protection_expired'])
+        .limit(40)
+        .get();
+      for (const docSnap of snap.docs) {
+        const d = docSnap.data() || {};
+        if (
+          Number(d.originalDeadlineMs || 0) > 0 &&
+          nowMs >= Number(d.originalDeadlineMs || 0) &&
+          Number(d.unresolvedReportCount || 0) === 0
+        ) {
+          await executeAtomicDealReleaseIfReady(cfg, docSnap.id, 'system');
+        }
+      }
+    } catch {
+      // Silently ignore when Admin SDK IAM is not provisioned in local dev container
+    }
+  };
 }

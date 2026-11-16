@@ -88,6 +88,14 @@ test('Full-Screen Route Parser & Builder: round-trips all full-screen views and 
     dealId: 'deal_99',
   });
 
+  assert.deepEqual(parseRouteFromSearch('', '/admin'), { page: 'admin', dealId: undefined });
+  assert.deepEqual(parseRouteFromSearch('?dealId=deal_99', '/admin'), { page: 'admin', dealId: 'deal_99' });
+  assert.deepEqual(parseRouteFromSearch('', '/marketplace'), { page: 'market', platformFilter: undefined });
+  assert.deepEqual(parseRouteFromSearch('?platform=others', '/marketplace'), {
+    page: 'market',
+    platformFilter: 'others',
+  });
+
   const editListingSearch = buildSearchForRoute({
     page: 'sell',
     editListingId: 'lst_draft_42',

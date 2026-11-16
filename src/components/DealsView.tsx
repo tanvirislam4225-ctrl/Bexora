@@ -44,8 +44,10 @@ import {
 import {
   db,
   extractUserFacingFirestoreError,
+  fetchWithFreshBearerToken,
   validateAndProcessImageFile,
 } from '../lib/firebase';
+import { isDealEligibleForAutoRelease } from '../lib/adminFinanceLogic';
 import {
   calculateDisputeRefundBreakdown,
   computeRemainingProtectionMs,
@@ -76,6 +78,7 @@ import { ImageLightboxModal, LightboxImageItem } from './ImageLightboxModal';
 import { SellerAssetTransferBox } from './SellerAssetTransferBox';
 import { UserPresenceBadge } from './UserPresenceBadge';
 import { ActiveStatus } from './ActiveStatus';
+import { UserProfileLink } from './UserProfileLink';
 
 const ProtectionCountdown: React.FC<{
   originalDeadlineMs: number;
@@ -143,6 +146,7 @@ interface DealsViewProps {
   onRequireAuth: () => void;
   onOpenWallet: () => void;
   onOpenDealCheckout?: (dealId: string) => void;
+  onOpenPublicProfile?: (uid: string) => void;
   onReportDealCounterparty?: (target: ReportModalTarget) => void;
   onFlash: (msg: string) => void;
 }
@@ -158,6 +162,7 @@ export const DealsView: React.FC<DealsViewProps> = ({
   onRequireAuth,
   onOpenWallet,
   onOpenDealCheckout,
+  onOpenPublicProfile,
   onReportDealCounterparty,
   onFlash,
 }) => {
@@ -193,6 +198,7 @@ export const DealsView: React.FC<DealsViewProps> = ({
 
   const [busy, setBusy] = useState(false);
   const [errMsg, setErrMsg] = useState('');
+  const autoReleaseAttemptedRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     if (initialDealId) {
@@ -206,6 +212,24 @@ export const DealsView: React.FC<DealsViewProps> = ({
     () => deals.find((d) => d.id === selectedDealId) || (deals.length > 0 ? deals[0] : null),
     [deals, selectedDealId]
   );
+
+  useEffect(() => {
+    if (!activeDeal || !userUid) return;
+    if (autoReleaseAttemptedRef.current.has(activeDeal.id)) return;
+    const openReportsCount = reports.filter(
+      (r) => r.status === 'open' || r.status === 'evidence_requested'
+    ).length;
+    if (!isDealEligibleForAutoRelease(activeDeal, openReportsCount, Date.now())) {
+      return;
+    }
+    autoReleaseAttemptedRef.current.add(activeDeal.id);
+    void fetchWithFreshBearerToken(
+      `/api/deals/${encodeURIComponent(activeDeal.id)}/release-if-ready`,
+      { method: 'POST' }
+    ).catch(() => {
+      // Non-fatal: background sweep/admin settlement remains active
+    });
+  }, [activeDeal, userUid, reports]);
 
   useEffect(() => {
     if (!activeDeal || !userUid) {
@@ -1249,12 +1273,26 @@ export const DealsView: React.FC<DealsViewProps> = ({
                   <h2 className="text-lg sm:text-xl font-extrabold">{activeDeal.listingTitle}</h2>
                   <div className="bx-hint flex flex-wrap items-center gap-x-2 gap-y-1">
                     <span className="inline-flex items-center gap-1.5">
-                      Buyer: <strong>{activeDeal.buyerName}</strong> {isBuyer ? '(You)' : ''}
+                      Buyer:{' '}
+                      <UserProfileLink
+                        uid={activeDeal.buyerId}
+                        name={activeDeal.buyerName}
+                        onOpenProfile={onOpenPublicProfile}
+                        className="font-extrabold"
+                      />{' '}
+                      {isBuyer ? '(You)' : ''}
                       <ActiveStatus userId={activeDeal.buyerId} viewerUserId={userUid} mode="full" />
                     </span>
                     <span aria-hidden="true">·</span>
                     <span className="inline-flex items-center gap-1.5">
-                      Seller: <strong>{activeDeal.sellerName}</strong> {isSeller ? '(You)' : ''}
+                      Seller:{' '}
+                      <UserProfileLink
+                        uid={activeDeal.sellerId}
+                        name={activeDeal.sellerName}
+                        onOpenProfile={onOpenPublicProfile}
+                        className="font-extrabold"
+                      />{' '}
+                      {isSeller ? '(You)' : ''}
                       <ActiveStatus userId={activeDeal.sellerId} viewerUserId={userUid} mode="full" />
                     </span>
                     <span aria-hidden="true">·</span>
@@ -1340,13 +1378,19 @@ export const DealsView: React.FC<DealsViewProps> = ({
                   </div>
                   <div className="p-3 rounded-xl bx-soft">
                     <span className="block" style={{ color: 'var(--text-2)' }}>
-                      Seller Net Payout
+                      {activeDeal.status === 'settled'
+                        ? 'Seller Net Payout (Released)'
+                        : 'Pending Seller Balance'}
                     </span>
                     <strong className="text-sm font-extrabold">
                       {formatMoneyFromMinor(activeDeal.sellerPayoutMinor, displayCurrency, activeDeal.currency, settings.usdToBdtRate)}
                     </strong>
                     <span className="block text-[11px] opacity-75 mt-0.5">
-                      Released after security timer
+                      {activeDeal.status === 'settled'
+                        ? 'Credited to Available Wallet Balance'
+                        : activeDeal.status === 'refunded' || activeDeal.status === 'cancelled'
+                        ? 'Not payable (deal closed)'
+                        : 'Held until security period ends (0 disputes)'}
                     </span>
                   </div>
                   <div className="p-3 rounded-xl bx-soft">
@@ -2040,7 +2084,11 @@ export const DealsView: React.FC<DealsViewProps> = ({
                           }}
                         >
                           <div className="font-extrabold opacity-85 mb-0.5">
-                            {m.senderName}
+                            <UserProfileLink
+                              uid={m.senderRole === 'admin' || m.senderRole === 'system' ? undefined : m.senderId}
+                              name={m.senderName}
+                              onOpenProfile={onOpenPublicProfile}
+                            />
                             {m.senderRole ? ` · ${m.senderRole.toUpperCase()}` : ''}
                           </div>
                           <div className="whitespace-pre-line">{m.text}</div>

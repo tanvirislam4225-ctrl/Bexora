@@ -70,6 +70,7 @@ import {
   hasPendingDataUrlImages,
   uploadListingImagesToStorage,
 } from '../lib/listingStorage';
+import { buildApiUrl } from '../lib/apiClient';
 import { PlatformIcon } from './Icons';
 
 interface CreateListingModalProps {
@@ -318,7 +319,7 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
     }
 
     if (step === 1 && platform && platformDef) {
-      const ageRes = validateAccountAge(ageYears, ageMonths, true);
+      const ageRes = validateAccountAge(ageYears, ageMonths, platform !== 'others');
       if (!ageRes.valid) return ageRes.error || 'Enter valid Account Age in Years and Months.';
 
       if (platform === 'gaming') {
@@ -328,7 +329,11 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
         const urlRes = validatePlatformAssetUrl(platform, accountUrl);
         if (!urlRes.valid) return urlRes.error || 'Enter a valid official HTTPS asset link.';
 
-        if (metricValue.trim() === '' || Number(metricValue) < 0 || !Number.isFinite(Number(metricValue))) {
+        const metricRaw = metricValue.trim();
+        if (
+          (platform !== 'others' && metricRaw === '') ||
+          (metricRaw !== '' && (Number(metricRaw) < 0 || !Number.isFinite(Number(metricRaw))))
+        ) {
           return `Enter a valid number for ${getCategoryMetricLabel(platform, subcategory)}.`;
         }
 
@@ -607,7 +612,7 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
         }
       }
 
-      const ageRes = validateAccountAge(ageYears, ageMonths, true);
+      const ageRes = validateAccountAge(ageYears, ageMonths, platform !== 'others');
       const urlRes = validatePlatformAssetUrl(platform, accountUrl);
       const priceMinor = Math.round(Number(price) * 100);
       const revMinor =
@@ -671,7 +676,7 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
         if (idToken) {
           try {
             const editResp = await fetch(
-              `/api/listings/${encodeURIComponent(editingListing.id)}/edit`,
+              buildApiUrl(`/api/listings/${encodeURIComponent(editingListing.id)}/edit`),
               {
                 method: 'POST',
                 headers: {
@@ -793,7 +798,7 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
           if (idToken) {
             headers.Authorization = `Bearer ${idToken}`;
           }
-          const resp = await fetch('/api/ai/verify-evidence', {
+          const resp = await fetch(buildApiUrl('/api/ai/verify-evidence'), {
             method: 'POST',
             headers,
             body: JSON.stringify({
@@ -1049,7 +1054,8 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
             {/* Required Account Age (Years & Months 0–11) */}
             <div>
               <span className="bx-label">
-                {platform === 'youtube' ? 'Channel Age' : 'Account / Asset Age'} (Required)
+                {platform === 'youtube' ? 'Channel Age' : 'Account / Asset Age'}{' '}
+                {platform === 'others' ? '(Optional)' : '(Required)'}
               </span>
               <div className="grid grid-cols-2 gap-3">
                 <div>
@@ -1143,7 +1149,8 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
                 {/* Official HTTPS Asset Link */}
                 <div>
                   <label htmlFor="crt-url" className="bx-label">
-                    Direct Account / Page HTTPS URL (Required & Public)
+                    Direct Account / Asset HTTPS URL{' '}
+                    {platform === 'others' ? '(Optional)' : '(Required & Public)'}
                   </label>
                   <input
                     id="crt-url"
@@ -1154,7 +1161,9 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
                     className="bx-input"
                   />
                   <p className="bx-hint mt-1">
-                    Validated against official {platformDef.name} domains. Visible publicly to all visitors; never include passwords or tokens.
+                    {platform === 'others'
+                      ? 'Optional external https:// link for your asset or storefront. Never include passwords or tokens.'
+                      : `Validated against official ${platformDef.name} domains. Visible publicly to all visitors; never include passwords or tokens.`}
                   </p>
                 </div>
 
@@ -1162,6 +1171,7 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
                 <div>
                   <label htmlFor="crt-metric" className="bx-label">
                     {getCategoryMetricLabel(platform, subcategory)}
+                    {platform === 'others' ? ' (Optional)' : ''}
                   </label>
                   <input
                     id="crt-metric"
@@ -1170,7 +1180,7 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
                     inputMode="numeric"
                     value={metricValue}
                     onChange={(e) => setMetricValue(e.target.value)}
-                    placeholder="Enter exact count"
+                    placeholder={platform === 'others' ? 'Optional (0 if not applicable)' : 'Enter exact count'}
                     className="bx-input"
                   />
                 </div>
@@ -1643,7 +1653,9 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
               ) : (
                 <div className="flex justify-between gap-4">
                   <span style={{ color: 'var(--text-2)' }}>Asset Link</span>
-                  <span className="font-bold truncate max-w-[240px]">{accountUrl}</span>
+                  <span className="font-bold truncate max-w-[240px]">
+                    {accountUrl.trim() || 'Not provided (Optional)'}
+                  </span>
                 </div>
               )}
               <div className="flex justify-between gap-4">

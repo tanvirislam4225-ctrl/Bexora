@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { collection, limit, onSnapshot, orderBy, query } from 'firebase/firestore';
 import { CheckCircle2, ShieldCheck, Wallet } from 'lucide-react';
 import { db } from '../lib/firebase';
+import { buildApiUrl } from '../lib/apiClient';
 import { PublicActivityItem } from '../types';
 import {
   formatActivityRelativeTime,
@@ -36,7 +37,7 @@ export const LiveActivityTickers: React.FC<LiveActivityTickersProps> = ({
 
     async function fetchServerFallback() {
       try {
-        const res = await fetch('/api/public/activity-tickers');
+        const res = await fetch(buildApiUrl('/api/public/activity-tickers'));
         if (!res.ok || !active) return;
         const data = (await res.json()) as {
           sold?: Array<Record<string, unknown>>;

@@ -18,6 +18,7 @@ import {
   serverTimestamp,
   updateDoc,
   where,
+  writeBatch,
 } from 'firebase/firestore';
 import {
   ArrowLeft,
@@ -50,6 +51,7 @@ import {
   Wallet,
 } from 'lucide-react';
 import {
+  AdminInvitationRecord,
   BidRecord,
   CurrencyCode,
   DealRecord,
@@ -89,6 +91,7 @@ import { DeleteListingModal } from './DeleteListingModal';
 import { PhoneCountryInput } from './PhoneCountryInput';
 import { UserPresenceBadge } from './UserPresenceBadge';
 import { ActiveStatus } from './ActiveStatus';
+import { UserProfileLink } from './UserProfileLink';
 import { saveUserActiveStatusPrivacy } from '../lib/presenceService';
 import { canSellerEditListingStatus } from '../lib/listingAndBidManagementLogic';
 import {
@@ -98,6 +101,7 @@ import {
   validateAndNormalizePhone,
 } from '../lib/phoneValidation';
 import { emitUserNotification } from '../lib/notificationService';
+import { summarizeUserPendingSellerDeals } from '../lib/adminFinanceLogic';
 import {
   inspectMediaClient,
   inspectTextClient,
@@ -133,6 +137,8 @@ interface OwnerProfileProps {
   onOpenWallet: () => void;
   onOpenPublicSelf: () => void;
   onOpenSafetyAndAppeals?: () => void;
+  onOpenPublicProfile?: (uid: string) => void;
+  pendingAdminInvitation?: AdminInvitationRecord | null;
   onLogout?: () => Promise<void>;
   signingOut?: boolean;
   onAuthTokenRefreshed?: () => Promise<void> | void;
@@ -152,6 +158,7 @@ interface VisitorProfileProps {
   usdToBdtRate: number;
   onBack: () => void;
   onOpenListing: (l: MarketplaceListing) => void;
+  onOpenPublicProfile?: (uid: string) => void;
   onMessageSeller: (sellerUid: string, sellerName: string, listing?: MarketplaceListing) => void;
   onReportUser?: (target: ReportModalTarget) => void;
 }
@@ -176,6 +183,7 @@ const VisitorProfileSection: React.FC<VisitorProfileProps> = ({
   usdToBdtRate,
   onBack,
   onOpenListing,
+  onOpenPublicProfile,
   onMessageSeller,
   onReportUser,
 }) => {
@@ -534,7 +542,12 @@ const VisitorProfileSection: React.FC<VisitorProfileProps> = ({
             {reviews.map((rev) => (
               <div key={rev.id} className="bx-card p-4 space-y-2">
                 <div className="flex items-center justify-between">
-                  <span className="font-extrabold text-sm">{rev.reviewerName}</span>
+                  <UserProfileLink
+                    uid={rev.reviewerId}
+                    name={rev.reviewerName}
+                    onOpenProfile={onOpenPublicProfile}
+                    className="font-extrabold text-sm"
+                  />
                   <span className="inline-flex items-center gap-1 text-xs font-black text-[#FF6500]">
                     <Star className="w-3.5 h-3.5 fill-[#FF6500]" />
                     {rev.score}.0 / 5
@@ -579,6 +592,8 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
   onOpenWallet,
   onOpenPublicSelf,
   onOpenSafetyAndAppeals,
+  onOpenPublicProfile,
+  pendingAdminInvitation = null,
   onLogout,
   signingOut = false,
   onAuthTokenRefreshed,
@@ -590,6 +605,8 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
     'all' | 'active' | 'reserved' | 'pending' | 'draft' | 'rejected' | 'suspended' | 'sold'
   >('all');
   const [reviews, setReviews] = useState<ReviewRecord[]>([]);
+  const [inviteBusy, setInviteBusy] = useState(false);
+  const [inviteRejectReason, setInviteRejectReason] = useState('');
 
   useEffect(() => {
     if (initialTab) {
@@ -1260,6 +1277,32 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
               {formatMoneyFromMinor(privateUser.walletBalanceMinor, displayCurrency, 'BDT', usdToBdtRate)}
             </div>
           </div>
+          {(() => {
+            const pendingSummary = summarizeUserPendingSellerDeals(deals, userUid, usdToBdtRate);
+            return (
+              <div
+                data-testid="profile-pending-seller-balance"
+                className="px-4 py-2.5 border-2 border-[var(--bx-border)] bg-[var(--bx-surface-alt)]"
+              >
+                <div className="text-[11px] font-bold uppercase opacity-70">
+                  Pending Seller Balance
+                </div>
+                <div className="text-lg font-black text-[var(--text)]">
+                  {formatMoneyFromMinor(
+                    pendingSummary.totalPendingBdtMinor,
+                    displayCurrency,
+                    'BDT',
+                    usdToBdtRate
+                  )}
+                </div>
+                <div className="text-[10px] font-bold opacity-70">
+                  {pendingSummary.activePendingCount > 0
+                    ? `${pendingSummary.activePendingCount} escrow deal${pendingSummary.activePendingCount === 1 ? '' : 's'} · Locked until release`
+                    : 'Locked until timer ends'}
+                </div>
+              </div>
+            );
+          })()}
           <button
             type="button"
             onClick={onOpenWallet}
@@ -1307,6 +1350,103 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
           )}
         </div>
       </section>
+
+      {/* Pending Admin Role Invitation Banner */}
+      {pendingAdminInvitation && pendingAdminInvitation.status === 'pending' && (
+        <section
+          aria-label="Pending Admin Role Invitation"
+          className="bx-card p-5 sm:p-6 border-2 border-[#FF6500] space-y-4"
+        >
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div className="space-y-1">
+              <div className="inline-flex items-center gap-1.5 text-xs font-black uppercase tracking-wider text-[#FF6500]">
+                <ShieldCheck className="w-4 h-4" />
+                <span>Admin Role Invitation</span>
+              </div>
+              <h2 className="text-lg font-black">
+                You were invited as{' '}
+                {pendingAdminInvitation.role === 'superadmin' ? 'Super Admin' : 'Administrator'}
+              </h2>
+              <p className="text-xs opacity-80">
+                Invited by {pendingAdminInvitation.invitedByName || pendingAdminInvitation.invitedBy}.
+                Permissions remain inactive until you accept this invitation.
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              <button
+                type="button"
+                disabled={inviteBusy}
+                onClick={async () => {
+                  setInviteBusy(true);
+                  try {
+                    const batch = writeBatch(db);
+                    batch.set(doc(db, 'admins', userUid), {
+                      uid: userUid,
+                      role: pendingAdminInvitation.role,
+                      permissions: Array.isArray(pendingAdminInvitation.permissions)
+                        ? pendingAdminInvitation.permissions
+                        : [],
+                      grantedBy: pendingAdminInvitation.invitedBy,
+                      createdAt: serverTimestamp(),
+                    });
+                    batch.update(doc(db, 'adminInvitations', pendingAdminInvitation.id), {
+                      status: 'accepted',
+                      respondedAtMs: Date.now(),
+                      updatedAt: serverTimestamp(),
+                    });
+                    await batch.commit();
+                    onFlash('Admin invitation accepted! Admin Console access is now active.');
+                  } catch (err) {
+                    onFlash(
+                      extractUserFacingFirestoreError(err, 'Could not accept admin invitation.')
+                    );
+                  } finally {
+                    setInviteBusy(false);
+                  }
+                }}
+                className="bx-btn bx-btn-primary px-4 py-2 text-xs font-extrabold"
+              >
+                {inviteBusy ? 'Processing…' : 'Accept Admin Role'}
+              </button>
+              <button
+                type="button"
+                disabled={inviteBusy}
+                onClick={async () => {
+                  setInviteBusy(true);
+                  try {
+                    await updateDoc(doc(db, 'adminInvitations', pendingAdminInvitation.id), {
+                      status: 'rejected',
+                      rejectionReason:
+                        inviteRejectReason.trim().slice(0, 300) || 'Declined by invited user.',
+                      respondedAtMs: Date.now(),
+                      updatedAt: serverTimestamp(),
+                    });
+                    setInviteRejectReason('');
+                    onFlash('Admin invitation declined.');
+                  } catch (err) {
+                    onFlash(
+                      extractUserFacingFirestoreError(err, 'Could not decline admin invitation.')
+                    );
+                  } finally {
+                    setInviteBusy(false);
+                  }
+                }}
+                className="bx-btn bx-btn-danger px-4 py-2 text-xs font-extrabold"
+              >
+                Decline Invitation
+              </button>
+            </div>
+          </div>
+          <input
+            type="text"
+            value={inviteRejectReason}
+            onChange={(e) => setInviteRejectReason(e.target.value)}
+            maxLength={300}
+            placeholder="Optional note if declining this invitation…"
+            className="bx-input text-xs py-2"
+          />
+        </section>
+      )}
 
       {/* Owner Sub-Navigation Tabs */}
       <nav aria-label="My Profile Sections" className="flex flex-wrap gap-2 border-b-2 border-[var(--bx-border)] pb-3">
@@ -1373,11 +1513,23 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
               </ul>
             </div>
             <div className="bx-card p-5 space-y-2">
-              <h2 className="text-sm font-black uppercase tracking-wide opacity-75">Escrow Reserve</h2>
+              <h2 className="text-sm font-black uppercase tracking-wide opacity-75">
+                Escrow &amp; Pending Release
+              </h2>
               <div className="text-2xl font-black tabular-nums">
-                {formatMoneyFromMinor(privateUser.reservedBalanceMinor, displayCurrency, 'BDT', usdToBdtRate)}
+                {formatMoneyFromMinor(
+                  summarizeUserPendingSellerDeals(deals, userUid, usdToBdtRate).totalPendingBdtMinor,
+                  displayCurrency,
+                  'BDT',
+                  usdToBdtRate
+                )}
               </div>
-              <p className="text-xs opacity-75">Reserved for pending withdrawal requests.</p>
+              <p className="text-xs opacity-75">
+                Seller payouts in escrow security period (unavailable for withdrawal until timer ends).
+                {privateUser.reservedBalanceMinor > 0
+                  ? ` · ${formatMoneyFromMinor(privateUser.reservedBalanceMinor, displayCurrency, 'BDT', usdToBdtRate)} reserved for withdrawal.`
+                  : ''}
+              </p>
             </div>
           </div>
 
@@ -1757,7 +1909,12 @@ const OwnerProfileSection: React.FC<OwnerProfileProps> = ({
               {reviews.map((r) => (
                 <div key={r.id} className="bx-card p-4 space-y-2">
                   <div className="flex items-center justify-between">
-                    <span className="font-extrabold text-sm">{r.reviewerName}</span>
+                    <UserProfileLink
+                      uid={r.reviewerId}
+                      name={r.reviewerName}
+                      onOpenProfile={onOpenPublicProfile}
+                      className="font-extrabold text-sm"
+                    />
                     <span className="text-xs font-black text-[#FF6500]">{r.score}.0 / 5</span>
                   </div>
                   <p className="text-sm opacity-85">{r.comment}</p>

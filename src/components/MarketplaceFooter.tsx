@@ -20,6 +20,7 @@ import {
 import { computeVerifiedMarketplaceStats } from '../lib/reviewsAndStatsLogic';
 import { formatRecordedTickerAmount } from '../lib/activityTickerLogic';
 import { BexoraLogo } from './Icons';
+import { buildApiUrl } from '../lib/apiClient';
 
 export interface MarketplaceFooterProps {
   settings: PublicSettings;
@@ -115,7 +116,7 @@ export const MarketplaceFooter: React.FC<MarketplaceFooterProps> = ({
       }
     );
 
-    fetch('/api/public/marketplace-stats')
+    fetch(buildApiUrl('/api/public/marketplace-stats'))
       .then((r) => (r.ok ? r.json() : null))
       .then((json: { ok?: boolean; stats?: MarketplaceLiveStats } | null) => {
         if (active && json?.ok && json.stats) {

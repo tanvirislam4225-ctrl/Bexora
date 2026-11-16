@@ -30,6 +30,7 @@ import {
 } from '../lib/reviewsAndStatsLogic';
 import { formatActivityRelativeTime } from '../lib/activityTickerLogic';
 import type { ReportModalTarget } from '../lib/moderationClient';
+import { UserProfileLink } from './UserProfileLink';
 
 export interface ReviewsViewProps {
   userUid: string | null;
@@ -455,7 +456,11 @@ export const ReviewsView: React.FC<ReviewsViewProps> = ({
                     <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0">
                         <div className="font-extrabold text-sm truncate" style={{ color: 'var(--text)' }}>
-                          {rev.reviewerName}
+                          <UserProfileLink
+                            uid={rev.reviewerId}
+                            name={rev.reviewerName}
+                            onOpenProfile={onOpenPublicProfile}
+                          />
                         </div>
                         <div
                           className="flex flex-wrap items-center gap-1.5 text-xs font-semibold tabular-nums mt-0.5"

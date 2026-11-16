@@ -85,6 +85,7 @@ import { PLATFORM_BANNER_BG, PlatformIcon } from './Icons';
 import { ImageLightboxModal } from './ImageLightboxModal';
 import { UserPresenceBadge } from './UserPresenceBadge';
 import { ActiveStatus } from './ActiveStatus';
+import { UserProfileLink } from './UserProfileLink';
 
 interface ListingDetailModalProps {
   listing: MarketplaceListing;
@@ -1050,14 +1051,16 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
 
             {/* Key Metrics Strip */}
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 tabular-nums">
-              <div className="p-3 rounded-xl bx-soft">
-                <span className="text-[11px] font-bold uppercase block" style={{ color: 'var(--text-2)' }}>
-                  Account Age
-                </span>
-                <strong className="text-sm font-extrabold">
-                  {formatAccountAge(listing.ageYears, listing.ageMonths)}
-                </strong>
-              </div>
+              {(listing.platform !== 'others' || (listing.ageYears || 0) > 0 || (listing.ageMonths || 0) > 0) && (
+                <div className="p-3 rounded-xl bx-soft">
+                  <span className="text-[11px] font-bold uppercase block" style={{ color: 'var(--text-2)' }}>
+                    Account Age
+                  </span>
+                  <strong className="text-sm font-extrabold">
+                    {formatAccountAge(listing.ageYears, listing.ageMonths)}
+                  </strong>
+                </div>
+              )}
               {listing.platform === 'gaming' ? (
                 <>
                   <div className="p-3 rounded-xl bx-soft">
@@ -1085,14 +1088,16 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
                 </>
               ) : (
                 <>
-                  <div className="p-3 rounded-xl bx-soft">
-                    <span className="text-[11px] font-bold uppercase block" style={{ color: 'var(--text-2)' }}>
-                      {metricLabel}
-                    </span>
-                    <strong className="text-sm font-extrabold">
-                      {listing.metricValue.toLocaleString('en-US')}
-                    </strong>
-                  </div>
+                  {(listing.platform !== 'others' || listing.metricValue > 0) && (
+                    <div className="p-3 rounded-xl bx-soft">
+                      <span className="text-[11px] font-bold uppercase block" style={{ color: 'var(--text-2)' }}>
+                        {metricLabel}
+                      </span>
+                      <strong className="text-sm font-extrabold">
+                        {listing.metricValue.toLocaleString('en-US')}
+                      </strong>
+                    </div>
+                  )}
                   <div className="p-3 rounded-xl bx-soft">
                     <span className="text-[11px] font-bold uppercase block" style={{ color: 'var(--text-2)' }}>
                       Monthly Revenue
@@ -1710,7 +1715,12 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
                           }}
                         >
                           <div className="flex items-center gap-1.5 min-w-0">
-                            <span className="font-bold truncate">{hb.buyerName}</span>
+                            <UserProfileLink
+                              uid={hb.buyerId}
+                              name={hb.buyerName}
+                              onOpenProfile={onOpenPublicProfile}
+                              className="font-bold truncate"
+                            />
                             <span style={{ color: 'var(--text-3)' }}>@{hb.buyerUsername}</span>
                             {isOwn && <span style={{ color: 'var(--orange)' }}>(You)</span>}
                           </div>

@@ -20,6 +20,7 @@ import { fetchSpecificListingsByIds } from '../lib/engagementService';
 import { formatMoneyFromMinor, PLATFORM_CATALOG } from '../lib/marketplaceLogic';
 import { formatNotificationTimestamp } from '../lib/notificationLogic';
 import { PLATFORM_BANNER_BG, PlatformIcon } from './Icons';
+import { UserProfileLink } from './UserProfileLink';
 
 interface FavoritesViewProps {
   userUid: string | null;
@@ -336,20 +337,19 @@ export const FavoritesView: React.FC<FavoritesViewProps> = ({
                       )}
 
                       <div className="flex items-center justify-between gap-2 text-xs tabular-nums">
-                        <button
-                          type="button"
-                          onClick={() => onOpenPublicProfile(item.sellerId)}
-                          className="inline-flex items-center gap-1 font-bold truncate hover:underline"
-                          style={{ color: 'var(--text-2)' }}
-                        >
-                          <span>{item.sellerName}</span>
+                        <span className="inline-flex items-center gap-1 font-bold truncate" style={{ color: 'var(--text-2)' }}>
+                          <UserProfileLink
+                            uid={item.sellerId}
+                            name={item.sellerName}
+                            onOpenProfile={onOpenPublicProfile}
+                          />
                           {item.liveListing?.sellerVerified && (
                             <ShieldCheck
                               className="w-3.5 h-3.5 shrink-0"
                               style={{ color: 'var(--green)' }}
                             />
                           )}
-                        </button>
+                        </span>
                         <span style={{ color: 'var(--text-3)' }}>
                           Saved {formatNotificationTimestamp(item.savedAtMs)}
                         </span>

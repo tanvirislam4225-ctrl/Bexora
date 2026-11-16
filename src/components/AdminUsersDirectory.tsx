@@ -30,6 +30,7 @@ import {
 import { auth, db, fetchWithFreshBearerToken } from '../lib/firebase';
 import { formatMoneyFromMinor } from '../lib/marketplaceLogic';
 import { CurrencyCode } from '../types';
+import { UserProfileLink } from './UserProfileLink';
 
 export interface AdminUsersDirectoryProps {
   adminUid: string;
@@ -37,6 +38,7 @@ export interface AdminUsersDirectoryProps {
   displayCurrency: CurrencyCode;
   usdToBdtRate: number;
   onOpenModerationTab: () => void;
+  onOpenPublicProfile?: (uid: string) => void;
   onFlash: (msg: string) => void;
 }
 
@@ -257,6 +259,7 @@ export const AdminUsersDirectory: React.FC<AdminUsersDirectoryProps> = ({
   displayCurrency,
   usdToBdtRate,
   onOpenModerationTab,
+  onOpenPublicProfile,
   onFlash,
 }) => {
   // Search & Filter State
@@ -1116,7 +1119,12 @@ export const AdminUsersDirectory: React.FC<AdminUsersDirectoryProps> = ({
 
                     <div className="min-w-0 space-y-1 flex-1">
                       <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-                        <span className="text-sm font-black truncate">{u.displayName}</span>
+                        <UserProfileLink
+                          uid={u.uid}
+                          name={u.displayName}
+                          onOpenProfile={onOpenPublicProfile}
+                          className="text-sm font-black truncate"
+                        />
                         {u.username && (
                           <span className="text-xs opacity-75 font-mono">@{u.username}</span>
                         )}

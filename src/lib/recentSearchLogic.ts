@@ -13,6 +13,7 @@ const VALID_PLATFORMS = new Set<string>([
   'website',
   'domain',
   'gaming',
+  'others',
 ]);
 
 export interface RecentSearchInput {

@@ -14,6 +14,7 @@ import {
   writeBatch,
 } from 'firebase/firestore';
 import { auth, db, handleFirestoreError, OperationType } from './firebase';
+import { buildApiUrl } from './apiClient';
 import type {
   BidRecord,
   MarketplaceListing,
@@ -542,7 +543,7 @@ export async function fanoutNewListingToFollowers(
         try {
           const idToken = await currentUser.getIdToken();
           const sample = specs[0];
-          await fetch('/api/fcm/fanout-followers', {
+          await fetch(buildApiUrl('/api/fcm/fanout-followers'), {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',

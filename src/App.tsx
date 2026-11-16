@@ -16,21 +16,16 @@ import {
 } from 'firebase/firestore';
 import {
   AlertCircle,
-  ArrowRight,
   CheckCircle2,
-  Filter,
-  History,
   Lock,
   MailCheck,
-  Plus,
   RefreshCw,
-  Search,
-  ShieldCheck,
-  SlidersHorizontal,
-  Sparkles,
+  Wifi,
+  WifiOff,
   X,
 } from 'lucide-react';
 import {
+  AdminInvitationRecord,
   AnnouncementRecord,
   BidRecord,
   ConversationRecord,
@@ -66,6 +61,7 @@ import {
   ensureUserProfileInitialized,
   extendCurrentUserSessionInteractive,
   extractUserFacingFirestoreError,
+  fetchWithFreshBearerToken,
   FirebaseAuthCapabilities,
   formatFirebaseAuthError,
   getValidFirebaseIdToken,
@@ -91,12 +87,7 @@ import {
   writeCachedUser,
   type CachedUser,
 } from './lib/cachedUser';
-import {
-  DEFAULT_PUBLIC_SETTINGS,
-  getProtectionDurationHours,
-  PLATFORM_CATALOG,
-  PLATFORM_LIST,
-} from './lib/marketplaceLogic';
+import { DEFAULT_PUBLIC_SETTINGS } from './lib/marketplaceLogic';
 import {
   computeUnreadNotificationCount,
   evaluateDealDeadlineNotification,
@@ -106,6 +97,8 @@ import {
   sortNotificationsNewestFirst,
 } from './lib/notificationLogic';
 import {
+  clearAllUserNotificationsInFirestore,
+  deleteNotificationInFirestore,
   dismissNotificationsLocally,
   emitDealAdminNotification,
   emitUserNotification,
@@ -115,6 +108,7 @@ import {
   markNotificationReadInFirestore,
   mergeAnnouncementsIntoFeed,
 } from './lib/notificationService';
+import { clearAllMarketplaceFiltersAndSearch } from './lib/marketplaceFilterLogic';
 import {
   setRuntimeFallbackVapidPublicKey,
   subscribeForegroundPushMessages,
@@ -144,15 +138,28 @@ import {
 } from './lib/checkoutAndIntentLogic';
 import { isRtlLanguage, t } from './lib/i18n';
 import { usePWAInstall } from './hooks/usePWAInstall';
-import { BexoraLogo, PlatformIcon } from './components/Icons';
+import { BexoraLogo } from './components/Icons';
 import { BottomNav, Navbar } from './components/Navbar';
 import type { FirebaseAuthActionParams } from './components/FirebaseAuthActionModal';
-import { ListingCard } from './components/ListingCard';
 import {
   EMPTY_FILTERS,
-  FilterPanel,
   MarketplaceFilterState,
 } from './components/FilterPanel';
+import { HomePageView } from './components/HomePageView';
+import { MarketplacePageView } from './components/MarketplacePageView';
+import {
+  DashboardStatsSkeleton,
+  DetailPageSkeleton,
+  PageShellSkeleton,
+} from './components/LoadingSkeletons';
+import { dedupedRequest } from './lib/apiClient';
+import {
+  buildRouteScrollKey,
+  doesRouteRequireImmediateSecondarySubs,
+  NavigationDataCache,
+  prefetchRouteView,
+  RouteScrollMemory,
+} from './lib/navigationCache';
 import { NotificationCenter } from './components/NotificationCenter';
 import { MarketplaceFooter } from './components/MarketplaceFooter';
 import { initializeUserPresenceSession } from './lib/userPresenceService';
@@ -178,81 +185,80 @@ import {
   type MyModerationStatusResponse,
   type ReportModalTarget,
 } from './lib/moderationClient';
+import { AdminErrorBoundary } from './components/AdminErrorBoundary';
+import { lazyWithRetry } from './lib/chunkRetry';
 import type { UserRestrictionRecord } from './types/moderation';
 
-const AuthModal = lazy(() =>
+const AuthModal = lazyWithRetry(() =>
   import('./components/AuthModal').then((m) => ({ default: m.AuthModal })),
 );
-const FirebaseAuthActionModal = lazy(() =>
+const FirebaseAuthActionModal = lazyWithRetry(() =>
   import('./components/FirebaseAuthActionModal').then((m) => ({
     default: m.FirebaseAuthActionModal,
   })),
 );
-const CreateListingModal = lazy(() =>
+const CreateListingModal = lazyWithRetry(() =>
   import('./components/CreateListingModal').then((m) => ({ default: m.CreateListingModal })),
 );
-const ListingDetailModal = lazy(() =>
+const ListingDetailModal = lazyWithRetry(() =>
   import('./components/ListingDetailModal').then((m) => ({ default: m.ListingDetailModal })),
 );
-const CheckoutView = lazy(() =>
+const CheckoutView = lazyWithRetry(() =>
   import('./components/CheckoutView').then((m) => ({ default: m.CheckoutView })),
 );
-const ChatView = lazy(() =>
+const ChatView = lazyWithRetry(() =>
   import('./components/ChatView').then((m) => ({ default: m.ChatView })),
 );
-const DealsView = lazy(() =>
+const DealsView = lazyWithRetry(() =>
   import('./components/DealsView').then((m) => ({ default: m.DealsView })),
 );
-const WalletModal = lazy(() =>
+const WalletModal = lazyWithRetry(() =>
   import('./components/WalletModal').then((m) => ({ default: m.WalletModal })),
 );
-const ProfileView = lazy(() =>
+const ProfileView = lazyWithRetry(() =>
   import('./components/ProfileView').then((m) => ({ default: m.ProfileView })),
 );
-const TopSellersView = lazy(() =>
+const TopSellersView = lazyWithRetry(() =>
   import('./components/TopSellersView').then((m) => ({ default: m.TopSellersView })),
 );
-const FavoritesView = lazy(() =>
+const FavoritesView = lazyWithRetry(() =>
   import('./components/FavoritesView').then((m) => ({ default: m.FavoritesView })),
 );
-const MyBidsView = lazy(() =>
+const MyBidsView = lazyWithRetry(() =>
   import('./components/MyBidsView').then((m) => ({ default: m.MyBidsView })),
 );
-const FollowingView = lazy(() =>
+const FollowingView = lazyWithRetry(() =>
   import('./components/FollowingView').then((m) => ({ default: m.FollowingView })),
 );
-const AdminDashboard = lazy(() =>
+const AdminDashboard = lazyWithRetry(() =>
   import('./components/AdminDashboard').then((m) => ({ default: m.AdminDashboard })),
 );
-const FloatingSupportWidget = lazy(() =>
+const FloatingSupportWidget = lazyWithRetry(() =>
   import('./components/FloatingSupportWidget').then((m) => ({ default: m.FloatingSupportWidget })),
 );
-const PWAInstallBanner = lazy(() =>
+const PWAInstallBanner = lazyWithRetry(() =>
   import('./components/PWAInstallBanner').then((m) => ({ default: m.PWAInstallBanner })),
 );
-const NotificationPermissionOnboarding = lazy(() =>
+const NotificationPermissionOnboarding = lazyWithRetry(() =>
   import('./components/NotificationPermissionOnboarding').then((m) => ({
     default: m.NotificationPermissionOnboarding,
   })),
 );
-const LiveActivityTickers = lazy(() =>
-  import('./components/LiveActivityTickers').then((m) => ({ default: m.LiveActivityTickers })),
-);
-const RecentSearchesView = lazy(() =>
+const RecentSearchesView = lazyWithRetry(() =>
   import('./components/RecentSearchesView').then((m) => ({ default: m.RecentSearchesView })),
 );
-const ReviewsView = lazy(() =>
+const ReviewsView = lazyWithRetry(() =>
   import('./components/ReviewsView').then((m) => ({ default: m.ReviewsView })),
 );
-const InfoCenterView = lazy(() =>
+const InfoCenterView = lazyWithRetry(() =>
   import('./components/InfoCenterView').then((m) => ({ default: m.InfoCenterView })),
 );
-const ModerationStatusBannerAndAppealModal = lazy(() =>
+const ModerationStatusBannerAndAppealModal = lazyWithRetry(() =>
   import('./components/ModerationStatusBannerAndAppealModal').then((m) => ({
     default: m.ModerationStatusBannerAndAppealModal,
   })),
 );
-const ReportUserModal = lazy(() =>
+const ReportUserModal = lazyWithRetry(() =>
   import('./components/ReportUserModal').then((m) => ({ default: m.ReportUserModal })),
 );
 
@@ -507,8 +513,22 @@ export default function App() {
     }
   }, []);
 
+  const routeRef = useRef<AppRouteState>(route);
+  const scrollMemoryRef = useRef<RouteScrollMemory>(new RouteScrollMemory(40));
+  const listingCacheRef = useRef<NavigationDataCache<MarketplaceListing>>(
+    new NavigationDataCache<MarketplaceListing>(45_000, 80)
+  );
+
+  useEffect(() => {
+    routeRef.current = route;
+  }, [route]);
+
   const navigateRoute = useCallback(
     (next: AppRouteState, opts?: { replace?: boolean; preserveScroll?: boolean }) => {
+      if (typeof window !== 'undefined') {
+        scrollMemoryRef.current.save(buildRouteScrollKey(routeRef.current), window.scrollY);
+      }
+      routeRef.current = next;
       setRoute(next);
       const targetPathname = resolveCanonicalPathnameForNavigation(window.location.pathname, next);
       const nextSearch =
@@ -569,13 +589,19 @@ export default function App() {
     attachAudioUnlockListeners();
   }, []);
 
-  // Sync browser Back/Forward history navigation
+  // Sync browser Back/Forward history navigation & restore scroll positions
   useEffect(() => {
     const onPopState = () => {
+      scrollMemoryRef.current.save(buildRouteScrollKey(routeRef.current), window.scrollY);
       const parsed = parseRouteFromSearch(window.location.search, window.location.pathname);
+      routeRef.current = parsed;
       setRoute(parsed);
       const params = new URLSearchParams(window.location.search);
       setWpReturnSessionId(sanitizeRouteId(params.get('wp_session')) || null);
+      const targetScrollY = scrollMemoryRef.current.get(buildRouteScrollKey(parsed));
+      window.requestAnimationFrame(() => {
+        window.scrollTo({ top: targetScrollY, behavior: 'auto' });
+      });
     };
     window.addEventListener('popstate', onPopState);
     return () => window.removeEventListener('popstate', onPopState);
@@ -646,6 +672,10 @@ export default function App() {
   const [profile, setProfile] = useState<PublicProfile | null>(null);
   const [privateUser, setPrivateUser] = useState<PrivateUser | null>(null);
   const [adminRole, setAdminRole] = useState<'none' | 'admin' | 'superadmin'>('none');
+  const [adminRoleStatus, setAdminRoleStatus] = useState<'idle' | 'checking' | 'resolved' | 'error'>('idle');
+  const [adminRoleError, setAdminRoleError] = useState<string | null>(null);
+  const [adminAccessRetryEpoch, setAdminAccessRetryEpoch] = useState(0);
+  const [pendingAdminInvitation, setPendingAdminInvitation] = useState<AdminInvitationRecord | null>(null);
 
   // Public & Authenticated Data State
   const [settings, setSettings] = useState<PublicSettings>(DEFAULT_PUBLIC_SETTINGS);
@@ -653,6 +683,7 @@ export default function App() {
   const [activeListings, setActiveListings] = useState<MarketplaceListing[]>(() =>
     readCachedListings()
   );
+  const [listingsHydrated, setListingsHydrated] = useState(false);
   const [myListings, setMyListings] = useState<MarketplaceListing[]>([]);
   const [myBids, setMyBids] = useState<BidRecord[]>([]);
   const [favorites, setFavorites] = useState<FavoriteRecord[]>([]);
@@ -680,6 +711,13 @@ export default function App() {
   const arrivalTrackerRef = useRef<NotificationArrivalTracker>(new NotificationArrivalTracker());
   const [isOffline, setIsOffline] = useState<boolean>(
     typeof navigator !== 'undefined' ? !navigator.onLine : false
+  );
+  const [justReconnected, setJustReconnected] = useState(false);
+  const wasOfflineRef = useRef<boolean>(
+    typeof navigator !== 'undefined' ? !navigator.onLine : false
+  );
+  const [deferredSubsReady, setDeferredSubsReady] = useState<boolean>(() =>
+    doesRouteRequireImmediateSecondarySubs(route.page)
   );
 
   useEffect(() => {
@@ -748,15 +786,67 @@ export default function App() {
   }, [verifyCooldownSec]);
 
   useEffect(() => {
-    const onOnline = () => setIsOffline(false);
-    const onOffline = () => setIsOffline(true);
+    let reconnectTimer: number | null = null;
+    const onOnline = () => {
+      setIsOffline(false);
+      void enableNetwork(db).catch(() => {});
+      if (wasOfflineRef.current) {
+        wasOfflineRef.current = false;
+        setJustReconnected(true);
+        if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
+        reconnectTimer = window.setTimeout(() => {
+          setJustReconnected(false);
+        }, 3500);
+      }
+    };
+    const onOffline = () => {
+      wasOfflineRef.current = true;
+      setIsOffline(true);
+      setJustReconnected(false);
+      if (reconnectTimer !== null) {
+        window.clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+    };
     window.addEventListener('online', onOnline);
     window.addEventListener('offline', onOffline);
     return () => {
       window.removeEventListener('online', onOnline);
       window.removeEventListener('offline', onOffline);
+      if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
     };
   }, []);
+
+  useEffect(() => {
+    if (!fbUser || signingOut) {
+      setDeferredSubsReady(doesRouteRequireImmediateSecondarySubs(page));
+      return;
+    }
+    if (doesRouteRequireImmediateSecondarySubs(page)) {
+      setDeferredSubsReady(true);
+      return;
+    }
+    if (deferredSubsReady) return;
+
+    const winWithIdle = window as unknown as {
+      requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
+      cancelIdleCallback?: (id: number) => void;
+    };
+    let idleId: number | null = null;
+    let timeoutId: number | null = null;
+    const enableSecondary = () => setDeferredSubsReady(true);
+    if (typeof winWithIdle.requestIdleCallback === 'function') {
+      idleId = winWithIdle.requestIdleCallback(enableSecondary, { timeout: 800 });
+    } else {
+      timeoutId = window.setTimeout(enableSecondary, 800);
+    }
+    return () => {
+      if (idleId !== null && typeof winWithIdle.cancelIdleCallback === 'function') {
+        winWithIdle.cancelIdleCallback(idleId);
+      }
+      if (timeoutId !== null) window.clearTimeout(timeoutId);
+    };
+  }, [fbUser?.uid, signingOut, page, deferredSubsReady]);
 
   useEffect(() => {
     if (!fbUser || !profileBootstrapped || signingOut) return;
@@ -1041,9 +1131,11 @@ export default function App() {
         );
         list.sort((a, b) => b.createdAtMs - a.createdAtMs);
         setActiveListings(list);
+        setListingsHydrated(true);
         writeCachedListings(list);
       },
       (err) => {
+        setListingsHydrated(true);
         if (isTokenServiceDisabledError(err)) {
           void recoverFirestoreFromTokenServiceError();
           return;
@@ -1092,6 +1184,9 @@ export default function App() {
             setProfile(null);
             setPrivateUser(null);
             setAdminRole('none');
+            setAdminRoleStatus('idle');
+            setAdminRoleError(null);
+            setPendingAdminInvitation(null);
             setMyListings([]);
             setMyBids([]);
             setFavorites([]);
@@ -1119,6 +1214,9 @@ export default function App() {
         setProfile(null);
         setPrivateUser(null);
         setAdminRole('none');
+        setAdminRoleStatus('idle');
+        setAdminRoleError(null);
+        setPendingAdminInvitation(null);
         setMyListings([]);
         setMyBids([]);
         setFavorites([]);
@@ -1307,34 +1405,144 @@ export default function App() {
     }
   }, [showFlash]);
 
-  // Authenticated User Real-Time Subscriptions (start immediately once fbUser exists; detached cleanly on logout)
+  // Dedicated Admin Access Verification + Pending Admin Invitation Listener
   useEffect(() => {
-    if (!fbUser || signingOut) return;
-    const uid = fbUser.uid;
-    const unsubs: (() => void)[] = [];
+    if (!fbUser || signingOut) {
+      setAdminRole('none');
+      setAdminRoleStatus('idle');
+      setAdminRoleError(null);
+      setPendingAdminInvitation(null);
+      return;
+    }
 
-    // Check bootstrapped superadmin + /admins/{uid}
+    let active = true;
+    const uid = fbUser.uid;
     const isBootstrapped =
       Boolean(fbUser.emailVerified) &&
       fbUser.email?.toLowerCase() === BOOTSTRAPPED_SUPERADMIN_EMAIL.toLowerCase();
 
+    setAdminRoleError(null);
     if (isBootstrapped) {
       setAdminRole('superadmin');
+      setAdminRoleStatus('resolved');
     } else {
+      setAdminRoleStatus('checking');
+    }
+
+    const unsubs: (() => void)[] = [];
+
+    if (!isBootstrapped) {
       unsubs.push(
         onSnapshot(
           doc(db, 'admins', uid),
           (snap) => {
+            if (!active) return;
             if (snap.exists()) {
               setAdminRole(snap.data().role === 'superadmin' ? 'superadmin' : 'admin');
             } else {
               setAdminRole('none');
             }
+            setAdminRoleStatus('resolved');
+            setAdminRoleError(null);
           },
-          () => setAdminRole('none')
+          () => {
+            void (async () => {
+              try {
+                const { ok, status, json } = await dedupedRequest(
+                  `GET:/api/admin/access:${uid}`,
+                  async () => {
+                    const resp = await fetchWithFreshBearerToken('/api/admin/access');
+                    const parsed = (await resp.json().catch(() => null)) as {
+                      ok?: boolean;
+                      isAdmin?: boolean;
+                      role?: 'none' | 'admin' | 'superadmin';
+                      error?: string;
+                    } | null;
+                    return { ok: resp.ok, status: resp.status, json: parsed };
+                  }
+                );
+                if (!active) return;
+                if (ok && json?.ok) {
+                  setAdminRole(
+                    json.role === 'superadmin'
+                      ? 'superadmin'
+                      : json.role === 'admin' || json.isAdmin
+                      ? 'admin'
+                      : 'none'
+                  );
+                  setAdminRoleStatus('resolved');
+                  setAdminRoleError(null);
+                } else {
+                  setAdminRole('none');
+                  setAdminRoleStatus('error');
+                  setAdminRoleError(
+                    json?.error || `Could not verify administrator permissions (${status}).`
+                  );
+                }
+              } catch (err) {
+                if (!active) return;
+                setAdminRole('none');
+                setAdminRoleStatus('error');
+                setAdminRoleError(
+                  err instanceof Error
+                    ? err.message
+                    : 'Network error verifying administrator permissions.'
+                );
+              }
+            })();
+          }
         )
       );
     }
+
+    unsubs.push(
+      onSnapshot(
+        doc(db, 'adminInvitations', `inv_${uid}`),
+        (snap) => {
+          if (!active) return;
+          if (!snap.exists()) {
+            setPendingAdminInvitation(null);
+            return;
+          }
+          const d = snap.data();
+          if (d.status !== 'pending') {
+            setPendingAdminInvitation(null);
+            return;
+          }
+          setPendingAdminInvitation({
+            id: snap.id,
+            targetUid: String(d.targetUid || uid),
+            targetName: d.targetName ? String(d.targetName) : undefined,
+            targetEmail: d.targetEmail ? String(d.targetEmail) : undefined,
+            role: d.role === 'superadmin' ? 'superadmin' : 'admin',
+            permissions: Array.isArray(d.permissions)
+              ? d.permissions.map((p: unknown) => String(p))
+              : [],
+            status: 'pending',
+            invitedBy: String(d.invitedBy || ''),
+            invitedByName: d.invitedByName ? String(d.invitedByName) : undefined,
+            createdAtMs: Number(
+              d.createdAtMs || (d.createdAt?.toMillis ? d.createdAt.toMillis() : Date.now())
+            ),
+          });
+        },
+        () => {
+          if (active) setPendingAdminInvitation(null);
+        }
+      )
+    );
+
+    return () => {
+      active = false;
+      unsubs.forEach((u) => u());
+    };
+  }, [fbUser?.uid, fbUser?.email, fbUser?.emailVerified, signingOut, adminAccessRetryEpoch]);
+
+  // Authenticated User Real-Time Subscriptions (start immediately once fbUser exists; detached cleanly on logout)
+  useEffect(() => {
+    if (!fbUser || signingOut) return;
+    const uid = fbUser.uid;
+    const unsubs: (() => void)[] = [];
 
     unsubs.push(
       onSnapshot(
@@ -1428,20 +1636,6 @@ export default function App() {
 
     unsubs.push(
       onSnapshot(
-        query(collection(db, 'listings'), where('sellerId', '==', uid)),
-        (snap) => {
-          const list: MarketplaceListing[] = snap.docs.map((docSnap) =>
-            mapListingDocument(docSnap.id, docSnap.data())
-          );
-          list.sort((a, b) => b.createdAtMs - a.createdAtMs);
-          setMyListings(list);
-        },
-        () => {}
-      )
-    );
-
-    unsubs.push(
-      onSnapshot(
         query(collection(db, 'privateUsers', uid, 'recentSearches'), limit(25)),
         (snap) => {
           const loaded: RecentSearchRecord[] = [];
@@ -1471,35 +1665,7 @@ export default function App() {
 
     unsubs.push(
       onSnapshot(
-        query(collection(db, 'bids'), where('buyerId', '==', uid)),
-        (snap) => {
-          const list: BidRecord[] = snap.docs.map((docSnap) => {
-            const bd = docSnap.data();
-            return {
-              id: docSnap.id,
-              listingId: String(bd.listingId || ''),
-              sellerId: String(bd.sellerId || ''),
-              buyerId: String(bd.buyerId || ''),
-              buyerName: String(bd.buyerName || ''),
-              buyerUsername: String(bd.buyerUsername || ''),
-              buyerVerified: Boolean(bd.buyerVerified),
-              amountMinor: Number(bd.amountMinor || 0),
-              currency: (bd.currency as CurrencyCode) || 'BDT',
-              status: (bd.status as BidRecord['status']) || 'pending',
-              dealId: bd.dealId ? String(bd.dealId) : undefined,
-              createdAtMs: bd.createdAt?.toMillis ? bd.createdAt.toMillis() : Date.now(),
-            };
-          });
-          list.sort((a, b) => b.createdAtMs - a.createdAtMs);
-          setMyBids(list);
-        },
-        () => {}
-      )
-    );
-
-    unsubs.push(
-      onSnapshot(
-        query(collection(db, 'favorites'), where('userId', '==', uid)),
+        query(collection(db, 'favorites'), where('userId', '==', uid), limit(120)),
         (snap) => {
           const list: FavoriteRecord[] = snap.docs.map((docSnap) => {
             const fd = docSnap.data();
@@ -1530,7 +1696,7 @@ export default function App() {
 
     unsubs.push(
       onSnapshot(
-        query(collection(db, 'sellerFollows'), where('followerId', '==', uid)),
+        query(collection(db, 'sellerFollows'), where('followerId', '==', uid), limit(120)),
         (snap) => {
           const list: SellerFollowRecord[] = snap.docs.map((docSnap) => {
             const sd = docSnap.data();
@@ -1549,167 +1715,6 @@ export default function App() {
           });
           list.sort((a, b) => b.createdAtMs - a.createdAtMs);
           setFollowedSellers(list);
-        },
-        () => {}
-      )
-    );
-
-    // Conversations as Buyer or Seller
-    let buyerConvs: ConversationRecord[] = [];
-    let sellerConvs: ConversationRecord[] = [];
-    const syncConvs = () => {
-      const map = new Map<string, ConversationRecord>();
-      [...buyerConvs, ...sellerConvs].forEach((c) => map.set(c.id, c));
-      const merged = Array.from(map.values()).sort((a, b) => b.updatedAtMs - a.updatedAtMs);
-      setConversations(merged);
-    };
-
-    unsubs.push(
-      onSnapshot(
-        query(collection(db, 'conversations'), where('buyerId', '==', uid)),
-        (snap) => {
-          buyerConvs = snap.docs.map((d) => {
-            const cd = d.data();
-            return {
-              id: d.id,
-              buyerId: cd.buyerId,
-              sellerId: cd.sellerId,
-              buyerName: cd.buyerName,
-              sellerName: cd.sellerName,
-              listingId: cd.listingId,
-              listingTitle: cd.listingTitle,
-              lastMessage: cd.lastMessage,
-              safetyAcceptedByBuyer: Boolean(cd.safetyAcceptedByBuyer),
-              safetyAcceptedBySeller: Boolean(cd.safetyAcceptedBySeller),
-              moderationPaused: Boolean(cd.moderationPaused),
-              moderationPauseReason: cd.moderationPauseReason
-                ? String(cd.moderationPauseReason)
-                : undefined,
-              updatedAtMs: cd.updatedAt?.toMillis ? cd.updatedAt.toMillis() : Date.now(),
-            };
-          });
-          syncConvs();
-        },
-        () => {}
-      )
-    );
-
-    unsubs.push(
-      onSnapshot(
-        query(collection(db, 'conversations'), where('sellerId', '==', uid)),
-        (snap) => {
-          sellerConvs = snap.docs.map((d) => {
-            const cd = d.data();
-            return {
-              id: d.id,
-              buyerId: cd.buyerId,
-              sellerId: cd.sellerId,
-              buyerName: cd.buyerName,
-              sellerName: cd.sellerName,
-              listingId: cd.listingId,
-              listingTitle: cd.listingTitle,
-              lastMessage: cd.lastMessage,
-              safetyAcceptedByBuyer: Boolean(cd.safetyAcceptedByBuyer),
-              safetyAcceptedBySeller: Boolean(cd.safetyAcceptedBySeller),
-              moderationPaused: Boolean(cd.moderationPaused),
-              moderationPauseReason: cd.moderationPauseReason
-                ? String(cd.moderationPauseReason)
-                : undefined,
-              updatedAtMs: cd.updatedAt?.toMillis ? cd.updatedAt.toMillis() : Date.now(),
-            };
-          });
-          syncConvs();
-        },
-        () => {}
-      )
-    );
-
-    // Deals as Buyer or Seller
-    let buyerDeals: DealRecord[] = [];
-    let sellerDeals: DealRecord[] = [];
-    const syncDeals = () => {
-      const map = new Map<string, DealRecord>();
-      [...buyerDeals, ...sellerDeals].forEach((d) => map.set(d.id, d));
-      setDeals(Array.from(map.values()).sort((a, b) => b.createdAtMs - a.createdAtMs));
-    };
-
-    const parseDeal = mapDealDocument;
-
-    unsubs.push(
-      onSnapshot(
-        query(collection(db, 'deals'), where('buyerId', '==', uid)),
-        (snap) => {
-          buyerDeals = snap.docs.map((d) => parseDeal(d.id, d.data()));
-          syncDeals();
-        },
-        () => {}
-      )
-    );
-    unsubs.push(
-      onSnapshot(
-        query(collection(db, 'deals'), where('sellerId', '==', uid)),
-        (snap) => {
-          sellerDeals = snap.docs.map((d) => parseDeal(d.id, d.data()));
-          syncDeals();
-        },
-        () => {}
-      )
-    );
-
-    unsubs.push(
-      onSnapshot(
-        query(collection(db, 'deposits'), where('userId', '==', uid)),
-        (snap) => {
-          setDeposits(
-            snap.docs
-              .map((d) => {
-                const dd = d.data();
-                return {
-                  id: d.id,
-                  userId: dd.userId,
-                  userName: dd.userName,
-                  method: dd.method,
-                  amountMinor: Number(dd.amountMinor || 0),
-                  currency: 'BDT' as const,
-                  senderNumber: dd.senderNumber,
-                  transactionId: dd.transactionId,
-                  screenshotData: dd.screenshotData,
-                  status: dd.status,
-                  rejectionReason: dd.rejectionReason,
-                  createdAtMs: dd.createdAt?.toMillis ? dd.createdAt.toMillis() : Date.now(),
-                };
-              })
-              .sort((a, b) => b.createdAtMs - a.createdAtMs)
-          );
-        },
-        () => {}
-      )
-    );
-
-    unsubs.push(
-      onSnapshot(
-        query(collection(db, 'withdrawals'), where('userId', '==', uid)),
-        (snap) => {
-          setWithdrawals(
-            snap.docs
-              .map((d) => {
-                const wd = d.data();
-                return {
-                  id: d.id,
-                  userId: wd.userId,
-                  userName: wd.userName,
-                  method: wd.method,
-                  payoutAccount: wd.payoutAccount,
-                  amountMinor: Number(wd.amountMinor || 0),
-                  currency: wd.currency || 'BDT',
-                  status: wd.status,
-                  referenceId: wd.referenceId,
-                  rejectionReason: wd.rejectionReason,
-                  createdAtMs: wd.createdAt?.toMillis ? wd.createdAt.toMillis() : Date.now(),
-                };
-              })
-              .sort((a, b) => b.createdAtMs - a.createdAtMs)
-          );
         },
         () => {}
       )
@@ -1773,6 +1778,220 @@ export default function App() {
     return () => unsubs.forEach((u) => u());
   }, [fbUser?.uid, signingOut, notifReloadEpoch]);
 
+  // Tier 2 Secondary Authenticated Subscriptions (deferred after initial render or immediately when entering workspace pages)
+  useEffect(() => {
+    if (!fbUser || signingOut || !deferredSubsReady) return;
+    const uid = fbUser.uid;
+    const unsubs: (() => void)[] = [];
+
+    unsubs.push(
+      onSnapshot(
+        query(collection(db, 'listings'), where('sellerId', '==', uid), limit(100)),
+        (snap) => {
+          const list: MarketplaceListing[] = snap.docs.map((docSnap) =>
+            mapListingDocument(docSnap.id, docSnap.data())
+          );
+          list.sort((a, b) => b.createdAtMs - a.createdAtMs);
+          setMyListings(list);
+        },
+        () => {}
+      )
+    );
+
+    unsubs.push(
+      onSnapshot(
+        query(collection(db, 'bids'), where('buyerId', '==', uid), limit(100)),
+        (snap) => {
+          const list: BidRecord[] = snap.docs.map((docSnap) => {
+            const bd = docSnap.data();
+            return {
+              id: docSnap.id,
+              listingId: String(bd.listingId || ''),
+              sellerId: String(bd.sellerId || ''),
+              buyerId: String(bd.buyerId || ''),
+              buyerName: String(bd.buyerName || ''),
+              buyerUsername: String(bd.buyerUsername || ''),
+              buyerVerified: Boolean(bd.buyerVerified),
+              amountMinor: Number(bd.amountMinor || 0),
+              currency: (bd.currency as CurrencyCode) || 'BDT',
+              status: (bd.status as BidRecord['status']) || 'pending',
+              dealId: bd.dealId ? String(bd.dealId) : undefined,
+              createdAtMs: bd.createdAt?.toMillis ? bd.createdAt.toMillis() : Date.now(),
+            };
+          });
+          list.sort((a, b) => b.createdAtMs - a.createdAtMs);
+          setMyBids(list);
+        },
+        () => {}
+      )
+    );
+
+    // Conversations as Buyer or Seller (bounded)
+    let buyerConvs: ConversationRecord[] = [];
+    let sellerConvs: ConversationRecord[] = [];
+    const syncConvs = () => {
+      const map = new Map<string, ConversationRecord>();
+      [...buyerConvs, ...sellerConvs].forEach((c) => map.set(c.id, c));
+      const merged = Array.from(map.values()).sort((a, b) => b.updatedAtMs - a.updatedAtMs);
+      setConversations(merged);
+    };
+
+    unsubs.push(
+      onSnapshot(
+        query(collection(db, 'conversations'), where('buyerId', '==', uid), limit(60)),
+        (snap) => {
+          buyerConvs = snap.docs.map((d) => {
+            const cd = d.data();
+            return {
+              id: d.id,
+              buyerId: cd.buyerId,
+              sellerId: cd.sellerId,
+              buyerName: cd.buyerName,
+              sellerName: cd.sellerName,
+              listingId: cd.listingId,
+              listingTitle: cd.listingTitle,
+              lastMessage: cd.lastMessage,
+              safetyAcceptedByBuyer: Boolean(cd.safetyAcceptedByBuyer),
+              safetyAcceptedBySeller: Boolean(cd.safetyAcceptedBySeller),
+              moderationPaused: Boolean(cd.moderationPaused),
+              moderationPauseReason: cd.moderationPauseReason
+                ? String(cd.moderationPauseReason)
+                : undefined,
+              updatedAtMs: cd.updatedAt?.toMillis ? cd.updatedAt.toMillis() : Date.now(),
+            };
+          });
+          syncConvs();
+        },
+        () => {}
+      )
+    );
+
+    unsubs.push(
+      onSnapshot(
+        query(collection(db, 'conversations'), where('sellerId', '==', uid), limit(60)),
+        (snap) => {
+          sellerConvs = snap.docs.map((d) => {
+            const cd = d.data();
+            return {
+              id: d.id,
+              buyerId: cd.buyerId,
+              sellerId: cd.sellerId,
+              buyerName: cd.buyerName,
+              sellerName: cd.sellerName,
+              listingId: cd.listingId,
+              listingTitle: cd.listingTitle,
+              lastMessage: cd.lastMessage,
+              safetyAcceptedByBuyer: Boolean(cd.safetyAcceptedByBuyer),
+              safetyAcceptedBySeller: Boolean(cd.safetyAcceptedBySeller),
+              moderationPaused: Boolean(cd.moderationPaused),
+              moderationPauseReason: cd.moderationPauseReason
+                ? String(cd.moderationPauseReason)
+                : undefined,
+              updatedAtMs: cd.updatedAt?.toMillis ? cd.updatedAt.toMillis() : Date.now(),
+            };
+          });
+          syncConvs();
+        },
+        () => {}
+      )
+    );
+
+    // Deals as Buyer or Seller (bounded)
+    let buyerDeals: DealRecord[] = [];
+    let sellerDeals: DealRecord[] = [];
+    const syncDeals = () => {
+      const map = new Map<string, DealRecord>();
+      [...buyerDeals, ...sellerDeals].forEach((d) => map.set(d.id, d));
+      setDeals(Array.from(map.values()).sort((a, b) => b.createdAtMs - a.createdAtMs));
+    };
+
+    const parseDeal = mapDealDocument;
+
+    unsubs.push(
+      onSnapshot(
+        query(collection(db, 'deals'), where('buyerId', '==', uid), limit(80)),
+        (snap) => {
+          buyerDeals = snap.docs.map((d) => parseDeal(d.id, d.data()));
+          syncDeals();
+        },
+        () => {}
+      )
+    );
+    unsubs.push(
+      onSnapshot(
+        query(collection(db, 'deals'), where('sellerId', '==', uid), limit(80)),
+        (snap) => {
+          sellerDeals = snap.docs.map((d) => parseDeal(d.id, d.data()));
+          syncDeals();
+        },
+        () => {}
+      )
+    );
+
+    unsubs.push(
+      onSnapshot(
+        query(collection(db, 'deposits'), where('userId', '==', uid), limit(80)),
+        (snap) => {
+          setDeposits(
+            snap.docs
+              .map((d) => {
+                const dd = d.data();
+                return {
+                  id: d.id,
+                  userId: dd.userId,
+                  userName: dd.userName,
+                  method: dd.method,
+                  amountMinor: Number(dd.amountMinor || 0),
+                  currency: 'BDT' as const,
+                  senderNumber: dd.senderNumber,
+                  transactionId: dd.transactionId,
+                  screenshotData: dd.screenshotData,
+                  status: dd.status,
+                  rejectionReason: dd.rejectionReason,
+                  createdAtMs: dd.createdAt?.toMillis ? dd.createdAt.toMillis() : Date.now(),
+                };
+              })
+              .sort((a, b) => b.createdAtMs - a.createdAtMs)
+          );
+        },
+        () => {}
+      )
+    );
+
+    unsubs.push(
+      onSnapshot(
+        query(collection(db, 'withdrawals'), where('userId', '==', uid), limit(80)),
+        (snap) => {
+          setWithdrawals(
+            snap.docs
+              .map((d) => {
+                const wd = d.data();
+                return {
+                  id: d.id,
+                  userId: wd.userId,
+                  userName: wd.userName,
+                  method: wd.method,
+                  payoutAccount: wd.payoutAccount,
+                  amountMinor: Number(wd.amountMinor || 0),
+                  currency: wd.currency || 'BDT',
+                  status: wd.status,
+                  referenceId: wd.referenceId,
+                  rejectionReason: wd.rejectionReason,
+                  createdAtMs: wd.createdAt?.toMillis ? wd.createdAt.toMillis() : Date.now(),
+                };
+              })
+              .sort((a, b) => b.createdAtMs - a.createdAtMs)
+          );
+        },
+        () => {}
+      )
+    );
+
+    return () => unsubs.forEach((u) => u());
+  }, [fbUser?.uid, signingOut, deferredSubsReady]);
+
+  const autoReleaseDealIdsRef = useRef<Set<string>>(new Set());
+
   // Idempotent Escrow Protection Deadline Reminder Check (expiring within 6h & expired)
   useEffect(() => {
     if (!fbUser || deals.length === 0) return;
@@ -1798,7 +2017,16 @@ export default function App() {
             referenceLabel: spec.referenceLabel,
             destination: spec.destination,
           });
-          if (spec.eventKey.startsWith('deal_window_elapsed_') && deal.unresolvedReportCount === 0) {
+          if (spec.eventKey.startsWith('deal_protection_expired_') && deal.unresolvedReportCount === 0) {
+            if (!autoReleaseDealIdsRef.current.has(deal.id)) {
+              autoReleaseDealIdsRef.current.add(deal.id);
+              void fetchWithFreshBearerToken(
+                `/api/deals/${encodeURIComponent(deal.id)}/release-if-ready`,
+                { method: 'POST' }
+              ).catch(() => {
+                // Non-fatal: server background sweep / admin settlement remains active
+              });
+            }
             void emitDealAdminNotification({
               dealId: deal.id,
               eventKey: `admin_ready_settlement_${deal.id}`,
@@ -1841,26 +2069,35 @@ export default function App() {
       setLoadingTargetListing(false);
       return;
     }
-    const localFound =
-      activeListings.some((l) => l.id === targetListingId) ||
-      myListings.some((l) => l.id === targetListingId);
-    if (localFound) {
+    const localMatch =
+      activeListings.find((l) => l.id === targetListingId) ||
+      myListings.find((l) => l.id === targetListingId);
+    if (localMatch) {
+      listingCacheRef.current.set(`listing:${targetListingId}`, localMatch);
       setLoadingTargetListing(false);
       return;
     }
+    const cached = listingCacheRef.current.get(`listing:${targetListingId}`);
+    if (cached) {
+      setFetchedListing(cached);
+      setLoadingTargetListing(false);
+    } else {
+      setLoadingTargetListing(true);
+    }
     let cancelled = false;
-    setLoadingTargetListing(true);
     getDoc(doc(db, 'listings', targetListingId))
       .then((snap) => {
         if (cancelled) return;
         if (snap.exists()) {
-          setFetchedListing(mapListingDocument(snap.id, snap.data()));
-        } else {
+          const mapped = mapListingDocument(snap.id, snap.data());
+          listingCacheRef.current.set(`listing:${targetListingId}`, mapped);
+          setFetchedListing(mapped);
+        } else if (!cached) {
           setFetchedListing(null);
         }
       })
       .catch(() => {
-        if (!cancelled) setFetchedListing(null);
+        if (!cancelled && !cached) setFetchedListing(null);
       })
       .finally(() => {
         if (!cancelled) setLoadingTargetListing(false);
@@ -2006,21 +2243,44 @@ export default function App() {
   }, [fbUser, combinedNotifications, personalNotifications]);
 
   const handleDismissNotification = useCallback(
-    (item: NotificationRecord) => {
+    async (item: NotificationRecord) => {
       const scopeKey = fbUser?.uid || 'guest';
+      if (!fbUser || item.isAnnouncementMirror) {
+        dismissNotificationsLocally(scopeKey, [item.id]);
+        setDismissedNotifEpoch((n) => n + 1);
+        return;
+      }
+      await deleteNotificationInFirestore(item);
       dismissNotificationsLocally(scopeKey, [item.id]);
       setDismissedNotifEpoch((n) => n + 1);
     },
-    [fbUser?.uid]
+    [fbUser]
   );
 
-  const handleClearAllNotifications = useCallback(() => {
+  const handleClearAllNotifications = useCallback(async () => {
     const scopeKey = fbUser?.uid || 'guest';
-    const ids = combinedNotifications.map((item) => item.id).filter(Boolean);
-    if (ids.length === 0) return;
-    dismissNotificationsLocally(scopeKey, ids);
-    setDismissedNotifEpoch((n) => n + 1);
-  }, [fbUser?.uid, combinedNotifications]);
+    if (combinedNotifications.length === 0) return;
+    if (!fbUser) {
+      const ids = combinedNotifications.map((item) => item.id).filter(Boolean);
+      dismissNotificationsLocally(scopeKey, ids);
+      setDismissedNotifEpoch((n) => n + 1);
+      return;
+    }
+    const { dismissedMirrorIds } = await clearAllUserNotificationsInFirestore(
+      fbUser.uid,
+      combinedNotifications
+    );
+    const allClearedIds = [
+      ...dismissedMirrorIds,
+      ...combinedNotifications
+        .filter((item) => !item.isAnnouncementMirror && item.recipientId === fbUser.uid)
+        .map((item) => item.id),
+    ];
+    if (allClearedIds.length > 0) {
+      dismissNotificationsLocally(scopeKey, allClearedIds);
+      setDismissedNotifEpoch((n) => n + 1);
+    }
+  }, [fbUser, combinedNotifications]);
 
   const handleNavigateNotificationDestination = useCallback(
     async (dest: SafeInternalDestination) => {
@@ -2171,6 +2431,9 @@ export default function App() {
     arrivalTrackerRef.current.reset();
     setProfileBootstrapped(false);
     setAdminRole('none');
+    setAdminRoleStatus('idle');
+    setAdminRoleError(null);
+    setPendingAdminInvitation(null);
     setWalletReturnRoute(null);
     setAndPersistPendingIntent(null);
     setPersonalNotifications([]);
@@ -2803,11 +3066,12 @@ export default function App() {
   });
 
   return (
-    <div className="min-h-screen w-full flex flex-col bg-[var(--bx-bg)] text-[var(--bx-text)] pb-16 md:pb-0">
+    <div className="min-h-screen w-full flex flex-col bg-[var(--bx-bg)] text-[var(--bx-text)] pb-20 lg:pb-0">
       {/* Global Header */}
       <Navbar
         page={page}
         onNavigate={navigatePage}
+        onPrefetchRoute={prefetchRouteView}
         theme={theme}
         onToggleTheme={toggleTheme}
         language={language}
@@ -2903,6 +3167,33 @@ export default function App() {
         </Suspense>
       )}
 
+      {/* Live Offline / Connection Restored Real-Time Sync Indicator */}
+      {(isOffline || justReconnected) && (
+        <div
+          role="status"
+          aria-live="polite"
+          className={`border-b-2 px-4 py-2 text-xs font-extrabold ${
+            isOffline
+              ? 'border-[var(--red)] bg-[var(--surface-2)] text-[var(--red)]'
+              : 'border-[var(--green)] bg-[var(--surface-2)] text-[var(--green)]'
+          }`}
+        >
+          <div className="max-w-7xl mx-auto flex items-center justify-center gap-2">
+            {isOffline ? (
+              <>
+                <WifiOff className="w-4 h-4 shrink-0" />
+                <span>You are offline — showing cached data. Changes will sync when reconnected.</span>
+              </>
+            ) : (
+              <>
+                <Wifi className="w-4 h-4 shrink-0" />
+                <span>Connection restored — real-time sync active.</span>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Optional Admin-Configured Top Platform Notice Banner */}
       {settings.noticeBannerEnabled && settings.noticeBannerText?.trim() && (
         <div
@@ -2968,10 +3259,10 @@ export default function App() {
                   setTokenBannerDismissed(true);
                   setSessionExtendPromptVisible(false);
                 }}
-                className="bx-icon-btn !w-7 !h-7"
+                className="bx-icon-btn !w-10 !h-10 sm:!w-8 sm:!h-8"
                 aria-label="Dismiss session renewal notice"
               >
-                <X className="w-3.5 h-3.5" />
+                <X className="w-4 h-4" />
               </button>
             </div>
           </div>
@@ -3019,10 +3310,10 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => setEmailBannerDismissed(true)}
-                className="bx-icon-btn !w-7 !h-7"
+                className="bx-icon-btn !w-10 !h-10 sm:!w-8 sm:!h-8"
                 aria-label="Dismiss email verification reminder"
               >
-                <X className="w-3.5 h-3.5" />
+                <X className="w-4 h-4" />
               </button>
             </div>
           </div>
@@ -3056,7 +3347,7 @@ export default function App() {
 
       {/* Main Content Area — All Pages Render as Full-Screen Website Views */}
       <main className="flex-1 w-full">
-        <Suspense fallback={null}>
+        <Suspense fallback={<PageShellSkeleton label="Loading page…" />}>
         {authAction ? (
           <FirebaseAuthActionModal
             action={authAction}
@@ -3078,478 +3369,114 @@ export default function App() {
           <>
             {/* HOME PAGE */}
             {page === 'home' && (
-              <div className="pb-12">
-                {/* Real-Time RECENT SOLD & RECENT PAYOUT Activity Tickers */}
-                <LiveActivityTickers onActivitiesChange={setPublicActivities} />
-
-                <div className="space-y-12">
-                  {/* Hero Section */}
-                  <section className="border-b-2 border-[var(--bx-border)] bg-[var(--bx-surface)]">
-                    <div className="bx-wrap-wide py-12 lg:py-16 grid grid-cols-1 lg:grid-cols-12 gap-8 items-center">
-                      <div className="lg:col-span-7 space-y-6">
-                        <div className="inline-flex items-center gap-2 px-3 py-1 text-xs font-black uppercase tracking-wider bg-[#FFD400] text-[#191919] border-2 border-[#191919]">
-                          <ShieldCheck className="w-4 h-4" />
-                          {t(language, 'hero_eyebrow')}
-                        </div>
-
-                        <h1 className="text-3xl sm:text-5xl font-black tracking-tight leading-[1.08]">
-                          {t(language, 'hero_title')}
-                        </h1>
-
-                        <p className="text-base sm:text-lg opacity-85 max-w-2xl leading-relaxed">
-                          {t(language, 'hero_sub')}
-                        </p>
-
-                        {/* Search Bar */}
-                        <form
-                          onSubmit={(e) => {
-                            e.preventDefault();
-                            void recordRecentSearch({
-                              query: searchQuery,
-                              platform: appliedFilters.platform !== 'all' ? appliedFilters.platform : '',
-                              subcategory:
-                                appliedFilters.subcategory !== 'all' ? appliedFilters.subcategory : '',
-                              monetization: appliedFilters.monetization,
-                              verifiedOnly: appliedFilters.verifiedSeller,
-                              sortBy: appliedFilters.sort,
-                            });
-                            navigateRoute({ page: 'market' });
-                          }}
-                          className="flex flex-col sm:flex-row gap-3 max-w-2xl"
-                        >
-                          <div className="relative flex-1">
-                            <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 opacity-60" />
-                            <input
-                              type="search"
-                              aria-label={t(language, 'search_placeholder')}
-                              value={searchQuery}
-                              onChange={(e) => setSearchQuery(e.target.value)}
-                              placeholder={t(language, 'search_placeholder')}
-                              className="bx-input w-full pl-10 pr-4 py-3 text-sm font-semibold"
-                            />
-                          </div>
-                          <button
-                            type="submit"
-                            className="bx-btn bx-btn-primary px-6 py-3 text-sm font-extrabold inline-flex items-center justify-center gap-2"
-                          >
-                            <span>Explore Assets</span>
-                            <ArrowRight className="w-4 h-4" />
-                          </button>
-                        </form>
-
-                        <div className="flex flex-wrap items-center gap-3 pt-1">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              if (!fbUser) {
-                                requireAuthWithIntent({
-                                  kind: 'open_page',
-                                  targetPage: 'sell',
-                                  returnPage: 'home',
-                                  createdAtMs: Date.now(),
-                                });
-                              } else {
-                                navigateRoute({ page: 'sell' });
-                              }
-                            }}
-                            className="bx-btn bx-btn-ghost px-4 py-2 text-xs font-extrabold inline-flex items-center gap-1.5"
-                          >
-                            <Plus className="w-4 h-4 text-[#FF6500]" />
-                            {t(language, 'btn_sell')}
-                          </button>
-                          <span className="text-xs font-bold opacity-75">
-                            Escrow Hold · Immutable Protection Windows · Evidence-Reviewed Monetization
-                          </span>
-                        </div>
-                      </div>
-
-                      {/* Right-side Escrow & Verification Architecture Card */}
-                      <div className="lg:col-span-5">
-                        <div className="bx-card p-6 space-y-4">
-                          <div className="flex items-center justify-between border-b-2 border-[var(--bx-border)] pb-3">
-                            <div className="flex items-center gap-2">
-                              <Lock className="w-5 h-5 text-[#FF6500]" />
-                              <h2 className="text-base font-black">How BEXORA Escrow Works</h2>
-                            </div>
-                            <span className="text-[11px] font-black uppercase px-2 py-0.5 bg-[#793A91] text-white">
-                              Protected
-                            </span>
-                          </div>
-
-                          <ol className="space-y-3 text-xs font-bold">
-                            <li className="p-3 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)] flex gap-3">
-                              <span className="w-6 h-6 shrink-0 bg-[#FF6500] text-white font-black flex items-center justify-center">
-                                1
-                              </span>
-                              <div>
-                                <div className="font-black text-sm">Verify Before Bidding</div>
-                                <p className="opacity-80 font-medium mt-0.5">
-                                  Inspect public domain-matched asset links, account age, and Admin-verified monetization status.
-                                </p>
-                              </div>
-                            </li>
-                            <li className="p-3 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)] flex gap-3">
-                              <span className="w-6 h-6 shrink-0 bg-[#FF6500] text-white font-black flex items-center justify-center">
-                                2
-                              </span>
-                              <div>
-                                <div className="font-black text-sm">Escrow Lock &amp; Guided Transfer</div>
-                                <p className="opacity-80 font-medium mt-0.5">
-                                  Funds stay locked in BEXORA Escrow while ownership credentials are transferred inside the Deal Room.
-                                </p>
-                              </div>
-                            </li>
-                            <li className="p-3 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)] flex gap-3">
-                              <span className="w-6 h-6 shrink-0 bg-[#FF6500] text-white font-black flex items-center justify-center">
-                                3
-                              </span>
-                              <div>
-                                <div className="font-black text-sm">Category Protection Countdown</div>
-                                <p className="opacity-80 font-medium mt-0.5">
-                                  7-day protection for YouTube channels ({getProtectionDurationHours('youtube', settings)}h) and {getProtectionDurationHours('facebook', settings)}h for Facebook &amp; standard-transfer assets.
-                                </p>
-                              </div>
-                            </li>
-                          </ol>
-                        </div>
-                      </div>
-                    </div>
-                  </section>
-
-                  {/* Responsive 8-Category Grid */}
-                  <section className="bx-wrap-wide space-y-5">
-                    <div className="flex items-end justify-between">
-                      <div>
-                        <h2 className="text-xl sm:text-2xl font-black tracking-tight">Browse by Asset Category</h2>
-                        <p className="text-xs sm:text-sm opacity-75">
-                          Select any platform to launch category-specific filters and monetization rules.
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setDraftFilters(EMPTY_FILTERS);
-                          setAppliedFilters(EMPTY_FILTERS);
-                          navigateRoute({ page: 'market' });
-                        }}
-                        className="text-xs font-black text-[#FF6500] hover:underline"
-                      >
-                        View All Categories →
-                      </button>
-                    </div>
-
-                    <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">
-                      {PLATFORM_LIST.map((pId) => {
-                        const def = PLATFORM_CATALOG[pId];
-                        const count = activeListings.filter((l) => l.platform === pId).length;
-                        return (
-                          <button
-                            key={pId}
-                            type="button"
-                            onClick={() => handleQuickCategorySelect(pId)}
-                            className="bx-cat-card bx-card p-3.5 flex flex-col items-start justify-between gap-3 text-left hover:-translate-y-0.5 transition-transform"
-                          >
-                            <PlatformIcon id={pId} size={32} />
-                            <div className="w-full min-w-0">
-                              <div className="font-black text-xs sm:text-sm truncate">{def.name}</div>
-                              <div className="text-[11px] font-bold opacity-70 tabular-nums">
-                                {count} {count === 1 ? 'listing' : 'listings'}
-                              </div>
-                            </div>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </section>
-
-                  {/* Live Marketplace Feed on Home (4-Column Wide Desktop Grid) */}
-                  <section className="bx-wrap-wide space-y-5">
-                    <div className="flex flex-wrap items-center justify-between gap-3">
-                      <div>
-                        <h2 className="text-xl sm:text-2xl font-black tracking-tight">Latest Verified Listings</h2>
-                        <p className="text-xs sm:text-sm opacity-75">
-                          Real seller submissions approved by BEXORA Moderation.
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => navigateRoute({ page: 'market' })}
-                        className="bx-btn bx-btn-ghost px-4 py-2 text-xs font-extrabold inline-flex items-center gap-1.5"
-                      >
-                        <SlidersHorizontal className="w-3.5 h-3.5" />
-                        Advanced Filters
-                      </button>
-                    </div>
-
-                    {activeListings.length === 0 ? (
-                      <div className="bx-card p-10 text-center space-y-4">
-                        <Sparkles className="w-8 h-8 text-[#FF6500] mx-auto" />
-                        <h3 className="text-lg font-black">{t(language, 'no_listings')}</h3>
-                        <p className="text-sm opacity-75 max-w-md mx-auto">
-                          BEXORA never populates fake or placeholder listings. Be the first verified seller to publish a YouTube channel, Facebook page, website, domain, or gaming asset.
-                        </p>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            if (!fbUser) {
-                              requireAuthWithIntent({
-                                kind: 'open_page',
-                                targetPage: 'sell',
-                                returnPage: 'home',
-                                createdAtMs: Date.now(),
-                              });
-                            } else {
-                              navigateRoute({ page: 'sell' });
-                            }
-                          }}
-                          className="bx-btn bx-btn-primary px-6 py-2.5 text-xs font-extrabold"
-                        >
-                          {t(language, 'btn_sell')}
-                        </button>
-                      </div>
-                    ) : (
-                      <div
-                        data-testid="home-latest-listings-grid"
-                        className="bx-listing-grid"
-                      >
-                        {activeListings.slice(0, 8).map((item, idx) => (
-                          <ListingCard
-                            key={item.id}
-                            listing={item}
-                            displayCurrency={currency}
-                            usdToBdtRate={settings.usdToBdtRate}
-                            onOpen={handleOpenListingDetail}
-                            onOpenSellerProfile={handleOpenPublicProfile}
-                            isFavorited={favoriteListingIds.has(item.id)}
-                            onToggleFavorite={(l) => void handleToggleFavorite(l)}
-                            priority={idx < 2}
-                          />
-                        ))}
-                      </div>
-                    )}
-                  </section>
-                </div>
-              </div>
+              <HomePageView
+                language={language}
+                currency={currency}
+                settings={settings}
+                searchQuery={searchQuery}
+                activeListings={activeListings}
+                listingsHydrated={listingsHydrated}
+                favoriteListingIds={favoriteListingIds}
+                onSearchQueryChange={setSearchQuery}
+                onSubmitSearch={() => {
+                  void recordRecentSearch({
+                    query: searchQuery,
+                    platform: appliedFilters.platform !== 'all' ? appliedFilters.platform : '',
+                    subcategory:
+                      appliedFilters.subcategory !== 'all' ? appliedFilters.subcategory : '',
+                    monetization: appliedFilters.monetization,
+                    verifiedOnly: appliedFilters.verifiedSeller,
+                    sortBy: appliedFilters.sort,
+                  });
+                  navigateRoute({ page: 'market' });
+                }}
+                onOpenMarket={(resetFilters) => {
+                  if (resetFilters) {
+                    setDraftFilters(EMPTY_FILTERS);
+                    setAppliedFilters(EMPTY_FILTERS);
+                  }
+                  navigateRoute({ page: 'market' });
+                }}
+                onQuickCategorySelect={handleQuickCategorySelect}
+                onOpenSell={() => {
+                  if (!fbUser) {
+                    requireAuthWithIntent({
+                      kind: 'open_page',
+                      targetPage: 'sell',
+                      returnPage: 'home',
+                      createdAtMs: Date.now(),
+                    });
+                  } else {
+                    navigateRoute({ page: 'sell' });
+                  }
+                }}
+                onOpenListingDetail={handleOpenListingDetail}
+                onOpenPublicProfile={handleOpenPublicProfile}
+                onToggleFavorite={(l) => void handleToggleFavorite(l)}
+                onActivitiesChange={setPublicActivities}
+                onPrefetchRoute={(p) => prefetchRouteView(p)}
+              />
             )}
 
             {/* MARKETPLACE PAGE */}
             {page === 'market' && (
-              <div className="bx-wrap-wide py-8 space-y-5">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b-2 border-[var(--bx-border)] pb-5">
-                  <div>
-                    <h1 className="text-2xl sm:text-3xl font-black tracking-tight">{t(language, 'nav_market')}</h1>
-                    <p className="text-xs sm:text-sm opacity-75 tabular-nums">
-                      Showing {filteredMarketplaceListings.length} active digital asset{filteredMarketplaceListings.length === 1 ? '' : 's'}
-                    </p>
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    <form
-                      onSubmit={(e) => {
-                        e.preventDefault();
-                        void recordRecentSearch({
-                          query: searchQuery,
-                          platform: appliedFilters.platform !== 'all' ? appliedFilters.platform : '',
-                          subcategory:
-                            appliedFilters.subcategory !== 'all' ? appliedFilters.subcategory : '',
-                          monetization: appliedFilters.monetization,
-                          verifiedOnly: appliedFilters.verifiedSeller,
-                          sortBy: appliedFilters.sort,
-                        });
-                      }}
-                      className="flex items-center gap-2 flex-1 sm:flex-initial"
-                    >
-                      <div className="relative flex-1 sm:w-72">
-                        <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 opacity-60" />
-                        <input
-                          type="search"
-                          aria-label="Search marketplace listings"
-                          value={searchQuery}
-                          onChange={(e) => setSearchQuery(e.target.value)}
-                          placeholder={t(language, 'search_placeholder')}
-                          className="bx-input w-full pl-9 pr-3 py-2 text-xs font-semibold"
-                        />
-                      </div>
-                      <button
-                        type="submit"
-                        className="bx-btn bx-btn-primary bx-btn-sm whitespace-nowrap shrink-0"
-                      >
-                        Search
-                      </button>
-                    </form>
-                    <button
-                      type="button"
-                      onClick={() => setMobileFilterOpen((v) => !v)}
-                      className="lg:hidden bx-btn bx-btn-ghost px-3.5 py-2 text-xs font-extrabold inline-flex items-center gap-1.5"
-                    >
-                      <Filter className="w-3.5 h-3.5" />
-                      Filters
-                    </button>
-                  </div>
-                </div>
-
-                {/* Inline Recent Searches Quick Bar */}
-                {recentSearches.length > 0 && (
-                  <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
-                    <div className="flex flex-wrap items-center gap-2 min-w-0">
-                      <span
-                        className="inline-flex items-center gap-1 font-extrabold shrink-0"
-                        style={{ color: 'var(--text-2)' }}
-                      >
-                        <History className="w-3.5 h-3.5" />
-                        <span>Recent:</span>
-                      </span>
-                      {recentSearches.slice(0, 5).map((rs) => (
-                        <button
-                          key={rs.id}
-                          type="button"
-                          onClick={() => handleExecuteRecentSearch(rs)}
-                          className="px-2.5 py-1 rounded-md border font-semibold hover:underline truncate max-w-[200px]"
-                          style={{
-                            background: 'var(--surface)',
-                            borderColor: 'var(--border-soft)',
-                            color: 'var(--text)',
-                          }}
-                        >
-                          {rs.summaryLabel}
-                        </button>
-                      ))}
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => navigateRoute({ page: 'recent-searches' })}
-                      className="font-extrabold hover:underline shrink-0"
-                      style={{ color: 'var(--purple)' }}
-                    >
-                      Manage Recent Searches →
-                    </button>
-                  </div>
-                )}
-
-                <div className="flex flex-col lg:flex-row gap-6 items-start">
-                  {/* Desktop Sidebar or Mobile Collapsible Filter Panel */}
-                  <div
-                    className={`w-full lg:w-[272px] xl:w-[280px] shrink-0 ${
-                      mobileFilterOpen ? 'block' : 'hidden lg:block'
-                    }`}
-                  >
-                    <FilterPanel
-                      draft={draftFilters}
-                      setDraft={setDraftFilters}
-                      onApply={() => {
-                        setAppliedFilters(draftFilters);
-                        setMobileFilterOpen(false);
-                        void recordRecentSearch({
-                          query: searchQuery,
-                          platform: draftFilters.platform !== 'all' ? draftFilters.platform : '',
-                          subcategory:
-                            draftFilters.subcategory !== 'all' ? draftFilters.subcategory : '',
-                          monetization: draftFilters.monetization,
-                          verifiedOnly: draftFilters.verifiedSeller,
-                          sortBy: draftFilters.sort,
-                        });
-                      }}
-                      onReset={() => {
-                        setDraftFilters(EMPTY_FILTERS);
-                        setAppliedFilters(EMPTY_FILTERS);
-                        setSearchQuery('');
-                      }}
-                      matchCount={draftMatchCount}
-                      currency={currency}
-                      gamingTitles={settings.gamingTitles}
-                      disabledMonetizationIds={settings.disabledMonetizationIds}
-                    />
-                  </div>
-
-                  {/* Listings Grid (4 Balanced Columns on Wide Desktop) */}
-                  <div className="flex-1 min-w-0 w-full">
-                    {filteredMarketplaceListings.length === 0 ? (
-                      <div className="bx-card p-10 text-center space-y-4">
-                        <h2 className="text-lg font-black">{t(language, 'no_listings')}</h2>
-                        <p className="text-xs sm:text-sm opacity-75 max-w-md mx-auto">
-                          No active assets match your current category or numeric range criteria. Adjust your filters or list a verified asset for sale.
-                        </p>
-                        <div className="flex flex-wrap justify-center gap-3">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setDraftFilters(EMPTY_FILTERS);
-                              setAppliedFilters(EMPTY_FILTERS);
-                              setSearchQuery('');
-                            }}
-                            className="bx-btn bx-btn-ghost px-4 py-2 text-xs font-extrabold"
-                          >
-                            Reset All Filters
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              if (!fbUser) {
-                                requireAuthWithIntent({
-                                  kind: 'open_page',
-                                  targetPage: 'sell',
-                                  returnPage: 'market',
-                                  createdAtMs: Date.now(),
-                                });
-                              } else {
-                                navigateRoute({ page: 'sell' });
-                              }
-                            }}
-                            className="bx-btn bx-btn-primary px-5 py-2 text-xs font-extrabold"
-                          >
-                            {t(language, 'btn_sell')}
-                          </button>
-                        </div>
-                      </div>
-                    ) : (
-                      <>
-                        <div
-                          data-testid="marketplace-listings-grid"
-                          className="bx-listing-grid"
-                        >
-                          {filteredMarketplaceListings.map((item, idx) => (
-                            <ListingCard
-                              key={item.id}
-                              listing={item}
-                              displayCurrency={currency}
-                              usdToBdtRate={settings.usdToBdtRate}
-                              onOpen={handleOpenListingDetail}
-                              onOpenSellerProfile={handleOpenPublicProfile}
-                              isFavorited={favoriteListingIds.has(item.id)}
-                              onToggleFavorite={(l) => void handleToggleFavorite(l)}
-                              priority={idx < 2}
-                            />
-                          ))}
-                        </div>
-                        {activeListings.length >= listingLimit && (
-                          <div className="pt-6 flex justify-center">
-                            <button
-                              type="button"
-                              onClick={() => setListingLimit((n) => n + INITIAL_LISTINGS_PAGE_SIZE)}
-                              className="bx-btn bx-btn-ghost px-6 py-2.5 text-xs font-extrabold"
-                            >
-                              Load more listings
-                            </button>
-                          </div>
-                        )}
-                      </>
-                    )}
-                  </div>
-                </div>
-              </div>
+              <MarketplacePageView
+                language={language}
+                currency={currency}
+                settings={settings}
+                searchQuery={searchQuery}
+                draftFilters={draftFilters}
+                appliedFilters={appliedFilters}
+                draftMatchCount={draftMatchCount}
+                filteredListings={filteredMarketplaceListings}
+                activeListingsCount={activeListings.length}
+                listingLimit={listingLimit}
+                listingsHydrated={listingsHydrated}
+                mobileFilterOpen={mobileFilterOpen}
+                recentSearches={recentSearches}
+                favoriteListingIds={favoriteListingIds}
+                onSearchQueryChange={setSearchQuery}
+                onSetDraftFilters={setDraftFilters}
+                onSetAppliedFilters={setAppliedFilters}
+                onSetMobileFilterOpen={setMobileFilterOpen}
+                onRecordRecentSearch={() => {
+                  void recordRecentSearch({
+                    query: searchQuery,
+                    platform: draftFilters.platform !== 'all' ? draftFilters.platform : '',
+                    subcategory:
+                      draftFilters.subcategory !== 'all' ? draftFilters.subcategory : '',
+                    monetization: draftFilters.monetization,
+                    verifiedOnly: draftFilters.verifiedSeller,
+                    sortBy: draftFilters.sort,
+                  });
+                }}
+                onExecuteRecentSearch={handleExecuteRecentSearch}
+                onManageRecentSearches={() => navigateRoute({ page: 'recent-searches' })}
+                onLoadMoreListings={() => setListingLimit((n) => n + INITIAL_LISTINGS_PAGE_SIZE)}
+                onOpenListingDetail={handleOpenListingDetail}
+                onOpenPublicProfile={handleOpenPublicProfile}
+                onToggleFavorite={(l) => void handleToggleFavorite(l)}
+                onOpenSell={() => {
+                  if (!fbUser) {
+                    requireAuthWithIntent({
+                      kind: 'open_page',
+                      targetPage: 'sell',
+                      returnPage: 'market',
+                      createdAtMs: Date.now(),
+                    });
+                  } else {
+                    navigateRoute({ page: 'sell' });
+                  }
+                }}
+                onPrefetchRoute={(p) => prefetchRouteView(p)}
+              />
             )}
 
             {/* FULL-SCREEN LISTING DETAIL & LIVE BIDDING PAGE */}
             {page === 'listing' && (
               <>
                 {loadingTargetListing && !resolvedTargetListing ? (
-                  <div className="bx-wrap py-12">
-                    <div className="bx-card p-10 max-w-xl mx-auto text-center space-y-3">
-                      <RefreshCw className="w-6 h-6 animate-spin mx-auto text-[#FF6500]" />
-                      <h1 className="text-lg font-extrabold">Loading Digital Asset Listing…</h1>
-                      <p className="bx-hint">Retrieving live pricing, verification status, and bid history.</p>
-                    </div>
-                  </div>
+                  <DetailPageSkeleton title="Loading Digital Asset Listing…" />
                 ) : !resolvedTargetListing ? (
                   <div className="bx-wrap py-12">
                     <div className="bx-card p-8 max-w-lg mx-auto text-center space-y-4">
@@ -3767,9 +3694,7 @@ export default function App() {
                   needsPrivateUser: true,
                   hasPrivateUser: Boolean(privateUser),
                 }) ? (
-                  <div className="bx-wrap py-12 text-center text-sm font-bold opacity-75">
-                    Loading your BEXORA Wallet…
-                  </div>
+                  <PageShellSkeleton label="Loading your BEXORA Wallet…" />
                 ) : !fbUser || !profile || !privateUser ? (
                   <div className="bx-wrap py-12">
                     <div className="bx-card p-8 max-w-md mx-auto text-center space-y-4">
@@ -3821,6 +3746,7 @@ export default function App() {
                     settings={settings}
                     deposits={deposits}
                     withdrawals={withdrawals}
+                    deals={deals}
                     displayCurrency={currency}
                     moderationRestriction={moderationStatus?.restriction || firestoreRestriction}
                     onOpenSafetyAppeals={() => {
@@ -3844,9 +3770,7 @@ export default function App() {
                   needsProfile: true,
                   hasProfile: Boolean(profile),
                 }) ? (
-                  <div className="bx-wrap py-12 text-center text-sm font-bold opacity-75">
-                    Preparing Seller Listing Studio…
-                  </div>
+                  <PageShellSkeleton label="Preparing Seller Listing Studio…" />
                 ) : !fbUser || !profile ? (
                   <div className="bx-wrap py-12">
                     <div className="bx-card p-8 max-w-md mx-auto text-center space-y-4">
@@ -3918,9 +3842,7 @@ export default function App() {
                 signingOut,
                 hasFbUser: Boolean(fbUser),
               }) ? (
-                <div className="bx-wrap py-12 text-center text-sm font-bold opacity-75">
-                  Loading your Favorites…
-                </div>
+                <PageShellSkeleton label="Loading your Favorites…" />
               ) : (
                 <FavoritesView
                   userUid={fbUser?.uid ?? null}
@@ -3952,9 +3874,7 @@ export default function App() {
                 signingOut,
                 hasFbUser: Boolean(fbUser),
               }) ? (
-                <div className="bx-wrap py-12 text-center text-sm font-bold opacity-75">
-                  Loading your Bids…
-                </div>
+                <PageShellSkeleton label="Loading your Bids…" />
               ) : (
                 <MyBidsView
                   userUid={fbUser?.uid ?? null}
@@ -3999,9 +3919,7 @@ export default function App() {
                 signingOut,
                 hasFbUser: Boolean(fbUser),
               }) ? (
-                <div className="bx-wrap py-12 text-center text-sm font-bold opacity-75">
-                  Loading Followed Sellers…
-                </div>
+                <PageShellSkeleton label="Loading Followed Sellers…" />
               ) : (
                 <FollowingView
                   userUid={fbUser?.uid ?? null}
@@ -4035,15 +3953,14 @@ export default function App() {
                 needsProfile: true,
                 hasProfile: Boolean(profile),
               }) ? (
-                <div className="bx-wrap py-12 text-center text-sm font-bold opacity-75">
-                  Loading Pre-Deal Messenger…
-                </div>
+                <PageShellSkeleton label="Loading Pre-Deal Messenger…" />
               ) : (
                 <ChatView
                   userUid={fbUser?.uid ?? null}
                   profile={profile}
                   conversations={conversations}
                   initialConvId={route.convId || null}
+                  onOpenPublicProfile={handleOpenPublicProfile}
                   onRequireAuth={() =>
                     requireAuthWithIntent({
                       kind: 'open_page',
@@ -4069,9 +3986,7 @@ export default function App() {
                 needsPrivateUser: true,
                 hasPrivateUser: Boolean(privateUser),
               }) ? (
-                <div className="bx-wrap py-12 text-center text-sm font-bold opacity-75">
-                  Loading Escrow Deal Rooms…
-                </div>
+                <PageShellSkeleton label="Loading Escrow Deal Rooms…" />
               ) : (
                 <DealsView
                   userUid={fbUser?.uid ?? null}
@@ -4081,6 +3996,7 @@ export default function App() {
                   initialDealId={route.dealId || null}
                   settings={settings}
                   displayCurrency={currency}
+                  onOpenPublicProfile={handleOpenPublicProfile}
                   onRequireAuth={() =>
                     requireAuthWithIntent({
                       kind: 'open_page',
@@ -4114,9 +4030,7 @@ export default function App() {
                   needsPrivateUser: true,
                   hasPrivateUser: Boolean(privateUser),
                 }) ? (
-                  <div className="max-w-3xl mx-auto px-4 py-12 text-center text-sm font-bold opacity-75">
-                    Checking authentication session…
-                  </div>
+                  <PageShellSkeleton label="Loading your BEXORA Profile…" />
                 ) : !fbUser || !profile || !privateUser ? (
                   <div className="max-w-md mx-auto px-4 py-14">
                     <div className="bx-card p-8 text-center space-y-4">
@@ -4180,6 +4094,8 @@ export default function App() {
                       navigateRoute({ page: 'wallet' });
                     }}
                     onOpenPublicSelf={() => handleOpenPublicProfile(fbUser.uid)}
+                    onOpenPublicProfile={handleOpenPublicProfile}
+                    pendingAdminInvitation={pendingAdminInvitation}
                     onOpenSafetyAndAppeals={() => {
                       void refreshModerationStatus();
                       setSafetyAppealsModalOpen(true);
@@ -4208,6 +4124,7 @@ export default function App() {
                 usdToBdtRate={settings.usdToBdtRate}
                 onBack={() => navigateRoute({ page: 'market' })}
                 onOpenListing={handleOpenListingDetail}
+                onOpenPublicProfile={handleOpenPublicProfile}
                 onMessageSeller={(sellerUid, sellerName, listing) =>
                   handleStartChatWithUser(sellerUid, sellerName, listing)
                 }
@@ -4224,9 +4141,36 @@ export default function App() {
                   hasFbUser: Boolean(fbUser),
                   needsProfileBootstrapped: true,
                   profileBootstrapped,
-                }) ? (
-                  <div className="max-w-lg mx-auto px-4 py-14 text-center text-sm font-bold opacity-75">
-                    Verifying Administrator Access…
+                }) || (Boolean(fbUser) && (adminRoleStatus === 'checking' || adminRoleStatus === 'idle')) ? (
+                  <div className="bx-wrap py-8">
+                    <DashboardStatsSkeleton cards={6} />
+                  </div>
+                ) : fbUser && adminRoleStatus === 'error' && !isAdmin ? (
+                  <div className="max-w-lg mx-auto px-4 py-14">
+                    <div className="bx-card p-8 text-center space-y-3">
+                      <AlertCircle className="w-8 h-8 text-amber-600 mx-auto" />
+                      <h1 className="text-xl font-black">Unable to Verify Admin Permissions</h1>
+                      <p className="text-xs opacity-80">
+                        {adminRoleError || 'A temporary network or authentication check prevented loading your admin role.'}
+                      </p>
+                      <div className="flex flex-wrap justify-center gap-2.5 pt-1">
+                        <button
+                          type="button"
+                          onClick={() => setAdminAccessRetryEpoch((n) => n + 1)}
+                          className="bx-btn bx-btn-primary px-5 py-2 text-xs font-extrabold inline-flex items-center gap-1.5"
+                        >
+                          <RefreshCw className="w-3.5 h-3.5" />
+                          Retry Verification
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => navigateRoute({ page: 'home' })}
+                          className="bx-btn px-5 py-2 text-xs font-extrabold"
+                        >
+                          Return Home
+                        </button>
+                      </div>
+                    </div>
                   </div>
                 ) : !fbUser || !isAdmin ? (
                   <div className="max-w-lg mx-auto px-4 py-14">
@@ -4265,14 +4209,28 @@ export default function App() {
                     </div>
                   </div>
                 ) : (
-                  <AdminDashboard
-                    adminUid={fbUser.uid}
-                    isSuperAdmin={adminRole === 'superadmin'}
-                    settings={settings}
-                    displayCurrency={currency}
-                    initialDealId={route.dealId || null}
-                    onFlash={showFlash}
-                  />
+                  <AdminErrorBoundary
+                    onRetry={() => setAdminAccessRetryEpoch((n) => n + 1)}
+                    onBackHome={() => navigateRoute({ page: 'home' })}
+                  >
+                    <Suspense
+                      fallback={
+                        <div className="bx-wrap py-8">
+                          <DashboardStatsSkeleton cards={6} />
+                        </div>
+                      }
+                    >
+                      <AdminDashboard
+                        adminUid={fbUser.uid}
+                        isSuperAdmin={adminRole === 'superadmin'}
+                        settings={settings}
+                        displayCurrency={currency}
+                        initialDealId={route.dealId || null}
+                        onOpenPublicProfile={handleOpenPublicProfile}
+                        onFlash={showFlash}
+                      />
+                    </Suspense>
+                  </AdminErrorBoundary>
                 )}
               </>
             )}
@@ -4393,6 +4351,7 @@ export default function App() {
       <BottomNav
         page={page}
         onNavigate={navigatePage}
+        onPrefetchRoute={prefetchRouteView}
         language={language}
         cachedUser={cachedUser}
         hasCachedUser={Boolean(cachedUser)}

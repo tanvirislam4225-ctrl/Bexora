@@ -101,7 +101,9 @@ export const NotificationCenter: React.FC<NotificationCenterProps> = ({
   const [selectedNotificationId, setSelectedNotificationId] = useState<string | null>(null);
   const [markingAll, setMarkingAll] = useState(false);
   const [clearingAll, setClearingAll] = useState(false);
+  const [confirmClearOpen, setConfirmClearOpen] = useState(false);
   const [markingOneId, setMarkingOneId] = useState<string | null>(null);
+  const [deletingOneId, setDeletingOneId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [browserPermission, setBrowserPermission] = useState<
     NotificationPermission | 'unsupported'
@@ -141,6 +143,8 @@ export const NotificationCenter: React.FC<NotificationCenterProps> = ({
     if (open) {
       setActionError(null);
       refreshPermission();
+    } else {
+      setConfirmClearOpen(false);
     }
   }, [open, refreshPermission]);
 
@@ -212,14 +216,34 @@ export const NotificationCenter: React.FC<NotificationCenterProps> = ({
     }
   };
 
-  const handleClearAll = async () => {
+  const handleDeleteSingle = async (item: NotificationRecord) => {
+    if (!onDismiss || deletingOneId === item.id) return;
+    setActionError(null);
+    setDeletingOneId(item.id);
+    try {
+      await onDismiss(item);
+      if (selectedNotificationId === item.id) {
+        setSelectedNotificationId(null);
+      }
+    } catch (err) {
+      const msg =
+        err instanceof Error ? err.message : 'Unable to delete notification. Please try again.';
+      setActionError(msg);
+    } finally {
+      setDeletingOneId(null);
+    }
+  };
+
+  const handleConfirmClearAll = async () => {
     if (sortedNotifications.length === 0 || clearingAll || !onClearAll) return;
     setActionError(null);
     setClearingAll(true);
     try {
       await onClearAll();
+      setConfirmClearOpen(false);
+      setSelectedNotificationId(null);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Unable to clean notifications.';
+      const msg = err instanceof Error ? err.message : 'Unable to clear notifications.';
       setActionError(msg);
     } finally {
       setClearingAll(false);
@@ -281,13 +305,14 @@ export const NotificationCenter: React.FC<NotificationCenterProps> = ({
             >
               {/* Panel Header */}
               <div className="px-3 sm:px-4 py-3 sm:py-3.5 border-b-2 border-[var(--border-strong)] bg-[var(--surface-2)] flex items-center justify-between gap-2 shrink-0">
-                <div className="flex items-center gap-1.5 sm:gap-2 min-w-0 overflow-hidden">
+                <div className="flex items-center gap-1.5 sm:gap-2 min-w-0">
                   <Bell className="w-4 h-4 text-[var(--orange)] shrink-0" />
                   <h2 className="text-sm sm:text-base font-black tracking-tight whitespace-nowrap shrink-0">
                     Inbox
                   </h2>
-                  <span className="text-[11px] sm:text-xs font-extrabold text-[var(--text-2)] tabular-nums truncate">
-                    · {unreadCount} unread
+                  <span className="text-[11px] sm:text-xs font-extrabold text-[var(--text-2)] tabular-nums whitespace-nowrap shrink-0">
+                    <span className="sm:hidden">({unreadCount})</span>
+                    <span className="hidden sm:inline">· {unreadCount} unread</span>
                   </span>
                 </div>
 
@@ -306,14 +331,16 @@ export const NotificationCenter: React.FC<NotificationCenterProps> = ({
                   </button>
                   <button
                     type="button"
-                    onClick={() => void handleClearAll()}
+                    onClick={() => setConfirmClearOpen((prev) => !prev)}
                     disabled={sortedNotifications.length === 0 || clearingAll || !onClearAll}
-                    title="Remove all notifications from inbox"
-                    aria-label="Clean all notifications"
+                    title="Clear all notifications from your inbox"
+                    aria-label="Clear all notifications"
+                    aria-expanded={confirmClearOpen}
+                    data-testid="notif-clear-all-btn"
                     className="bx-btn bx-btn-sm !min-h-[32px] sm:!min-h-[34px] !px-2 sm:!px-2.5 !py-1 text-[11px] sm:text-xs font-extrabold inline-flex items-center gap-1 whitespace-nowrap shrink-0 disabled:opacity-45 disabled:cursor-not-allowed"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
-                    <span>{clearingAll ? '…' : 'Clean'}</span>
+                    <span>{clearingAll ? 'Clearing…' : 'Clear All'}</span>
                   </button>
                   <button
                     type="button"
@@ -328,6 +355,40 @@ export const NotificationCenter: React.FC<NotificationCenterProps> = ({
                   </button>
                 </div>
               </div>
+
+              {/* Inline Clear All Confirmation Prompt */}
+              {confirmClearOpen && sortedNotifications.length > 0 && (
+                <div
+                  role="alertdialog"
+                  aria-label="Confirm clear all notifications"
+                  data-testid="notif-clear-confirm-bar"
+                  className="px-3.5 py-2.5 bg-[var(--yellow-soft)] border-b-2 border-[var(--border-strong)] flex flex-wrap items-center justify-between gap-2 text-xs shrink-0"
+                >
+                  <span className="font-extrabold text-[var(--text)]">
+                    Clear all {sortedNotifications.length} notification
+                    {sortedNotifications.length === 1 ? '' : 's'} from your inbox?
+                  </span>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      type="button"
+                      disabled={clearingAll}
+                      onClick={() => setConfirmClearOpen(false)}
+                      className="bx-btn bx-btn-ghost bx-btn-sm !min-h-[30px] !px-2.5 !py-1 text-[11px] font-extrabold whitespace-nowrap"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      disabled={clearingAll}
+                      data-testid="notif-confirm-clear-btn"
+                      onClick={() => void handleConfirmClearAll()}
+                      className="bx-btn bx-btn-danger bx-btn-sm !min-h-[30px] !px-2.5 !py-1 text-[11px] font-extrabold whitespace-nowrap"
+                    >
+                      {clearingAll ? 'Clearing…' : 'Confirm Clear'}
+                    </button>
+                  </div>
+                </div>
+              )}
 
               {/* Offline / Error Banners */}
               {isOffline && (
@@ -425,11 +486,12 @@ export const NotificationCenter: React.FC<NotificationCenterProps> = ({
                         item={item}
                         isUnread={isUnread}
                         isSyncingThis={isSyncingThis}
+                        isDeletingThis={deletingOneId === item.id}
                         isDealRoomCreated={isDealRoomCreated}
                         isFollowedListing={isFollowedListing}
                         onMarkSingleRead={handleMarkSingleRead}
                         onViewNotification={handleViewNotification}
-                        onDismiss={onDismiss}
+                        onDismiss={onDismiss ? handleDeleteSingle : undefined}
                       />
                     );
                   })
@@ -556,6 +618,7 @@ interface SwipeableNotificationCardProps {
   item: NotificationRecord;
   isUnread: boolean;
   isSyncingThis: boolean;
+  isDeletingThis: boolean;
   isDealRoomCreated: boolean;
   isFollowedListing: boolean;
   onMarkSingleRead: (item: NotificationRecord) => Promise<void>;
@@ -569,6 +632,7 @@ const SwipeableNotificationCard: React.FC<SwipeableNotificationCardProps> = ({
   item,
   isUnread,
   isSyncingThis,
+  isDeletingThis,
   isDealRoomCreated,
   isFollowedListing,
   onMarkSingleRead,
@@ -657,8 +721,11 @@ const SwipeableNotificationCard: React.FC<SwipeableNotificationCardProps> = ({
         opacity,
         transition: dragging ? 'none' : 'transform 180ms ease, opacity 180ms ease',
       }}
-      className={`p-3.5 transition-colors flex flex-col gap-2 select-none ${
-        isUnread ? 'bg-[var(--surface-2)]' : 'bg-[var(--surface)] opacity-90'
+      data-notification-read={isUnread ? 'false' : 'true'}
+      className={`p-3.5 transition-colors flex flex-col gap-2 select-none border-l-4 ${
+        isUnread
+          ? 'bg-[var(--surface-2)] border-l-[var(--orange)]'
+          : 'bg-[var(--surface)] border-l-transparent opacity-85'
       }`}
     >
       <div className="flex items-center justify-between gap-2 text-[11px] font-bold text-[var(--text-2)]">
@@ -703,18 +770,18 @@ const SwipeableNotificationCard: React.FC<SwipeableNotificationCardProps> = ({
         </p>
       </div>
 
-      <div className="flex items-center justify-between gap-2 pt-0.5">
-        <span className="text-[11px] font-bold text-[var(--text-3)] truncate">
+      <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
+        <span className="text-[11px] font-bold text-[var(--text-3)] truncate max-w-[140px]">
           {item.referenceLabel || ''}
         </span>
-        <div className="flex items-center gap-1.5 shrink-0">
+        <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
           {isUnread && (
             <button
               type="button"
               onClick={() => void onMarkSingleRead(item)}
-              disabled={isSyncingThis}
+              disabled={isSyncingThis || isDeletingThis}
               aria-label={`Mark notification read: ${item.title}`}
-              className="bx-btn bx-btn-ghost bx-btn-sm !min-h-[30px] !px-2.5 !py-1 text-[11px] font-bold inline-flex items-center gap-1 whitespace-nowrap"
+              className="bx-btn bx-btn-ghost bx-btn-sm !min-h-[30px] !px-2 !py-1 text-[11px] font-bold inline-flex items-center gap-1 whitespace-nowrap"
             >
               <Check className="w-3 h-3 text-[var(--green)]" />
               <span>Mark read</span>
@@ -723,13 +790,27 @@ const SwipeableNotificationCard: React.FC<SwipeableNotificationCardProps> = ({
           <button
             type="button"
             onClick={() => void onViewNotification(item)}
-            disabled={isSyncingThis}
+            disabled={isSyncingThis || isDeletingThis}
             aria-label={`View notification: ${item.title}`}
-            className="bx-btn bx-btn-sm !min-h-[30px] !px-3 !py-1 text-xs font-extrabold inline-flex items-center gap-1.5 whitespace-nowrap"
+            className="bx-btn bx-btn-sm !min-h-[30px] !px-2.5 !py-1 text-xs font-extrabold inline-flex items-center gap-1 whitespace-nowrap"
           >
             <Eye className="w-3.5 h-3.5 text-[var(--orange)]" />
             <span>{isSyncingThis ? 'Opening…' : 'View'}</span>
           </button>
+          {onDismiss && (
+            <button
+              type="button"
+              onClick={() => void onDismiss(item)}
+              disabled={isDeletingThis || isSyncingThis}
+              aria-label={`Delete notification: ${item.title}`}
+              title="Delete notification"
+              data-testid={`delete-notif-${item.id}`}
+              className="bx-btn bx-btn-ghost bx-btn-sm !min-h-[30px] !px-2 !py-1 text-[11px] font-bold text-[var(--red)] inline-flex items-center gap-1 whitespace-nowrap disabled:opacity-45"
+            >
+              <Trash2 className="w-3 h-3" />
+              <span>{isDeletingThis ? 'Deleting…' : 'Delete'}</span>
+            </button>
+          )}
         </div>
       </div>
     </article>

@@ -16,6 +16,7 @@ const VALID_PLATFORMS = new Set<string>([
   'website',
   'domain',
   'gaming',
+  'others',
 ]);
 
 const VALID_CURRENCIES = new Set<string>(['BDT', 'USD']);
