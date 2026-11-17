@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
@@ -52,6 +52,7 @@ import {
   describePendingAuthIntent,
   PendingAuthIntent,
 } from '../lib/checkoutAndIntentLogic';
+import { classifyGooglePopupAuthError } from '../lib/authDomainAndPersistenceLogic';
 import type { CountryCode } from 'libphonenumber-js';
 import { PhoneCountryInput } from './PhoneCountryInput';
 
@@ -102,7 +103,46 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [error, setError] = useState('');
   const [info, setInfo] = useState('');
 
-  const isAnyBusy = loginBusy || registerBusy || forgotBusy || googleBusy;
+  const mountedRef = useRef(true);
+  const googleAttemptIdRef = useRef(0);
+  const googleFocusRecoveryTimerRef = useRef<number | null>(null);
+
+  const isEmailFormBusy = loginBusy || registerBusy || forgotBusy;
+  const isAnyBusy = isEmailFormBusy || googleBusy;
+
+  const clearGoogleRecoveryTimer = useCallback(() => {
+    if (googleFocusRecoveryTimerRef.current !== null) {
+      window.clearTimeout(googleFocusRecoveryTimerRef.current);
+      googleFocusRecoveryTimerRef.current = null;
+    }
+  }, []);
+
+  const cancelPendingGoogleSignIn = useCallback(
+    (infoMessage?: string) => {
+      googleAttemptIdRef.current += 1;
+      clearGoogleRecoveryTimer();
+      if (mountedRef.current) {
+        setGoogleBusy(false);
+        if (infoMessage !== undefined) {
+          setError('');
+          setInfo(infoMessage);
+        }
+      }
+    },
+    [clearGoogleRecoveryTimer]
+  );
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      googleAttemptIdRef.current += 1;
+      if (googleFocusRecoveryTimerRef.current !== null) {
+        window.clearTimeout(googleFocusRecoveryTimerRef.current);
+        googleFocusRecoveryTimerRef.current = null;
+      }
+    };
+  }, []);
 
   const clearFeedbackAndVisibility = useCallback(() => {
     setError('');
@@ -114,7 +154,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
   const switchMode = useCallback(
     (nextMode: 'login' | 'register' | 'forgot') => {
-      if (isAnyBusy) return;
+      if (isEmailFormBusy) return;
+      if (googleBusy) {
+        cancelPendingGoogleSignIn();
+      }
       clearFeedbackAndVisibility();
       if (nextMode === 'forgot' && !recoveryTarget.trim() && loginEmail.trim()) {
         setRecoveryTarget(loginEmail.trim());
@@ -122,8 +165,61 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       setMode(nextMode);
       onModeChange?.(nextMode);
     },
-    [isAnyBusy, clearFeedbackAndVisibility, recoveryTarget, loginEmail, onModeChange]
+    [
+      isEmailFormBusy,
+      googleBusy,
+      cancelPendingGoogleSignIn,
+      clearFeedbackAndVisibility,
+      recoveryTarget,
+      loginEmail,
+      onModeChange,
+    ]
   );
+
+  const handleCloseSafely = useCallback(() => {
+    if (googleBusy) {
+      cancelPendingGoogleSignIn();
+    }
+    onClose();
+  }, [googleBusy, cancelPendingGoogleSignIn, onClose]);
+
+  useEffect(() => {
+    if (!googleBusy) {
+      clearGoogleRecoveryTimer();
+      return;
+    }
+
+    const scheduleRecoveryCheck = () => {
+      clearGoogleRecoveryTimer();
+      const capturedAttempt = googleAttemptIdRef.current;
+      googleFocusRecoveryTimerRef.current = window.setTimeout(() => {
+        if (
+          !mountedRef.current ||
+          capturedAttempt !== googleAttemptIdRef.current ||
+          auth.currentUser
+        ) {
+          return;
+        }
+        cancelPendingGoogleSignIn(
+          'Google sign-in did not complete. You can click Connect with Google to try again or sign in with Email.'
+        );
+      }, 1800);
+    };
+
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        scheduleRecoveryCheck();
+      }
+    };
+
+    window.addEventListener('focus', scheduleRecoveryCheck);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('focus', scheduleRecoveryCheck);
+      document.removeEventListener('visibilitychange', onVisibility);
+      clearGoogleRecoveryTimer();
+    };
+  }, [googleBusy, cancelPendingGoogleSignIn, clearGoogleRecoveryTimer]);
 
   useEffect(() => {
     setMode(initialMode);
@@ -379,34 +475,80 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   };
 
   const handleGoogleSignIn = async () => {
-    if (isAnyBusy) return;
+    if (isEmailFormBusy || googleBusy) return;
+    const attemptId = googleAttemptIdRef.current + 1;
+    googleAttemptIdRef.current = attemptId;
+    clearGoogleRecoveryTimer();
     setError('');
     setInfo('');
     setGoogleBusy(true);
+
+    let cred: Awaited<ReturnType<typeof signInWithGoogleResilient>> | null = null;
     try {
-      const cred = await signInWithGoogleResilient(googleProvider);
-      syncProactiveRefreshWithCapabilities(cred.user, capabilities?.tokenServiceStatus);
-      await ensureUserProfileInitialized(cred.user);
-      onSuccess('Signed in with Google.');
-      onClose();
-    } catch (err) {
-      const code =
-        err && typeof err === 'object' && 'code' in err
-          ? String((err as { code?: unknown }).code || '')
-          : '';
-      if (code === 'auth/popup-blocked') {
-        try {
-          markPendingOAuthRedirect();
-          await signInWithRedirect(auth, googleProvider, browserPopupRedirectResolver);
-          return;
-        } catch (redirectErr) {
-          setError(formatFirebaseAuthError(redirectErr));
+      // Phase 1: Interactive Google popup authentication — isolated try...finally ensures
+      // the Google loading spinner ALWAYS resets if the user closes or cancels the popup.
+      try {
+        cred = await signInWithGoogleResilient(googleProvider, {
+          setLoading: (loading) => {
+            if (!loading && mountedRef.current && googleAttemptIdRef.current === attemptId) {
+              clearGoogleRecoveryTimer();
+            }
+          },
+        });
+      } catch (popupErr) {
+        if (!mountedRef.current || googleAttemptIdRef.current !== attemptId) {
           return;
         }
+        const classified = classifyGooglePopupAuthError(popupErr);
+        if (
+          classified.code === 'auth/popup-closed-by-user' ||
+          classified.code === 'auth/cancelled-popup-request' ||
+          classified.isCancellation
+        ) {
+          setError('');
+          setInfo(classified.userMessage);
+          return;
+        }
+        if (classified.code === 'auth/popup-blocked') {
+          try {
+            markPendingOAuthRedirect();
+            await signInWithRedirect(auth, googleProvider, browserPopupRedirectResolver);
+            return;
+          } catch (redirectErr) {
+            if (mountedRef.current && googleAttemptIdRef.current === attemptId) {
+              setError(formatFirebaseAuthError(redirectErr));
+            }
+            return;
+          }
+        }
+        setError(formatFirebaseAuthError(popupErr));
+        return;
+      } finally {
+        clearGoogleRecoveryTimer();
+        // Reset loading immediately if popup failed, was closed/cancelled, or did not return a user.
+        if (!cred && mountedRef.current && googleAttemptIdRef.current === attemptId) {
+          setGoogleBusy(false);
+        }
       }
-      setError(formatFirebaseAuthError(err));
+
+      if (!cred || !mountedRef.current || googleAttemptIdRef.current !== attemptId) return;
+
+      // Phase 2: Finalize marketplace user profile after successful popup authentication.
+      syncProactiveRefreshWithCapabilities(cred.user, capabilities?.tokenServiceStatus);
+      await ensureUserProfileInitialized(cred.user);
+      if (!mountedRef.current) return;
+      onSuccess('Signed in with Google.');
+      onClose();
+    } catch (postAuthErr) {
+      if (!mountedRef.current || googleAttemptIdRef.current !== attemptId) {
+        return;
+      }
+      setError(formatFirebaseAuthError(postAuthErr));
     } finally {
-      setGoogleBusy(false);
+      clearGoogleRecoveryTimer();
+      if (mountedRef.current && googleAttemptIdRef.current === attemptId) {
+        setGoogleBusy(false);
+      }
     }
   };
 
@@ -459,8 +601,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       <div className="flex flex-wrap items-center justify-between gap-3">
         <button
           type="button"
-          onClick={onClose}
-          disabled={isAnyBusy}
+          onClick={handleCloseSafely}
           className="bx-btn bx-btn-sm inline-flex items-center gap-2"
         >
           <ArrowLeft className="w-4 h-4" />
@@ -546,7 +687,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   type="button"
                   role="tab"
                   aria-selected={mode === 'login'}
-                  disabled={isAnyBusy}
+                  disabled={isEmailFormBusy}
                   onClick={() => switchMode('login')}
                   className="py-2.5 rounded-lg text-sm font-extrabold transition-colors"
                   style={{
@@ -560,7 +701,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   type="button"
                   role="tab"
                   aria-selected={mode === 'register'}
-                  disabled={isAnyBusy}
+                  disabled={isEmailFormBusy}
                   onClick={() => switchMode('register')}
                   className="py-2.5 rounded-lg text-sm font-extrabold transition-colors"
                   style={{
@@ -587,24 +728,39 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         {/* Google Sign-In Button — Exact Label "Connect with Google" */}
         {mode !== 'forgot' && (
           <>
-            <button
-              type="button"
-              onClick={handleGoogleSignIn}
-              disabled={isAnyBusy}
-              className="bx-btn w-full justify-center"
-            >
-              {googleBusy ? (
-                <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
-              ) : (
-                <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
-                  <path
-                    fill="#EA4335"
-                    d="M12 10.2v3.9h5.5c-.2 1.3-1.6 3.8-5.5 3.8-3.3 0-6-2.7-6-6s2.7-6 6-6c1.9 0 3.2.8 3.9 1.5l2.7-2.6C16.9 3.2 14.7 2.2 12 2.2 6.6 2.2 2.2 6.6 2.2 12S6.6 21.8 12 21.8c6.9 0 9.6-4.8 9.6-7.3 0-.5-.1-.9-.1-1.3H12Z"
-                  />
-                </svg>
+            <div className="flex items-stretch gap-2">
+              <button
+                type="button"
+                onClick={handleGoogleSignIn}
+                disabled={isAnyBusy}
+                className="bx-btn w-full justify-center"
+              >
+                {googleBusy ? (
+                  <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
+                ) : (
+                  <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+                    <path
+                      fill="#EA4335"
+                      d="M12 10.2v3.9h5.5c-.2 1.3-1.6 3.8-5.5 3.8-3.3 0-6-2.7-6-6s2.7-6 6-6c1.9 0 3.2.8 3.9 1.5l2.7-2.6C16.9 3.2 14.7 2.2 12 2.2 6.6 2.2 2.2 6.6 2.2 12S6.6 21.8 12 21.8c6.9 0 9.6-4.8 9.6-7.3 0-.5-.1-.9-.1-1.3H12Z"
+                    />
+                  </svg>
+                )}
+                <span>{googleBusy ? 'Connecting with Google…' : 'Connect with Google'}</span>
+              </button>
+              {googleBusy && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    cancelPendingGoogleSignIn(
+                      'Google sign-in cancelled. You can retry or continue with email.'
+                    )
+                  }
+                  className="bx-btn bx-btn-sm shrink-0 whitespace-nowrap"
+                >
+                  Cancel
+                </button>
               )}
-              <span>{googleBusy ? 'Connecting with Google…' : 'Connect with Google'}</span>
-            </button>
+            </div>
 
             {domainNotAuthorized && !isLocalDevHost && (
               <div
@@ -761,7 +917,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 </label>
                 <button
                   type="button"
-                  disabled={isAnyBusy}
+                  disabled={isEmailFormBusy}
                   onClick={() => switchMode('forgot')}
                   className="text-xs font-bold underline"
                   style={{ color: 'var(--orange)' }}
@@ -1053,7 +1209,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
             <button
               type="button"
-              disabled={isAnyBusy}
+              disabled={isEmailFormBusy}
               onClick={() => switchMode('login')}
               className="bx-btn w-full justify-center"
             >

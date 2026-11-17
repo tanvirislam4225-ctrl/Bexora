@@ -1,6 +1,11 @@
 import crypto from 'node:crypto';
 import type { Firestore } from 'firebase-admin/firestore';
 import { FieldValue } from 'firebase-admin/firestore';
+import {
+  buildTopupLedgerId,
+  generateDealCode,
+  shouldRecordLatePaymentReconciliation,
+} from '../lib/walletTopupAndReservationLogic';
 
 export interface SecurePayGatewayConfig {
   apiKey: string;
@@ -11,7 +16,7 @@ export interface SecurePayGatewayConfig {
 
 export interface CreateSecurePaySessionParams {
   sessionId: string;
-  mode: 'buy_now' | 'accepted_bid_deal';
+  mode: 'buy_now' | 'accepted_bid_deal' | 'wallet_topup';
   buyerUid: string;
   buyerName: string;
   buyerEmail: string;
@@ -28,7 +33,7 @@ export interface CreateSecurePaySessionParams {
 
 export interface SecurePaySessionRecord {
   sessionId: string;
-  mode: 'buy_now' | 'accepted_bid_deal';
+  mode: 'buy_now' | 'accepted_bid_deal' | 'wallet_topup';
   buyerUid: string;
   buyerName: string;
   buyerEmail: string;
@@ -40,7 +45,10 @@ export interface SecurePaySessionRecord {
   originalCurrency: 'BDT' | 'USD';
   originalAmountMinor: number;
   paymentUrl?: string;
-  status: 'created' | 'pending' | 'completed' | 'failed' | 'cancelled';
+  gatewayMethodId?: string;
+  gatewayLabel?: string;
+  reservationExpiresAtMs?: number;
+  status: 'created' | 'pending' | 'completed' | 'failed' | 'cancelled' | 'expired';
   transactionId?: string;
   verifiedAtMs?: number;
   createdAtMs: number;
@@ -291,8 +299,16 @@ export async function finalizeDealEscrowPaymentInFirestore(
     protectionDurationHours: number;
     transactionId: string;
     gatewayProvider?: string;
+    sessionId?: string;
+    dealCode?: string;
   }
-): Promise<{ ok: boolean; alreadyPaid: boolean; ledgerId: string }> {
+): Promise<{
+  ok: boolean;
+  alreadyPaid: boolean;
+  lateReconciliation?: boolean;
+  ledgerId: string;
+  dealCode?: string;
+}> {
   const ledgerId = `led_pay_${params.dealId}`;
   const nowMs = Date.now();
 
@@ -307,9 +323,13 @@ export async function finalizeDealEscrowPaymentInFirestore(
       tx.get(listingRef),
     ]);
 
+    const existingDealCode = dealSnap.exists && dealSnap.data()?.dealCode
+      ? String(dealSnap.data()?.dealCode)
+      : undefined;
+
     // Idempotency check 1: Ledger already exists
     if (ledgerSnap.exists) {
-      return { ok: true, alreadyPaid: true, ledgerId };
+      return { ok: true, alreadyPaid: true, lateReconciliation: false, ledgerId, dealCode: existingDealCode };
     }
 
     // Idempotency check 2: Deal is already active or completed
@@ -321,16 +341,59 @@ export async function finalizeDealEscrowPaymentInFirestore(
         currentStatus === 'settled' ||
         currentStatus === 'protection_active'
       ) {
-        return { ok: true, alreadyPaid: true, ledgerId };
+        return { ok: true, alreadyPaid: true, lateReconciliation: false, ledgerId, dealCode: existingDealCode };
       }
     }
 
-    // Update Deal or create if it was an Instant Buy Now without pre-existing deal doc
-    const dealData = dealSnap.exists ? dealSnap.data() : null;
+    // Late-callback / double-sale protection for timed Buy Now checkout sessions
+    if (listingSnap.exists && params.sessionId) {
+      const lData = listingSnap.data() || {};
+      const isSameAcceptedBidDeal =
+        dealSnap.exists &&
+        String(lData.activeDealId || '') === params.dealId &&
+        String(lData.reservedBuyerId || '') === params.buyerUid;
+      if (
+        !isSameAcceptedBidDeal &&
+        shouldRecordLatePaymentReconciliation({
+          listingStatus: String(lData.status || ''),
+          reservationSessionId: lData.reservationSessionId
+            ? String(lData.reservationSessionId)
+            : undefined,
+          sessionId: params.sessionId,
+          reservedBuyerId: lData.reservedBuyerId ? String(lData.reservedBuyerId) : undefined,
+          buyerId: params.buyerUid,
+        })
+      ) {
+        const recRef = firestore.collection('paymentReconciliations').doc(params.sessionId);
+        tx.set(recRef, {
+          sessionId: params.sessionId,
+          listingId: params.listingId,
+          dealId: params.dealId,
+          buyerUid: params.buyerUid,
+          buyerName: params.buyerName,
+          amountMinor: params.buyerTotalMinor,
+          currency: params.currency,
+          transactionId: params.transactionId,
+          gatewayProvider: params.gatewayProvider || 'securepaybd',
+          listingStatusAtCallback: String(lData.status || ''),
+          reason:
+            'Late gateway callback arrived after listing reservation expired or listing was purchased by another buyer.',
+          status: 'pending_review',
+          createdAtMs: nowMs,
+          createdAt: FieldValue.serverTimestamp(),
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+        return { ok: false, alreadyPaid: false, lateReconciliation: true, ledgerId };
+      }
+    }
+
+    const resolvedDealCode =
+      existingDealCode || params.dealCode || generateDealCode(params.dealId, nowMs);
 
     if (!dealSnap.exists) {
       tx.set(dealRef, {
         id: params.dealId,
+        dealCode: resolvedDealCode,
         listingId: params.listingId,
         listingTitle: params.listingTitle,
         platform: params.platform,
@@ -356,12 +419,14 @@ export async function finalizeDealEscrowPaymentInFirestore(
         externalTrxId: params.transactionId,
         paidAtMs: nowMs,
         transferSubmissionCount: 0,
+        isDeleted: false,
         status: 'paid_deal_room_active',
         createdAt: FieldValue.serverTimestamp(),
         updatedAt: FieldValue.serverTimestamp(),
       });
     } else {
       tx.update(dealRef, {
+        dealCode: resolvedDealCode,
         status: 'paid_deal_room_active',
         paymentLedgerId: ledgerId,
         paymentGateway: params.gatewayProvider || 'securepaybd',
@@ -371,11 +436,15 @@ export async function finalizeDealEscrowPaymentInFirestore(
       });
     }
 
-    // Mark listing as sold
+    // Mark listing as sold and clear active reservation timer metadata
     if (listingSnap.exists) {
       tx.update(listingRef, {
         status: 'sold',
         activeDealId: params.dealId,
+        reservedBuyerId: FieldValue.delete(),
+        reservedUntilMs: FieldValue.delete(),
+        reservationExpiresAtMs: FieldValue.delete(),
+        reservationSessionId: FieldValue.delete(),
         updatedAt: FieldValue.serverTimestamp(),
       });
     }
@@ -389,12 +458,115 @@ export async function finalizeDealEscrowPaymentInFirestore(
       currency: params.currency,
       referenceId: params.dealId,
       externalTrxId: params.transactionId,
-      note: `Live Payment Gateway (${params.gatewayProvider || 'Secure Pay BD'}) payment confirmed for deal #${params.dealId.slice(0, 10)}. Transaction ID: ${params.transactionId}`,
+      note: `Live Payment Gateway (${params.gatewayProvider || 'Secure Pay BD'}) payment confirmed for deal ${resolvedDealCode}. Transaction ID: ${params.transactionId}`,
       createdAt: FieldValue.serverTimestamp(),
     });
 
-    return { ok: true, alreadyPaid: false, ledgerId };
+    return {
+      ok: true,
+      alreadyPaid: false,
+      lateReconciliation: false,
+      ledgerId,
+      dealCode: resolvedDealCode,
+    };
   });
 
   return result;
+}
+
+/**
+ * Atomically credits a user's BEXORA wallet balance after server-side gateway verification.
+ * Strictly idempotent via deterministic ledger doc `led_topup_<sessionId>`.
+ */
+export async function finalizeWalletTopupInFirestore(
+  firestore: Firestore,
+  params: {
+    sessionId: string;
+    buyerUid: string;
+    buyerName: string;
+    amountMinorBdt: number;
+    amountBdt: number;
+    transactionId: string;
+    gatewayProvider?: string;
+  }
+): Promise<{
+  ok: boolean;
+  alreadyCredited: boolean;
+  ledgerId: string;
+  newBalanceMinor: number;
+}> {
+  const ledgerId = buildTopupLedgerId(params.sessionId);
+  const nowMs = Date.now();
+
+  const privRef = firestore.collection('privateUsers').doc(params.buyerUid);
+  const ledgerRef = firestore.collection('walletLedger').doc(ledgerId);
+  const sessionRef = firestore.collection('paymentSessions').doc(params.sessionId);
+
+  return firestore.runTransaction(async (tx) => {
+    const [privSnap, ledgerSnap, sessionSnap] = await Promise.all([
+      tx.get(privRef),
+      tx.get(ledgerRef),
+      tx.get(sessionRef),
+    ]);
+
+    const currentBalanceMinor = Number(privSnap.data()?.walletBalanceMinor || 0);
+
+    if (ledgerSnap.exists) {
+      return {
+        ok: true,
+        alreadyCredited: true,
+        ledgerId,
+        newBalanceMinor: currentBalanceMinor,
+      };
+    }
+
+    if (sessionSnap.exists && sessionSnap.data()?.status === 'completed') {
+      return {
+        ok: true,
+        alreadyCredited: true,
+        ledgerId,
+        newBalanceMinor: currentBalanceMinor,
+      };
+    }
+
+    if (!privSnap.exists) {
+      throw new Error('Wallet account profile does not exist.');
+    }
+
+    const nextBalanceMinor = currentBalanceMinor + params.amountMinorBdt;
+
+    tx.update(privRef, {
+      walletBalanceMinor: nextBalanceMinor,
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+
+    tx.set(ledgerRef, {
+      userId: params.buyerUid,
+      kind: 'wallet_topup',
+      gateway: params.gatewayProvider || 'securepaybd',
+      amountMinor: params.amountMinorBdt,
+      currency: 'BDT',
+      referenceId: params.sessionId,
+      externalTrxId: params.transactionId,
+      note: `Live Wallet Top-Up of ৳${params.amountBdt.toLocaleString()} verified via ${params.gatewayProvider || 'Secure Pay BD'}. Transaction ID: ${params.transactionId}`,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+
+    if (sessionSnap.exists) {
+      tx.update(sessionRef, {
+        status: 'completed',
+        transactionId: params.transactionId,
+        verifiedAtMs: nowMs,
+        ledgerId,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+    }
+
+    return {
+      ok: true,
+      alreadyCredited: false,
+      ledgerId,
+      newBalanceMinor: nextBalanceMinor,
+    };
+  });
 }

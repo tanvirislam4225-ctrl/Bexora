@@ -12,6 +12,7 @@ import {
   DEFAULT_WITHDRAWAL_METHODS,
   DEFAULT_MANUAL_PAYMENT_METHODS,
 } from './countryCurrencyCatalog';
+import { DEFAULT_GATEWAY_DISPLAY_METHODS } from './walletTopupAndReservationLogic';
 
 export interface PlatformDefinition {
   id: PlatformId;
@@ -222,6 +223,7 @@ export const DEFAULT_PUBLIC_SETTINGS: PublicSettings = {
   countryRates: { BD: 125, US: 1, IN: 86.5, GB: 0.78, AE: 3.67, SA: 3.75, EU: 0.92 },
   withdrawalMethods: DEFAULT_WITHDRAWAL_METHODS,
   manualPaymentConfig: DEFAULT_MANUAL_PAYMENT_METHODS,
+  gatewayPaymentMethods: DEFAULT_GATEWAY_DISPLAY_METHODS,
 };
 
 export function getMonetizationLabel(optionId: string): string {

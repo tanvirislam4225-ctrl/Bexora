@@ -150,6 +150,9 @@
         "activeDealId": { "type": "string", "maxLength": 128 },
         "acceptedBidAmountMinor": { "type": "integer" },
         "reservedBuyerId": { "type": "string", "maxLength": 128 },
+        "reservedUntilMs": { "type": "integer" },
+        "reservationExpiresAtMs": { "type": "integer" },
+        "reservationSessionId": { "type": "string", "maxLength": 128 },
         "status": { "type": "string", "enum": ["draft", "pending", "active", "reserved", "sold", "rejected", "suspended", "archived"] },
         "rejectionReason": { "type": "string", "maxLength": 500 },
         "views": { "type": "integer" },
@@ -237,6 +240,7 @@
       "description": "Escrow deal group with immutable fee snapshot, accepted bid linkage, transfer tracking, and immutable original protection deadline.",
       "type": "object",
       "properties": {
+        "dealCode": { "type": "string", "maxLength": 32, "pattern": "^[A-Za-z0-9_\\-]+$" },
         "listingId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "listingTitle": { "type": "string", "maxLength": 120 },
         "platform": { "type": "string", "maxLength": 32 },
@@ -262,6 +266,8 @@
         "originalDeadlineMs": { "type": "integer" },
         "unresolvedReportCount": { "type": "integer" },
         "paymentLedgerId": { "type": "string", "maxLength": 128 },
+        "paymentGateway": { "type": "string", "maxLength": 64 },
+        "externalTrxId": { "type": "string", "maxLength": 128 },
         "paidAtMs": { "type": "integer" },
         "transferSubmissionCount": { "type": "integer" },
         "latestTransferSubmissionId": { "type": "string", "maxLength": 128 },
@@ -275,6 +281,10 @@
         "moderationPaused": { "type": "boolean" },
         "moderationPauseReason": { "type": "string", "maxLength": 500 },
         "moderationAlertId": { "type": "string", "maxLength": 128 },
+        "isDeleted": { "type": "boolean" },
+        "deletedAtMs": { "type": "integer" },
+        "deletedBy": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "deletionReason": { "type": "string", "maxLength": 400 },
         "status": {
           "type": "string",
           "enum": [
@@ -434,7 +444,7 @@
       "type": "object",
       "properties": {
         "userId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
-        "kind": { "type": "string", "enum": ["deposit_approved", "escrow_debit", "escrow_release", "escrow_refund", "withdrawal_reserved", "withdrawal_paid", "withdrawal_restored"] },
+        "kind": { "type": "string", "enum": ["deposit_approved", "wallet_topup", "escrow_debit", "escrow_release", "escrow_refund", "withdrawal_reserved", "withdrawal_paid", "withdrawal_restored"] },
         "amountMinor": { "type": "integer" },
         "currency": { "type": "string", "enum": ["BDT", "USD"] },
         "referenceId": { "type": "string", "maxLength": 128 },
@@ -496,6 +506,14 @@
         "noticeBannerEnabled": { "type": "boolean" },
         "noticeBannerText": { "type": "string", "maxLength": 280 },
         "enabledLanguages": { "type": "array", "maxLength": 5 },
+        "usdtToBdtRate": { "type": "number" },
+        "gatewayPaymentMethods": { "type": "array", "maxLength": 12 },
+        "withdrawalMethods": { "type": "array", "maxLength": 20 },
+        "manualPaymentConfig": { "type": "array", "maxLength": 20 },
+        "countryRates": { "type": "object" },
+        "activeCountryCode": { "type": "string", "maxLength": 8 },
+        "livePaymentLinksEnabled": { "type": "boolean" },
+        "manualPaymentEnabled": { "type": "boolean" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": [
@@ -1067,6 +1085,180 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["sessionId", "uid", "deviceType", "state", "lastHeartbeatAtMs", "createdAtMs", "updatedAt"]
+    },
+    "PaymentSession": {
+      "title": "PaymentSession",
+      "description": "Server-managed live payment gateway checkout or wallet top-up session.",
+      "type": "object",
+      "properties": {
+        "sessionId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "mode": { "type": "string", "enum": ["buy_now", "accepted_bid_deal", "wallet_topup"] },
+        "buyerUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "buyerName": { "type": "string", "maxLength": 80 },
+        "buyerEmail": { "type": "string", "maxLength": 160 },
+        "listingId": { "type": "string", "maxLength": 128 },
+        "dealId": { "type": "string", "maxLength": 128 },
+        "listingTitle": { "type": "string", "maxLength": 120 },
+        "amountMinorBdt": { "type": "integer" },
+        "amountBdt": { "type": "number" },
+        "originalCurrency": { "type": "string", "enum": ["BDT", "USD"] },
+        "originalAmountMinor": { "type": "integer" },
+        "gatewayMethodId": { "type": "string", "maxLength": 64 },
+        "gatewayLabel": { "type": "string", "maxLength": 64 },
+        "reservationExpiresAtMs": { "type": "integer" },
+        "status": { "type": "string", "enum": ["created", "pending", "completed", "failed", "cancelled", "expired"] },
+        "transactionId": { "type": "string", "maxLength": 128 },
+        "verifiedAtMs": { "type": "integer" },
+        "createdAtMs": { "type": "integer" },
+        "updatedAtMs": { "type": "integer" }
+      },
+      "required": ["sessionId", "mode", "buyerUid", "amountMinorBdt", "amountBdt", "status", "createdAtMs", "updatedAtMs"]
+    },
+    "PaymentReconciliation": {
+      "title": "PaymentReconciliation",
+      "description": "Admin-only late or expired-reservation gateway callback reconciliation record.",
+      "type": "object",
+      "properties": {
+        "sessionId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "listingId": { "type": "string", "maxLength": 128 },
+        "dealId": { "type": "string", "maxLength": 128 },
+        "buyerUid": { "type": "string", "maxLength": 128 },
+        "buyerName": { "type": "string", "maxLength": 80 },
+        "amountMinor": { "type": "integer" },
+        "currency": { "type": "string", "enum": ["BDT", "USD"] },
+        "transactionId": { "type": "string", "maxLength": 128 },
+        "gatewayProvider": { "type": "string", "maxLength": 64 },
+        "listingStatusAtCallback": { "type": "string", "maxLength": 32 },
+        "reason": { "type": "string", "maxLength": 400 },
+        "status": { "type": "string", "enum": ["pending_review", "resolved", "refunded"] },
+        "createdAtMs": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["sessionId", "listingId", "buyerUid", "amountMinor", "currency", "transactionId", "status", "createdAtMs", "createdAt", "updatedAt"]
+    },
+    "PopupNotificationStyle": {
+      "title": "PopupNotificationStyle",
+      "description": "Customizable typography, colors, gradients, geometry, banner, CTA button, and close control config for a popup notification.",
+      "type": "object",
+      "properties": {
+        "fontSizePx": { "type": "integer" },
+        "fontWeight": { "type": "string", "enum": ["400", "500", "600", "700", "800"] },
+        "textColor": { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" },
+        "backgroundColor": { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" },
+        "useGradient": { "type": "boolean" },
+        "gradientFrom": { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" },
+        "gradientTo": { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" },
+        "gradientDirection": { "type": "string", "enum": ["135deg", "90deg", "180deg"] },
+        "textAlign": { "type": "string", "enum": ["left", "center", "right"] },
+        "paddingPx": { "type": "integer" },
+        "borderRadiusPx": { "type": "integer" },
+        "popupWidthPx": { "type": "integer" },
+        "popupHeightMode": { "type": "string", "enum": ["auto", "custom"] },
+        "popupHeightPx": { "type": "integer" },
+        "borderColor": { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" },
+        "accentColor": { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" },
+        "buttonEnabled": { "type": "boolean" },
+        "buttonText": { "type": "string", "maxLength": 48 },
+        "buttonBgColor": { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" },
+        "buttonTextColor": { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" },
+        "buttonDestination": { "type": "string", "maxLength": 300 },
+        "closeButtonEnabled": { "type": "boolean" }
+      },
+      "required": [
+        "fontSizePx", "fontWeight", "textColor", "backgroundColor", "useGradient",
+        "gradientFrom", "gradientTo", "gradientDirection", "textAlign", "paddingPx",
+        "borderRadiusPx", "popupWidthPx", "popupHeightMode", "popupHeightPx",
+        "borderColor", "accentColor", "buttonEnabled", "buttonText",
+        "buttonBgColor", "buttonTextColor", "buttonDestination", "closeButtonEnabled"
+      ]
+    },
+    "PopupNotificationCampaign": {
+      "title": "PopupNotificationCampaign",
+      "description": "Admin-managed global or strictly isolated targeted website popup notification campaign with scheduling and analytics.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "minLength": 1, "maxLength": 140 },
+        "body": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "deliveryMode": { "type": "string", "enum": ["global", "targeted"] },
+        "targetUserIds": { "type": "array", "maxLength": 200 },
+        "themeId": {
+          "type": "string",
+          "enum": [
+            "modern_gradient", "premium_gold", "professional_business", "minimal_white",
+            "dark_elegant", "colorful_announcement", "special_offer", "warning_alert",
+            "success_notification", "festive_celebration"
+          ]
+        },
+        "style": { "type": "object", "$ref": "PopupNotificationStyle" },
+        "bannerImageUrl": { "type": "string", "maxLength": 250000 },
+        "frequency": { "type": "string", "enum": ["once_per_user", "once_per_session", "every_open", "until_dismissed"] },
+        "storedStatus": { "type": "string", "enum": ["draft", "active", "paused"] },
+        "startAtMs": { "type": "integer" },
+        "expiresAtMs": { "type": "integer" },
+        "viewCount": { "type": "integer" },
+        "dismissCount": { "type": "integer" },
+        "createdBy": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAtMs": { "type": "integer" },
+        "updatedAtMs": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "title", "body", "deliveryMode", "targetUserIds", "themeId", "style",
+        "bannerImageUrl", "frequency", "storedStatus", "startAtMs", "expiresAtMs",
+        "viewCount", "dismissCount", "createdBy", "createdAtMs", "updatedAtMs",
+        "createdAt", "updatedAt"
+      ]
+    },
+    "PopupNotificationTarget": {
+      "title": "PopupNotificationTarget",
+      "description": "Strict single-recipient projection of a targeted popup notification campaign (isolated per targetUid).",
+      "type": "object",
+      "properties": {
+        "campaignId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "targetUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 140 },
+        "body": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "themeId": {
+          "type": "string",
+          "enum": [
+            "modern_gradient", "premium_gold", "professional_business", "minimal_white",
+            "dark_elegant", "colorful_announcement", "special_offer", "warning_alert",
+            "success_notification", "festive_celebration"
+          ]
+        },
+        "style": { "type": "object", "$ref": "PopupNotificationStyle" },
+        "bannerImageUrl": { "type": "string", "maxLength": 250000 },
+        "frequency": { "type": "string", "enum": ["once_per_user", "once_per_session", "every_open", "until_dismissed"] },
+        "storedStatus": { "type": "string", "enum": ["draft", "active", "paused"] },
+        "startAtMs": { "type": "integer" },
+        "expiresAtMs": { "type": "integer" },
+        "updatedAtMs": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "campaignId", "targetUid", "title", "body", "themeId", "style",
+        "bannerImageUrl", "frequency", "storedStatus", "startAtMs", "expiresAtMs",
+        "updatedAtMs", "createdAt", "updatedAt"
+      ]
+    },
+    "PopupNotificationReceipt": {
+      "title": "PopupNotificationReceipt",
+      "description": "Per-user cross-device view and dismissal synchronization state for popup notifications.",
+      "type": "object",
+      "properties": {
+        "campaignId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "viewed": { "type": "boolean" },
+        "dismissed": { "type": "boolean" },
+        "viewedAtMs": { "type": "integer" },
+        "dismissedAtMs": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["campaignId", "uid", "viewed", "dismissed", "viewedAtMs", "dismissedAtMs", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
@@ -1241,6 +1433,26 @@
     "/userPresence/{userId}/sessions/{sessionId}": {
       "schema": "UserPresenceSession",
       "description": "Per-session presence heartbeats and connection monitoring."
+    },
+    "/paymentSessions/{sessionId}": {
+      "schema": "PaymentSession",
+      "description": "Server-managed live payment gateway checkout and wallet top-up sessions."
+    },
+    "/paymentReconciliations/{sessionId}": {
+      "schema": "PaymentReconciliation",
+      "description": "Admin-only late or expired-reservation gateway callback reconciliation records."
+    },
+    "/popupNotifications/{campaignId}": {
+      "schema": "PopupNotificationCampaign",
+      "description": "Admin-managed website popup notification campaigns; non-admins can only read active global campaigns."
+    },
+    "/popupNotificationTargets/{targetId}": {
+      "schema": "PopupNotificationTarget",
+      "description": "Strictly single-user targeted popup notification delivery records."
+    },
+    "/popupNotificationReceipts/{receiptId}": {
+      "schema": "PopupNotificationReceipt",
+      "description": "Per-user cross-device view and dismissal receipts for popup notifications."
     }
   }
 }

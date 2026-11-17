@@ -20,6 +20,7 @@ import {
 import {
   Activity,
   AlertOctagon,
+  BellRing,
   Bot,
   Check,
   CheckCircle2,
@@ -47,6 +48,7 @@ import {
   ShieldAlert,
   ShieldCheck,
   Sparkles,
+  Trash2,
   Users,
   Volume2,
   Wallet,
@@ -136,6 +138,7 @@ import {
   validateWordPressSiteUrl,
   WordPressGatewayDiscoveryState,
 } from '../lib/checkoutAndIntentLogic';
+import { resolveDisplayDealCode } from '../lib/walletTopupAndReservationLogic';
 import { shouldTriggerFollowerPublicationAlert } from '../lib/engagementLogic';
 import { fanoutNewListingToFollowers } from '../lib/engagementService';
 import { enableFcmCloudApisViaServer } from '../lib/pushNotifications';
@@ -176,6 +179,11 @@ const AdminAnnouncementsSection = lazyWithRetry(() =>
     default: m.AdminAnnouncementsSection,
   }))
 );
+const AdminNotificationManagement = lazyWithRetry(() =>
+  import('./admin/AdminNotificationManagement').then((m) => ({
+    default: m.AdminNotificationManagement,
+  }))
+);
 
 interface AdminDashboardProps {
   adminUid: string;
@@ -201,6 +209,7 @@ type AdminSection =
   | 'support'
   | 'payments'
   | 'notifications'
+  | 'notification_management'
   | 'roles'
   | 'aidev';
 
@@ -533,6 +542,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [adminChatInput, setAdminChatInput] = useState('');
   const [sendingAdminChat, setSendingAdminChat] = useState(false);
   const [busyDealAction, setBusyDealAction] = useState<string | null>(null);
+  const [serverSearchedDeals, setServerSearchedDeals] = useState<DealRecord[] | null>(null);
+  const [searchingServerDeals, setSearchingServerDeals] = useState(false);
+  const [dealDeleteTarget, setDealDeleteTarget] = useState<DealRecord | null>(null);
+  const [dealDeleteReason, setDealDeleteReason] = useState('');
+  const [dealDeleteError, setDealDeleteError] = useState<string | null>(null);
+  const [deletingDealId, setDeletingDealId] = useState<string | null>(null);
   const [lightboxState, setLightboxState] = useState<{
     images: string[];
     index: number;
@@ -781,55 +796,65 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       onSnapshot(
         query(collection(db, 'deals'), limit(250)),
         (snap) => {
-          const items: DealRecord[] = snap.docs.map((d) => {
-            const dl = d.data();
-            return {
-              id: d.id,
-              listingId: dl.listingId,
-              listingTitle: dl.listingTitle,
-              platform: dl.platform,
-              acceptedBidId: dl.acceptedBidId,
-              originalListingPriceMinor: dl.originalListingPriceMinor
-                ? Number(dl.originalListingPriceMinor)
-                : undefined,
-              buyerId: dl.buyerId,
-              buyerName: dl.buyerName,
-              sellerId: dl.sellerId,
-              sellerName: dl.sellerName,
-              baseAmountMinor: Number(dl.baseAmountMinor || 0),
-              buyerFeePct: Number(dl.buyerFeePct || 0),
-              sellerFeePct: Number(dl.sellerFeePct || 0),
-              buyerFeeMinor: Number(dl.buyerFeeMinor || 0),
-              sellerFeeMinor: Number(dl.sellerFeeMinor || 0),
-              buyerTotalMinor: Number(dl.buyerTotalMinor || 0),
-              sellerPayoutMinor: Number(dl.sellerPayoutMinor || 0),
-              platformCommissionMinor: Number(dl.platformCommissionMinor || 0),
-              refundBuyerMinor: dl.refundBuyerMinor !== undefined ? Number(dl.refundBuyerMinor) : undefined,
-              refundPlatformRetainedMinor:
-                dl.refundPlatformRetainedMinor !== undefined ? Number(dl.refundPlatformRetainedMinor) : undefined,
-              currency: dl.currency || 'BDT',
-              protectionDurationHours: Number(
-                dl.protectionDurationHours || getProtectionDurationHours(dl.platform || 'other')
-              ),
-              confirmedAtMs: Number(dl.confirmedAtMs || 0),
-              originalDeadlineMs: Number(dl.originalDeadlineMs || 0),
-              unresolvedReportCount: Number(dl.unresolvedReportCount || 0),
-              paymentLedgerId: dl.paymentLedgerId,
-              paidAtMs: dl.paidAtMs ? Number(dl.paidAtMs) : undefined,
-              transferSubmissionCount:
-                dl.transferSubmissionCount !== undefined ? Number(dl.transferSubmissionCount) : 0,
-              latestTransferSubmissionId: dl.latestTransferSubmissionId,
-              latestRejectionReason: dl.latestRejectionReason,
-              refundLedgerId: dl.refundLedgerId,
-              settlementLedgerId: dl.settlementLedgerId,
-              adminHoldNote: dl.adminHoldNote,
-              settledAtMs: dl.settledAtMs ? Number(dl.settledAtMs) : undefined,
-              refundedAtMs: dl.refundedAtMs ? Number(dl.refundedAtMs) : undefined,
-              publicActivityId: dl.publicActivityId ? String(dl.publicActivityId) : undefined,
-              status: dl.status,
-              createdAtMs: dl.createdAt?.toMillis ? dl.createdAt.toMillis() : Date.now(),
-            };
-          });
+          const items: DealRecord[] = snap.docs
+            .map((d) => {
+              const dl = d.data();
+              return {
+                id: d.id,
+                dealCode: dl.dealCode ? String(dl.dealCode) : undefined,
+                listingId: dl.listingId,
+                listingTitle: dl.listingTitle,
+                platform: dl.platform,
+                acceptedBidId: dl.acceptedBidId,
+                originalListingPriceMinor: dl.originalListingPriceMinor
+                  ? Number(dl.originalListingPriceMinor)
+                  : undefined,
+                buyerId: dl.buyerId,
+                buyerName: dl.buyerName,
+                sellerId: dl.sellerId,
+                sellerName: dl.sellerName,
+                baseAmountMinor: Number(dl.baseAmountMinor || 0),
+                buyerFeePct: Number(dl.buyerFeePct || 0),
+                sellerFeePct: Number(dl.sellerFeePct || 0),
+                buyerFeeMinor: Number(dl.buyerFeeMinor || 0),
+                sellerFeeMinor: Number(dl.sellerFeeMinor || 0),
+                buyerTotalMinor: Number(dl.buyerTotalMinor || 0),
+                sellerPayoutMinor: Number(dl.sellerPayoutMinor || 0),
+                platformCommissionMinor: Number(dl.platformCommissionMinor || 0),
+                refundBuyerMinor:
+                  dl.refundBuyerMinor !== undefined ? Number(dl.refundBuyerMinor) : undefined,
+                refundPlatformRetainedMinor:
+                  dl.refundPlatformRetainedMinor !== undefined
+                    ? Number(dl.refundPlatformRetainedMinor)
+                    : undefined,
+                currency: dl.currency || 'BDT',
+                protectionDurationHours: Number(
+                  dl.protectionDurationHours || getProtectionDurationHours(dl.platform || 'other')
+                ),
+                confirmedAtMs: Number(dl.confirmedAtMs || 0),
+                originalDeadlineMs: Number(dl.originalDeadlineMs || 0),
+                unresolvedReportCount: Number(dl.unresolvedReportCount || 0),
+                paymentLedgerId: dl.paymentLedgerId,
+                paidAtMs: dl.paidAtMs ? Number(dl.paidAtMs) : undefined,
+                transferSubmissionCount:
+                  dl.transferSubmissionCount !== undefined ? Number(dl.transferSubmissionCount) : 0,
+                latestTransferSubmissionId: dl.latestTransferSubmissionId,
+                latestRejectionReason: dl.latestRejectionReason,
+                refundLedgerId: dl.refundLedgerId,
+                settlementLedgerId: dl.settlementLedgerId,
+                adminHoldNote: dl.adminHoldNote,
+                settledAtMs: dl.settledAtMs ? Number(dl.settledAtMs) : undefined,
+                refundedAtMs: dl.refundedAtMs ? Number(dl.refundedAtMs) : undefined,
+                publicActivityId: dl.publicActivityId ? String(dl.publicActivityId) : undefined,
+                isDeleted: Boolean(dl.isDeleted),
+                deletedAtMs: dl.deletedAtMs ? Number(dl.deletedAtMs) : undefined,
+                deletedBy: dl.deletedBy ? String(dl.deletedBy) : undefined,
+                deletionReason: dl.deletionReason ? String(dl.deletionReason) : undefined,
+                status: dl.status,
+                createdAtMs: dl.createdAt?.toMillis ? dl.createdAt.toMillis() : Date.now(),
+              } satisfies DealRecord;
+            })
+            .filter((item) => !item.isDeleted);
           items.sort((a, b) => b.createdAtMs - a.createdAtMs);
           setDeals(items);
         },
@@ -2627,6 +2652,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             activeDealId: deleteField(),
             acceptedBidAmountMinor: deleteField(),
             reservedBuyerId: deleteField(),
+            reservedUntilMs: deleteField(),
+            reservationExpiresAtMs: deleteField(),
+            reservationSessionId: deleteField(),
             updatedAt: serverTimestamp(),
           });
         }
@@ -3198,7 +3226,106 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   });
   const paginatedWithdrawals = paginateAdminItems(withdrawalQueue.items, withdrawalPage, 12);
 
-  const dealQueue = filterAdminDeals(deals, {
+  useEffect(() => {
+    const q = dealSearch.trim();
+    if (section !== 'deals' || q.length < 2) {
+      setServerSearchedDeals(null);
+      setSearchingServerDeals(false);
+      return;
+    }
+    let cancelled = false;
+    setSearchingServerDeals(true);
+    const tId = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const resp = await fetchWithFreshBearerToken(
+            `/api/admin/deals/search?q=${encodeURIComponent(q)}`
+          );
+          const data = (await resp.json().catch(() => null)) as {
+            ok?: boolean;
+            deals?: DealRecord[];
+          } | null;
+          if (!cancelled && resp.ok && data?.ok && Array.isArray(data.deals)) {
+            setServerSearchedDeals(data.deals.filter((d) => !d.isDeleted));
+          }
+        } catch {
+          // Live local list remains fallback if offline
+        } finally {
+          if (!cancelled) setSearchingServerDeals(false);
+        }
+      })();
+    }, 280);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(tId);
+    };
+  }, [section, dealSearch]);
+
+  const handleConfirmDeleteDeal = async () => {
+    if (!dealDeleteTarget || deletingDealId) return;
+    const target = dealDeleteTarget;
+    setDealDeleteError(null);
+    setDeletingDealId(target.id);
+    try {
+      const resp = await fetchWithFreshBearerToken(
+        `/api/admin/deals/${encodeURIComponent(target.id)}/delete`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ reason: dealDeleteReason.trim() }),
+        }
+      );
+      const data = (await resp.json().catch(() => null)) as {
+        ok?: boolean;
+        error?: string;
+        dealCode?: string;
+        restoredListing?: boolean;
+      } | null;
+      if (!resp.ok || !data?.ok) {
+        throw new Error(data?.error || 'Could not delete deal.');
+      }
+
+      setDeals((prev) => prev.filter((item) => item.id !== target.id));
+      setServerSearchedDeals((prev) =>
+        prev ? prev.filter((item) => item.id !== target.id) : null
+      );
+      if (selectedDealId === target.id) {
+        setSelectedDealId(null);
+      }
+      setDealDeleteTarget(null);
+      setDealDeleteReason('');
+      setDealDeleteError(null);
+      void invalidateAndRefreshFinanceOverview();
+      onFlash(
+        `Deal ${data.dealCode || resolveDisplayDealCode(target)} deleted safely. Wallet ledger & user balances preserved.${
+          data.restoredListing ? ' Unpaid listing reservation restored to active.' : ''
+        }`
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Unable to delete deal.';
+      setDealDeleteError(msg);
+      onFlash(msg);
+    } finally {
+      setDeletingDealId(null);
+    }
+  };
+
+  const mergedAdminDeals = (() => {
+    const map = new Map<string, DealRecord>();
+    for (const d of deals) {
+      if (!d.isDeleted) map.set(d.id, d);
+    }
+    if (serverSearchedDeals) {
+      for (const sd of serverSearchedDeals) {
+        if (!sd.isDeleted && !map.has(sd.id)) {
+          map.set(sd.id, sd);
+        }
+      }
+    }
+    return Array.from(map.values());
+  })();
+
+  const dealQueue = filterAdminDeals(mergedAdminDeals, {
     tab: dealFilter,
     query: dealSearch,
   });
@@ -3217,7 +3344,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const readyToSettleDealsCount = dealQueue.counts.ready;
 
   const selectedModerationListing = allListings.find((l) => l.id === selectedListingId) || null;
-  const selectedDeal = deals.find((d) => d.id === selectedDealId) || null;
+  const selectedDeal = mergedAdminDeals.find((d) => d.id === selectedDealId) || null;
 
   return (
     <div className="max-w-7xl mx-auto px-4 py-8">
@@ -3313,6 +3440,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 { id: 'support', label: 'Support & Branding', icon: Headset },
                 { id: 'payments', label: 'Payment', icon: Layers },
                 { id: 'notifications', label: 'Announcements & Alerts', icon: Megaphone },
+                { id: 'notification_management', label: 'Notification Management', icon: BellRing },
                 { id: 'roles', label: 'Superadmin & Logs', icon: Users },
                 { id: 'aidev', label: 'AI Assistant & Audit', icon: Bot },
               ] as { id: AdminSection; label: string; icon: React.ComponentType<{ className?: string }> }[]
@@ -4323,10 +4451,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       setDealSearch(e.target.value);
                       setDealsPage(1);
                     }}
-                    placeholder="Search deal ID, listing title, buyer, seller, category…"
-                    aria-label="Search escrow deals"
+                    placeholder="Search deal code (BXR-XXXXXX), deal ID, listing title, buyer, seller…"
+                    aria-label="Search escrow deals by deal code or participant"
                     className="bx-input w-full pl-8 pr-3 py-2 text-xs"
                   />
+                  {searchingServerDeals && (
+                    <span className="text-[11px] font-bold opacity-65 mt-1 block">
+                      Searching full archive by deal code &amp; participant…
+                    </span>
+                  )}
                 </div>
               </div>
 
@@ -4337,6 +4470,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               ) : (
                 paginatedDeals.items.map((dl) => {
                   const isExpanded = selectedDeal?.id === dl.id;
+                  const displayDealCode = resolveDisplayDealCode(dl);
                   const expired = dl.originalDeadlineMs > 0 && Date.now() >= dl.originalDeadlineMs;
                   const readyToSettle =
                     expired &&
@@ -4352,6 +4486,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
                         <div className="space-y-1">
                           <div className="flex flex-wrap items-center gap-2 text-xs font-bold">
+                            <span className="px-2 py-0.5 rounded font-mono font-black bg-[#FF6500]/15 text-[#FF6500] border border-[#FF6500]/30">
+                              {displayDealCode}
+                            </span>
                             <span className="font-black text-[#FF6500]">{getDealStatusLabel(dl.status)}</span>
                             <span aria-hidden="true">·</span>
                             <span>{dl.platform.toUpperCase()}</span>
@@ -4412,16 +4549,31 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           </p>
                         </div>
 
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setSelectedDealId(isExpanded ? null : dl.id);
-                            setAdminDealNote('');
-                          }}
-                          className="bx-btn bx-btn-primary px-4 py-2 text-xs font-extrabold whitespace-nowrap shrink-0"
-                        >
-                          {isExpanded ? 'Close Review Screen' : 'Inspect Deal & Evidence'}
-                        </button>
+                        <div className="flex flex-wrap items-center gap-2 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedDealId(isExpanded ? null : dl.id);
+                              setAdminDealNote('');
+                            }}
+                            className="bx-btn bx-btn-primary px-4 py-2 text-xs font-extrabold whitespace-nowrap shrink-0"
+                          >
+                            {isExpanded ? 'Close Review Screen' : 'Inspect Deal & Evidence'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setDealDeleteTarget(dl);
+                              setDealDeleteReason('');
+                              setDealDeleteError(null);
+                            }}
+                            className="bx-btn bx-btn-danger px-3 py-2 text-xs font-extrabold inline-flex items-center gap-1 whitespace-nowrap shrink-0"
+                            aria-label={`Delete deal ${displayDealCode}`}
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            <span>Delete Deal</span>
+                          </button>
+                        </div>
                       </div>
 
                       {/* Expanded Full 3-Party Deal & Dispute Review Workbench */}
@@ -5347,6 +5499,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             />
           )}
 
+          {section === 'notification_management' && (
+            <AdminNotificationManagement onFlash={onFlash} />
+          )}
+
           {section === 'trust_safety' && (
             <AdminTrustSafetyCenter
               isSuperAdmin={isSuperAdmin}
@@ -5356,6 +5512,115 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           </Suspense>
         </div>
       </div>
+
+      {/* Deal Delete Confirmation Modal */}
+      {dealDeleteTarget && (
+        <div
+          className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/60 backdrop-blur-[2px]"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="deal-delete-dialog-title"
+          data-testid="deal-delete-confirmation-modal"
+          onClick={(e) => {
+            if (e.target === e.currentTarget && deletingDealId !== dealDeleteTarget.id) {
+              setDealDeleteTarget(null);
+              setDealDeleteReason('');
+              setDealDeleteError(null);
+            }
+          }}
+        >
+          <div className="bx-card w-full max-w-lg p-6 border-2 border-red-600 bg-[var(--bx-surface)] shadow-2xl space-y-4">
+            <div className="flex items-start justify-between gap-3">
+              <div className="space-y-1.5">
+                <div className="inline-flex items-center gap-2 text-xs font-black uppercase tracking-wider text-red-600">
+                  <Trash2 className="w-4 h-4 shrink-0" />
+                  <span>Deal Deletion ({resolveDisplayDealCode(dealDeleteTarget) || dealDeleteTarget.id})</span>
+                </div>
+                <h2 id="deal-delete-dialog-title" className="text-lg font-black leading-snug">
+                  Are you sure you want to delete this deal?
+                </h2>
+              </div>
+              <button
+                type="button"
+                disabled={deletingDealId === dealDeleteTarget.id}
+                onClick={() => {
+                  setDealDeleteTarget(null);
+                  setDealDeleteReason('');
+                  setDealDeleteError(null);
+                }}
+                className="bx-icon-btn shrink-0 disabled:opacity-50"
+                aria-label="Close delete confirmation"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-3 border border-[var(--bx-border)] bg-[var(--bx-surface-alt)] text-xs space-y-1">
+              <div className="font-black truncate">
+                {dealDeleteTarget.listingTitle?.trim() || 'Untitled Deal Listing'}
+              </div>
+              <div className="opacity-85">
+                Buyer: <span className="font-bold">{dealDeleteTarget.buyerName?.trim() || 'Unknown'}</span> · Seller:{' '}
+                <span className="font-bold">{dealDeleteTarget.sellerName?.trim() || 'Unknown'}</span>
+              </div>
+              <div className="opacity-75">
+                This action removes the deal room from active queues while preserving all{' '}
+                <span className="font-mono">walletLedger</span> entries, payment sessions, and user wallet balances, and records this action in the admin audit trail.
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <label
+                htmlFor="deal-delete-audit-reason"
+                className="block text-xs font-black"
+              >
+                Optional Audit Reason
+              </label>
+              <input
+                id="deal-delete-audit-reason"
+                type="text"
+                value={dealDeleteReason}
+                maxLength={400}
+                onChange={(e) => setDealDeleteReason(e.target.value)}
+                placeholder="e.g. Duplicate listing, fraudulent deal, policy violation"
+                className="bx-input w-full px-3 py-2.5 text-xs"
+              />
+            </div>
+
+            {dealDeleteError && (
+              <div
+                role="alert"
+                className="p-3 border border-red-600 bg-red-50 dark:bg-red-950/30 text-xs font-bold text-red-700 dark:text-red-300"
+              >
+                {dealDeleteError}
+              </div>
+            )}
+
+            <div className="flex flex-wrap items-center justify-end gap-2.5 pt-1">
+              <button
+                type="button"
+                disabled={deletingDealId === dealDeleteTarget.id}
+                onClick={() => {
+                  setDealDeleteTarget(null);
+                  setDealDeleteReason('');
+                  setDealDeleteError(null);
+                }}
+                className="bx-btn bx-btn-ghost px-4 py-2 text-xs font-extrabold disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={deletingDealId === dealDeleteTarget.id}
+                onClick={() => void handleConfirmDeleteDeal()}
+                className="bx-btn px-4 py-2 text-xs font-extrabold bg-red-600 text-white border-2 border-[#191919] disabled:opacity-60"
+              >
+                {deletingDealId === dealDeleteTarget.id ? 'Deleting…' : 'Confirm Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

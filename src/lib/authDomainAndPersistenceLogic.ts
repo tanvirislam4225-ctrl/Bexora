@@ -363,4 +363,108 @@ export function resolveNavbarAuthState(input: ResolveNavbarAuthStateInput): Auth
   return 'authenticated';
 }
 
+const EMBEDDED_FIREBASE_AUTH_CODE_RE = /\b(auth\/[a-z0-9-]+)\b/i;
 
+/**
+ * Extracts a normalized Firebase Auth error code (`auth/...`) from either `err.code`
+ * or an embedded `(auth/...)` error message.
+ */
+export function extractFirebaseAuthErrorCode(err: unknown): string {
+  if (err && typeof err === 'object' && 'code' in err) {
+    const rawCode = String((err as { code?: unknown }).code || '').trim();
+    if (rawCode) return rawCode.toLowerCase();
+  }
+  const msg = err instanceof Error ? err.message : String(err || '');
+  const match = msg.match(EMBEDDED_FIREBASE_AUTH_CODE_RE);
+  return match ? match[1].toLowerCase() : '';
+}
+
+export type GooglePopupAuthErrorKind =
+  | 'popup_closed'
+  | 'popup_cancelled'
+  | 'popup_blocked'
+  | 'network_retryable'
+  | 'other';
+
+export interface ClassifiedGooglePopupAuthError {
+  kind: GooglePopupAuthErrorKind;
+  code: string;
+  isCancellation: boolean;
+  userMessage: string;
+}
+
+/**
+ * Classifies popup errors emitted by Firebase Auth (`signInWithPopup` / `reauthenticateWithPopup`),
+ * giving explicit user-friendly handling for `auth/popup-closed-by-user` and
+ * `auth/cancelled-popup-request` so the UI immediately resets without treating user closure as a crash.
+ */
+export function classifyGooglePopupAuthError(err: unknown): ClassifiedGooglePopupAuthError {
+  const code = extractFirebaseAuthErrorCode(err);
+
+  if (code === 'auth/popup-closed-by-user') {
+    return {
+      kind: 'popup_closed',
+      code,
+      isCancellation: true,
+      userMessage:
+        'Google sign-in popup was closed before completing. You can click Connect with Google to try again or sign in with Email below.',
+    };
+  }
+
+  if (code === 'auth/cancelled-popup-request' || code === 'auth/user-cancelled') {
+    return {
+      kind: 'popup_cancelled',
+      code,
+      isCancellation: true,
+      userMessage:
+        'Google sign-in request was cancelled. Click Connect with Google to try again or sign in with Email below.',
+    };
+  }
+
+  if (code === 'auth/popup-blocked') {
+    return {
+      kind: 'popup_blocked',
+      code,
+      isCancellation: false,
+      userMessage:
+        'Your browser blocked the Google sign-in popup. Allow popups or wait for redirect sign-in.',
+    };
+  }
+
+  if (code === 'auth/network-request-failed') {
+    return {
+      kind: 'network_retryable',
+      code,
+      isCancellation: false,
+      userMessage: 'Network connection error. Check your internet connection and try again.',
+    };
+  }
+
+  return {
+    kind: 'other',
+    code,
+    isCancellation: false,
+    userMessage: '',
+  };
+}
+
+/**
+ * Wraps an async popup sign-in call in an unconditional `try...finally` block so loading state
+ * is guaranteed to reset even when the user closes (`auth/popup-closed-by-user`) or cancels
+ * (`auth/cancelled-popup-request`) the popup.
+ */
+export async function executeGooglePopupAuthWithReset<T>(
+  invokePopup: () => Promise<T>,
+  callbacks?: {
+    setLoading?: (loading: boolean) => void;
+    onSettled?: () => void;
+  }
+): Promise<T> {
+  callbacks?.setLoading?.(true);
+  try {
+    return await invokePopup();
+  } finally {
+    callbacks?.setLoading?.(false);
+    callbacks?.onSettled?.();
+  }
+}

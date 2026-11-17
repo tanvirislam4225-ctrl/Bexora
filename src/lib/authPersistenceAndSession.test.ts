@@ -2,8 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   BEXORA_BRAND_AUTH_DOMAIN_PRIORITY,
+  classifyGooglePopupAuthError,
   classifySessionErrorDisposition,
   evaluateCustomAuthDomainReadiness,
+  executeGooglePopupAuthWithReset,
+  extractFirebaseAuthErrorCode,
   isSafeFirebaseAuthProxyPath,
   PRIMARY_VERIFIED_BEXORA_AUTH_DOMAIN,
   resolveEffectiveFirebaseAuthDomain,
@@ -444,3 +447,96 @@ test('resolveNavbarAuthState strictly enforces 3-state auth lifecycle and comple
   );
 });
 
+test('classifyGooglePopupAuthError extracts and classifies popup-closed-by-user and cancelled-popup-request errors cleanly', () => {
+  const closedErr = Object.assign(new Error('Firebase: Error (auth/popup-closed-by-user).'), {
+    code: 'auth/popup-closed-by-user',
+  });
+  const cancelledErr = { code: 'auth/cancelled-popup-request', message: 'Popup request cancelled' };
+  const wrappedClosedErr = new Error('Popup failed: (auth/popup-closed-by-user)');
+
+  assert.equal(extractFirebaseAuthErrorCode(closedErr), 'auth/popup-closed-by-user');
+  assert.equal(extractFirebaseAuthErrorCode(wrappedClosedErr), 'auth/popup-closed-by-user');
+  assert.equal(extractFirebaseAuthErrorCode(cancelledErr), 'auth/cancelled-popup-request');
+
+  const closedRes = classifyGooglePopupAuthError(closedErr);
+  assert.equal(closedRes.kind, 'popup_closed');
+  assert.equal(closedRes.isCancellation, true);
+  assert.ok(closedRes.userMessage.includes('closed'));
+
+  const cancelRes = classifyGooglePopupAuthError(cancelledErr);
+  assert.equal(cancelRes.kind, 'popup_cancelled');
+  assert.equal(cancelRes.isCancellation, true);
+  assert.ok(cancelRes.userMessage.includes('cancelled'));
+
+  const blockedRes = classifyGooglePopupAuthError({ code: 'auth/popup-blocked' });
+  assert.equal(blockedRes.kind, 'popup_blocked');
+  assert.equal(blockedRes.isCancellation, false);
+});
+
+test('executeGooglePopupAuthWithReset guarantees loading state resets via try...finally on popup close, cancel, error, and success', async () => {
+  let loading = false;
+  let settledCount = 0;
+
+  // 1. User closes popup (auth/popup-closed-by-user)
+  await assert.rejects(
+    () =>
+      executeGooglePopupAuthWithReset(
+        async () => {
+          assert.equal(loading, true);
+          throw Object.assign(new Error('closed'), { code: 'auth/popup-closed-by-user' });
+        },
+        {
+          setLoading: (next) => {
+            loading = next;
+          },
+          onSettled: () => {
+            settledCount += 1;
+          },
+        }
+      ),
+    (err: { code?: string }) => err.code === 'auth/popup-closed-by-user'
+  );
+  assert.equal(loading, false);
+  assert.equal(settledCount, 1);
+
+  // 2. Duplicate popup request cancelled (auth/cancelled-popup-request)
+  await assert.rejects(
+    () =>
+      executeGooglePopupAuthWithReset(
+        async () => {
+          assert.equal(loading, true);
+          throw Object.assign(new Error('cancelled'), { code: 'auth/cancelled-popup-request' });
+        },
+        {
+          setLoading: (next) => {
+            loading = next;
+          },
+          onSettled: () => {
+            settledCount += 1;
+          },
+        }
+      ),
+    (err: { code?: string }) => err.code === 'auth/cancelled-popup-request'
+  );
+  assert.equal(loading, false);
+  assert.equal(settledCount, 2);
+
+  // 3. Successful popup auth
+  const result = await executeGooglePopupAuthWithReset(
+    async () => {
+      assert.equal(loading, true);
+      return { uid: 'u123' };
+    },
+    {
+      setLoading: (next) => {
+        loading = next;
+      },
+      onSettled: () => {
+        settledCount += 1;
+      },
+    }
+  );
+  assert.deepEqual(result, { uid: 'u123' });
+  assert.equal(loading, false);
+  assert.equal(settledCount, 3);
+});

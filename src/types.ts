@@ -146,6 +146,9 @@ export interface MarketplaceListing {
   activeDealId?: string;
   acceptedBidAmountMinor?: number;
   reservedBuyerId?: string;
+  reservedUntilMs?: number;
+  reservationExpiresAtMs?: number;
+  reservationSessionId?: string;
   status: ListingStatus;
   rejectionReason?: string;
   views: number;
@@ -224,6 +227,7 @@ export interface ChatMessageRecord {
 
 export interface DealRecord {
   id: string;
+  dealCode?: string;
   listingId: string;
   listingTitle: string;
   platform: PlatformId;
@@ -261,6 +265,10 @@ export interface DealRecord {
   publicActivityId?: string;
   moderationPaused?: boolean;
   moderationPauseReason?: string;
+  isDeleted?: boolean;
+  deletedAtMs?: number;
+  deletedBy?: string;
+  deletionReason?: string;
   status: DealStatus;
   createdAtMs: number;
 }
@@ -373,6 +381,15 @@ export interface ReviewRecord {
   createdAtMs: number;
 }
 
+export interface GatewayPaymentMethodSetting {
+  id: string;
+  name: string;
+  badge: string;
+  color: string;
+  enabled: boolean;
+  order: number;
+}
+
 export interface PublicSettings {
   buyerFeeEnabled: boolean;
   buyerFeePct: number;
@@ -407,6 +424,7 @@ export interface PublicSettings {
   countryRates?: Record<string, number>;
   withdrawalMethods?: import('./lib/countryCurrencyCatalog').WithdrawalMethodSetting[];
   manualPaymentConfig?: import('./lib/countryCurrencyCatalog').ManualPaymentMethodSetting[];
+  gatewayPaymentMethods?: GatewayPaymentMethodSetting[];
 }
 
 export interface AiProposalRecord {
@@ -641,4 +659,6 @@ export interface AdminInvitationRecord {
   respondedAtMs?: number;
   createdAtMs: number;
 }
+
+export * from './lib/popupNotificationLogic';
 

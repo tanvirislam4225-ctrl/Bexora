@@ -10,6 +10,7 @@ import type {
 } from '../types';
 import { isDealTerminalStatus, isDealUnpaidStatus } from './marketplaceLogic';
 import { isDealEligibleForAutoRelease } from './adminFinanceLogic';
+import { matchesAdminDealQuery } from './walletTopupAndReservationLogic';
 
 export type AdminListingBucket = 'pending' | 'approved' | 'rejected' | 'other';
 export type AdminNidBucket = 'pending_review' | 'verified' | 'rejected';
@@ -365,7 +366,7 @@ export function filterAdminDeals(
 
   const items: DealRecord[] = [];
   for (const d of deals) {
-    if (!d || !d.id) continue;
+    if (!d || !d.id || d.isDeleted) continue;
     counts.all += 1;
 
     const isDisputed = d.status === 'reported_under_review' || (d.unresolvedReportCount || 0) > 0;
@@ -389,12 +390,7 @@ export function filterAdminDeals(
       (opts.tab === 'settled' && isSettled);
 
     if (!matchesTab) continue;
-    if (
-      !matchesQuery(
-        [d.id, d.listingId, d.listingTitle, d.platform, d.buyerName, d.buyerId, d.sellerName, d.sellerId, d.status],
-        query
-      )
-    ) {
+    if (!matchesAdminDealQuery(d, query)) {
       continue;
     }
     items.push(d);

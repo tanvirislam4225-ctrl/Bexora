@@ -152,7 +152,12 @@ import {
   DetailPageSkeleton,
   PageShellSkeleton,
 } from './components/LoadingSkeletons';
-import { dedupedRequest } from './lib/apiClient';
+import { buildApiUrl, dedupedRequest } from './lib/apiClient';
+import {
+  getListingReservationExpiryMs,
+  isListingReservationActive,
+  normalizeGatewayPaymentMethods,
+} from './lib/walletTopupAndReservationLogic';
 import {
   buildRouteScrollKey,
   doesRouteRequireImmediateSecondarySubs,
@@ -261,6 +266,11 @@ const ModerationStatusBannerAndAppealModal = lazyWithRetry(() =>
 const ReportUserModal = lazyWithRetry(() =>
   import('./components/ReportUserModal').then((m) => ({ default: m.ReportUserModal })),
 );
+const PopupNotificationHost = lazyWithRetry(() =>
+  import('./components/PopupNotificationHost').then((m) => ({
+    default: m.PopupNotificationHost,
+  })),
+);
 
 const PENDING_AUTH_INTENT_STORAGE_KEY = 'bx_pending_auth_intent';
 
@@ -297,6 +307,9 @@ function mapListingDocument(id: string, ld: Record<string, unknown>): Marketplac
       ? Number(ld.acceptedBidAmountMinor)
       : undefined,
     reservedBuyerId: ld.reservedBuyerId ? String(ld.reservedBuyerId) : undefined,
+    reservedUntilMs: ld.reservedUntilMs ? Number(ld.reservedUntilMs) : undefined,
+    reservationExpiresAtMs: ld.reservationExpiresAtMs ? Number(ld.reservationExpiresAtMs) : undefined,
+    reservationSessionId: ld.reservationSessionId ? String(ld.reservationSessionId) : undefined,
     status: ld.status as MarketplaceListing['status'],
     rejectionReason: ld.rejectionReason ? String(ld.rejectionReason) : undefined,
     views: Number(ld.views || 0),
@@ -387,6 +400,7 @@ function writeCachedListings(listings: MarketplaceListing[]): void {
 function mapDealDocument(id: string, dl: Record<string, unknown>): DealRecord {
   return {
     id,
+    dealCode: dl.dealCode ? String(dl.dealCode) : undefined,
     listingId: String(dl.listingId || ''),
     listingTitle: String(dl.listingTitle || ''),
     platform: dl.platform as PlatformId,
@@ -431,9 +445,13 @@ function mapDealDocument(id: string, dl: Record<string, unknown>): DealRecord {
     moderationPauseReason: dl.moderationPauseReason ? String(dl.moderationPauseReason) : undefined,
     settledAtMs: dl.settledAtMs ? Number(dl.settledAtMs) : undefined,
     refundedAtMs: dl.refundedAtMs ? Number(dl.refundedAtMs) : undefined,
+    isDeleted: Boolean(dl.isDeleted),
+    deletedAtMs: dl.deletedAtMs ? Number(dl.deletedAtMs) : undefined,
+    deletedBy: dl.deletedBy ? String(dl.deletedBy) : undefined,
+    deletionReason: dl.deletionReason ? String(dl.deletionReason) : undefined,
     status: dl.status as DealRecord['status'],
     createdAtMs: (dl.createdAt as { toMillis?: () => number })?.toMillis
-      ? (ldOrCreatedMillis(dl.createdAt))
+      ? ldOrCreatedMillis(dl.createdAt)
       : Date.now(),
   };
 }
@@ -471,6 +489,11 @@ export default function App() {
   const [spReturnSessionId, setSpReturnSessionId] = useState<string | null>(() => {
     const params = new URLSearchParams(window.location.search);
     return sanitizeRouteId(params.get('sp_session')) || null;
+  });
+
+  const [spTopupSessionId, setSpTopupSessionId] = useState<string | null>(() => {
+    const params = new URLSearchParams(window.location.search);
+    return sanitizeRouteId(params.get('sp_topup_session')) || null;
   });
 
   const [spPaymentStatus, setSpPaymentStatus] = useState<string | null>(() => {
@@ -1005,6 +1028,7 @@ export default function App() {
             countryRates: d.countryRates && typeof d.countryRates === 'object' ? d.countryRates : DEFAULT_PUBLIC_SETTINGS.countryRates,
             withdrawalMethods: Array.isArray(d.withdrawalMethods) ? d.withdrawalMethods : DEFAULT_PUBLIC_SETTINGS.withdrawalMethods,
             manualPaymentConfig: Array.isArray(d.manualPaymentConfig) ? d.manualPaymentConfig : DEFAULT_PUBLIC_SETTINGS.manualPaymentConfig,
+            gatewayPaymentMethods: normalizeGatewayPaymentMethods(d.gatewayPaymentMethods),
             supportWhatsapp: String(d.supportWhatsapp ?? ''),
             supportTelegram: String(d.supportTelegram ?? ''),
             supportEmail: String(d.supportEmail ?? ''),
@@ -1118,6 +1142,7 @@ export default function App() {
   }, []);
 
   // Paginated Public Active Listings Listener (Immediate, 24 per page)
+  const expiredReservationPingedRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     const unsubListings = onSnapshot(
       query(
@@ -1133,6 +1158,24 @@ export default function App() {
         setActiveListings(list);
         setListingsHydrated(true);
         writeCachedListings(list);
+
+        // Lazily release expired 15-minute checkout reservations back to active
+        const now = Date.now();
+        for (const item of list) {
+          if (item.status === 'reserved' && !item.activeDealId) {
+            const expMs = getListingReservationExpiryMs(item);
+            if (expMs > 0 && now >= expMs) {
+              const key = `${item.id}:${expMs}`;
+              if (!expiredReservationPingedRef.current.has(key)) {
+                expiredReservationPingedRef.current.add(key);
+                void fetch(
+                  buildApiUrl(`/api/listings/${encodeURIComponent(item.id)}/expire-reservation`),
+                  { method: 'POST' }
+                ).catch(() => {});
+              }
+            }
+          }
+        }
       },
       (err) => {
         setListingsHydrated(true);
@@ -1901,7 +1944,11 @@ export default function App() {
     let sellerDeals: DealRecord[] = [];
     const syncDeals = () => {
       const map = new Map<string, DealRecord>();
-      [...buyerDeals, ...sellerDeals].forEach((d) => map.set(d.id, d));
+      [...buyerDeals, ...sellerDeals].forEach((d) => {
+        if (!d.isDeleted) {
+          map.set(d.id, d);
+        }
+      });
       setDeals(Array.from(map.values()).sort((a, b) => b.createdAtMs - a.createdAtMs));
     };
 
@@ -2165,7 +2212,8 @@ export default function App() {
       .then((snap) => {
         if (cancelled) return;
         if (snap.exists()) {
-          setFetchedDeal(mapDealDocument(snap.id, snap.data()));
+          const mapped = mapDealDocument(snap.id, snap.data());
+          setFetchedDeal(mapped.isDeleted ? null : mapped);
         } else {
           setFetchedDeal(null);
         }
@@ -2836,6 +2884,9 @@ export default function App() {
       const qLower = qText.trim().toLowerCase();
       return source
         .filter((item) => {
+          if (item.status === 'reserved' || isListingReservationActive(item)) {
+            return false;
+          }
           if (qLower) {
             const hay = `${item.title} ${item.description} ${item.subcategory} ${item.gameName || ''} ${item.sellerUsername}`.toLowerCase();
             if (!hay.includes(qLower)) return false;
@@ -3754,6 +3805,20 @@ export default function App() {
                       setSafetyAppealsModalOpen(true);
                     }}
                     initialMode={walletInitialMode}
+                    pendingTopupSessionId={spTopupSessionId}
+                    pendingTopupStatus={spPaymentStatus}
+                    pendingTopupTransactionId={spTransactionId}
+                    onClearTopupReturn={() => {
+                      setSpTopupSessionId(null);
+                      setSpPaymentStatus(null);
+                      setSpTransactionId(null);
+                      const url = new URL(window.location.href);
+                      url.searchParams.delete('sp_topup_session');
+                      url.searchParams.delete('payment_status');
+                      url.searchParams.delete('transaction_id');
+                      url.searchParams.delete('transactionId');
+                      window.history.replaceState({}, document.title, url.pathname + url.search + url.hash);
+                    }}
                     onFlash={showFlash}
                   />
                 )}
@@ -4404,6 +4469,56 @@ export default function App() {
           />
         </Suspense>
       )}
+
+      {/* Global & Targeted Popup Notification Campaigns */}
+      <Suspense fallback={null}>
+        <PopupNotificationHost
+          userUid={fbUser?.uid ?? null}
+          onNavigateDestination={(destination) => {
+            const cleaned = String(destination || '').trim();
+            if (!cleaned || cleaned === '/') {
+              navigateRoute({ page: 'home' });
+              return;
+            }
+            if (cleaned.startsWith('/info/')) {
+              const topic = cleaned.slice('/info/'.length).split(/[?#]/)[0] as InfoTopicId;
+              navigateRoute({ page: 'info', infoTopic: topic || 'escrow-protection' });
+              return;
+            }
+            if (cleaned.startsWith('/listing/')) {
+              const listingId = sanitizeRouteId(cleaned.slice('/listing/'.length).split(/[?#]/)[0]);
+              if (listingId) {
+                navigateRoute({ page: 'listing', listingId });
+                return;
+              }
+            }
+            const routeSlug = cleaned.replace(/^\/+/, '').split(/[?#]/)[0];
+            const routeMap: Record<string, AppRouteState> = {
+              market: { page: 'market' },
+              marketplace: { page: 'market' },
+              sell: { page: 'sell' },
+              deals: { page: 'deals' },
+              wallet: { page: 'wallet' },
+              messages: { page: 'chat' },
+              chat: { page: 'chat' },
+              profile: { page: 'profile' },
+              sellers: { page: 'sellers' },
+              favorites: { page: 'favorites' },
+              'my-bids': { page: 'my-bids' },
+              following: { page: 'following' },
+              reviews: { page: 'reviews' },
+              'recent-searches': { page: 'recent-searches' },
+              admin: { page: 'admin' },
+            };
+            const matched = routeMap[routeSlug];
+            if (matched) {
+              navigateRoute(matched);
+            } else {
+              navigateRoute({ page: 'market' });
+            }
+          }}
+        />
+      </Suspense>
     </div>
   );
 }

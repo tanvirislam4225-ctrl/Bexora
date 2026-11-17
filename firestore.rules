@@ -243,6 +243,7 @@ service cloud.firestore {
           'ageYears', 'ageMonths', 'metricValue', 'monthlyRevenueMinor',
           'accountUrl', 'urlValidationStatus', 'gameName', 'gameUid', 'gameLevel',
           'images', 'activeDealId', 'acceptedBidAmountMinor', 'reservedBuyerId',
+          'reservedUntilMs', 'reservationExpiresAtMs', 'reservationSessionId',
           'status', 'rejectionReason', 'views', 'firstPublishedAtMs',
           'createdAt', 'updatedAt'
         ])
@@ -283,6 +284,9 @@ service cloud.firestore {
         && (!('activeDealId' in data) || (data.activeDealId is string && isValidId(data.activeDealId)))
         && (!('acceptedBidAmountMinor' in data) || (data.acceptedBidAmountMinor is int && data.acceptedBidAmountMinor > 0))
         && (!('reservedBuyerId' in data) || (data.reservedBuyerId is string && isValidId(data.reservedBuyerId)))
+        && (!('reservedUntilMs' in data) || (data.reservedUntilMs is int && data.reservedUntilMs >= 0))
+        && (!('reservationExpiresAtMs' in data) || (data.reservationExpiresAtMs is int && data.reservationExpiresAtMs >= 0))
+        && (!('reservationSessionId' in data) || (data.reservationSessionId is string && isValidId(data.reservationSessionId)))
         && data.status in ['draft', 'pending', 'active', 'reserved', 'sold', 'rejected', 'suspended', 'archived']
         && (!('rejectionReason' in data) || (data.rejectionReason is string && data.rejectionReason.size() <= 500))
         && data.views is int && data.views >= 0
@@ -384,20 +388,22 @@ service cloud.firestore {
           'createdAt', 'updatedAt'
         ])
         && data.keys().hasOnly([
-          'listingId', 'listingTitle', 'platform', 'acceptedBidId', 'originalListingPriceMinor',
+          'dealCode', 'listingId', 'listingTitle', 'platform', 'acceptedBidId', 'originalListingPriceMinor',
           'buyerId', 'buyerName', 'sellerId', 'sellerName',
           'baseAmountMinor', 'buyerFeePct', 'sellerFeePct',
           'buyerFeeMinor', 'sellerFeeMinor', 'buyerTotalMinor', 'sellerPayoutMinor',
           'platformCommissionMinor', 'refundBuyerMinor', 'refundPlatformRetainedMinor',
           'currency', 'protectionDurationHours',
           'confirmedAtMs', 'originalDeadlineMs', 'unresolvedReportCount',
-          'paymentLedgerId', 'paidAtMs', 'transferSubmissionCount',
+          'paymentLedgerId', 'paymentGateway', 'externalTrxId', 'paidAtMs', 'transferSubmissionCount',
           'latestTransferSubmissionId', 'latestRejectionReason',
           'refundLedgerId', 'settlementLedgerId', 'adminHoldNote',
           'settledAtMs', 'refundedAtMs', 'publicActivityId',
           'moderationPaused', 'moderationPauseReason', 'moderationAlertId',
+          'isDeleted', 'deletedAtMs', 'deletedBy', 'deletionReason',
           'status', 'createdAt', 'updatedAt'
         ])
+        && (!('dealCode' in data) || (data.dealCode is string && data.dealCode.size() >= 4 && data.dealCode.size() <= 32 && data.dealCode.matches('^[A-Za-z0-9_\\-]+$')))
         && data.listingId is string && data.listingId.size() <= 128
         && data.listingTitle is string && data.listingTitle.size() <= 120
         && data.platform is string && data.platform.size() <= 32
@@ -427,6 +433,8 @@ service cloud.firestore {
         && data.originalDeadlineMs is int && data.originalDeadlineMs >= 0
         && data.unresolvedReportCount is int && data.unresolvedReportCount >= 0
         && (!('paymentLedgerId' in data) || isValidId(data.paymentLedgerId))
+        && (!('paymentGateway' in data) || (data.paymentGateway is string && data.paymentGateway.size() <= 64))
+        && (!('externalTrxId' in data) || (data.externalTrxId is string && data.externalTrxId.size() <= 128))
         && (!('paidAtMs' in data) || (data.paidAtMs is int && data.paidAtMs >= 0))
         && (!('transferSubmissionCount' in data) || (data.transferSubmissionCount is int && data.transferSubmissionCount >= 0 && data.transferSubmissionCount <= 50))
         && (!('latestTransferSubmissionId' in data) || isValidId(data.latestTransferSubmissionId))
@@ -440,6 +448,10 @@ service cloud.firestore {
         && (!('moderationPaused' in data) || data.moderationPaused is bool)
         && (!('moderationPauseReason' in data) || (data.moderationPauseReason is string && data.moderationPauseReason.size() <= 500))
         && (!('moderationAlertId' in data) || (data.moderationAlertId is string && data.moderationAlertId.size() <= 128))
+        && (!('isDeleted' in data) || data.isDeleted is bool)
+        && (!('deletedAtMs' in data) || (data.deletedAtMs is int && data.deletedAtMs >= 0))
+        && (!('deletedBy' in data) || isValidId(data.deletedBy))
+        && (!('deletionReason' in data) || (data.deletionReason is string && data.deletionReason.size() <= 400))
         && data.status in [
           'accepted_pending_payment', 'awaiting_payment', 'payment_pending_verification',
           'paid_deal_room_active', 'paid', 'transfer_in_progress', 'transfer_submitted',
@@ -624,7 +636,7 @@ service cloud.firestore {
       return data.keys().hasAll(['userId', 'kind', 'amountMinor', 'currency', 'referenceId', 'note', 'createdAt'])
         && data.keys().hasOnly(['userId', 'kind', 'amountMinor', 'currency', 'referenceId', 'note', 'createdAt'])
         && data.userId is string && data.userId.size() <= 128
-        && data.kind in ['deposit_approved', 'escrow_debit', 'escrow_release', 'escrow_refund', 'withdrawal_reserved', 'withdrawal_paid', 'withdrawal_restored']
+        && data.kind in ['deposit_approved', 'wallet_topup', 'escrow_debit', 'escrow_release', 'escrow_refund', 'withdrawal_reserved', 'withdrawal_paid', 'withdrawal_restored']
         && data.amountMinor is int && data.amountMinor > 0
         && data.currency in ['BDT', 'USD']
         && data.referenceId is string && data.referenceId.size() <= 128
@@ -672,6 +684,8 @@ service cloud.firestore {
           'wordpressPaymentEnabled', 'wordpressSiteUrl', 'wordpressBridgeEndpoint',
           'siteName', 'brandTagline', 'logoUrl',
           'noticeBannerEnabled', 'noticeBannerText', 'enabledLanguages',
+          'usdtToBdtRate', 'gatewayPaymentMethods', 'withdrawalMethods', 'manualPaymentConfig',
+          'countryRates', 'activeCountryCode', 'livePaymentLinksEnabled', 'manualPaymentEnabled',
           'updatedAt'
         ])
         && data.buyerFeeEnabled is bool
@@ -702,6 +716,27 @@ service cloud.firestore {
         && (!('noticeBannerEnabled' in data) || data.noticeBannerEnabled is bool)
         && (!('noticeBannerText' in data) || (data.noticeBannerText is string && data.noticeBannerText.size() <= 280))
         && (!('enabledLanguages' in data) || (data.enabledLanguages is list && data.enabledLanguages.size() >= 1 && data.enabledLanguages.size() <= 5 && data.enabledLanguages.hasOnly(['en', 'bn', 'hi', 'ar', 'ur'])))
+        && (!('usdtToBdtRate' in data) || (data.usdtToBdtRate is number && data.usdtToBdtRate > 0 && data.usdtToBdtRate <= 500))
+        && (
+          !('gatewayPaymentMethods' in data)
+          || (
+            data.gatewayPaymentMethods is list
+            && data.gatewayPaymentMethods.size() >= 1
+            && data.gatewayPaymentMethods.size() <= 12
+            && data.gatewayPaymentMethods[0] is map
+            && data.gatewayPaymentMethods[0].id is string
+            && data.gatewayPaymentMethods[0].id.size() <= 64
+            && data.gatewayPaymentMethods[0].name is string
+            && data.gatewayPaymentMethods[0].name.size() <= 40
+            && data.gatewayPaymentMethods[0].enabled is bool
+          )
+        )
+        && (!('withdrawalMethods' in data) || (data.withdrawalMethods is list && data.withdrawalMethods.size() <= 20 && (data.withdrawalMethods.size() == 0 || data.withdrawalMethods[0] is map)))
+        && (!('manualPaymentConfig' in data) || (data.manualPaymentConfig is list && data.manualPaymentConfig.size() <= 20 && (data.manualPaymentConfig.size() == 0 || data.manualPaymentConfig[0] is map)))
+        && (!('countryRates' in data) || data.countryRates is map)
+        && (!('activeCountryCode' in data) || (data.activeCountryCode is string && data.activeCountryCode.size() <= 8))
+        && (!('livePaymentLinksEnabled' in data) || data.livePaymentLinksEnabled is bool)
+        && (!('manualPaymentEnabled' in data) || data.manualPaymentEnabled is bool)
         && data.updatedAt is timestamp;
     }
 
@@ -1216,6 +1251,153 @@ service cloud.firestore {
         && (!('showStatus' in data) || data.showStatus is bool);
     }
 
+    function isValidHexColor(c) {
+      return c is string && c.size() == 7 && c.matches('^#[0-9A-Fa-f]{6}$');
+    }
+
+    function isSafePopupDestination(dest) {
+      return dest is string && dest.size() <= 300 && (
+        dest == ''
+        || dest.matches('^/[a-zA-Z0-9_/\\-]*$')
+        || dest.matches('^https://[A-Za-z0-9.\\-/:_?=&%#@~+!,;()]+$')
+      );
+    }
+
+    function isValidPopupStyle(s) {
+      return s is map
+        && s.keys().hasAll([
+          'fontSizePx', 'fontWeight', 'textColor', 'backgroundColor', 'useGradient',
+          'gradientFrom', 'gradientTo', 'gradientDirection', 'textAlign', 'paddingPx',
+          'borderRadiusPx', 'popupWidthPx', 'popupHeightMode', 'popupHeightPx',
+          'borderColor', 'accentColor', 'buttonEnabled', 'buttonText',
+          'buttonBgColor', 'buttonTextColor', 'buttonDestination', 'closeButtonEnabled'
+        ])
+        && s.keys().hasOnly([
+          'fontSizePx', 'fontWeight', 'textColor', 'backgroundColor', 'useGradient',
+          'gradientFrom', 'gradientTo', 'gradientDirection', 'textAlign', 'paddingPx',
+          'borderRadiusPx', 'popupWidthPx', 'popupHeightMode', 'popupHeightPx',
+          'borderColor', 'accentColor', 'buttonEnabled', 'buttonText',
+          'buttonBgColor', 'buttonTextColor', 'buttonDestination', 'closeButtonEnabled'
+        ])
+        && s.fontSizePx is int && s.fontSizePx >= 12 && s.fontSizePx <= 24
+        && s.fontWeight in ['400', '500', '600', '700', '800']
+        && isValidHexColor(s.textColor)
+        && isValidHexColor(s.backgroundColor)
+        && s.useGradient is bool
+        && isValidHexColor(s.gradientFrom)
+        && isValidHexColor(s.gradientTo)
+        && s.gradientDirection in ['135deg', '90deg', '180deg']
+        && s.textAlign in ['left', 'center', 'right']
+        && s.paddingPx is int && s.paddingPx >= 12 && s.paddingPx <= 48
+        && s.borderRadiusPx is int && s.borderRadiusPx >= 0 && s.borderRadiusPx <= 36
+        && s.popupWidthPx is int && s.popupWidthPx >= 320 && s.popupWidthPx <= 760
+        && s.popupHeightMode in ['auto', 'custom']
+        && s.popupHeightPx is int && s.popupHeightPx >= 220 && s.popupHeightPx <= 680
+        && isValidHexColor(s.borderColor)
+        && isValidHexColor(s.accentColor)
+        && s.buttonEnabled is bool
+        && s.buttonText is string && s.buttonText.size() <= 48
+        && isValidHexColor(s.buttonBgColor)
+        && isValidHexColor(s.buttonTextColor)
+        && isSafePopupDestination(s.buttonDestination)
+        && s.closeButtonEnabled is bool;
+    }
+
+    function isValidPopupThemeId(themeId) {
+      return themeId in [
+        'modern_gradient', 'premium_gold', 'professional_business', 'minimal_white',
+        'dark_elegant', 'colorful_announcement', 'special_offer', 'warning_alert',
+        'success_notification', 'festive_celebration'
+      ];
+    }
+
+    function isValidPopupFrequency(freq) {
+      return freq in ['once_per_user', 'once_per_session', 'every_open', 'until_dismissed'];
+    }
+
+    function isValidPopupNotificationCampaign(data) {
+      return data.keys().hasAll([
+          'title', 'body', 'deliveryMode', 'targetUserIds', 'themeId', 'style',
+          'bannerImageUrl', 'frequency', 'storedStatus', 'startAtMs', 'expiresAtMs',
+          'viewCount', 'dismissCount', 'createdBy', 'createdAtMs', 'updatedAtMs',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'title', 'body', 'deliveryMode', 'targetUserIds', 'themeId', 'style',
+          'bannerImageUrl', 'frequency', 'storedStatus', 'startAtMs', 'expiresAtMs',
+          'viewCount', 'dismissCount', 'createdBy', 'createdAtMs', 'updatedAtMs',
+          'createdAt', 'updatedAt'
+        ])
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 140
+        && data.body is string && data.body.size() >= 1 && data.body.size() <= 2000
+        && data.deliveryMode in ['global', 'targeted']
+        && data.targetUserIds is list && data.targetUserIds.size() <= 200
+        && (data.deliveryMode == 'targeted' || data.targetUserIds.size() == 0)
+        && isValidPopupThemeId(data.themeId)
+        && isValidPopupStyle(data.style)
+        && isSafeImageOrHttpsOrEmpty(data.bannerImageUrl, 250000)
+        && isValidPopupFrequency(data.frequency)
+        && data.storedStatus in ['draft', 'active', 'paused']
+        && data.startAtMs is int && data.startAtMs >= 0
+        && data.expiresAtMs is int && data.expiresAtMs >= 0
+        && data.viewCount is int && data.viewCount >= 0
+        && data.dismissCount is int && data.dismissCount >= 0
+        && isValidId(data.createdBy)
+        && data.createdAtMs is int && data.createdAtMs >= 0
+        && data.updatedAtMs is int && data.updatedAtMs >= 0
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidPopupNotificationTarget(data, targetId) {
+      return data.keys().hasAll([
+          'campaignId', 'targetUid', 'title', 'body', 'themeId', 'style',
+          'bannerImageUrl', 'frequency', 'storedStatus', 'startAtMs', 'expiresAtMs',
+          'updatedAtMs', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'campaignId', 'targetUid', 'title', 'body', 'themeId', 'style',
+          'bannerImageUrl', 'frequency', 'storedStatus', 'startAtMs', 'expiresAtMs',
+          'updatedAtMs', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.campaignId)
+        && isValidId(data.targetUid)
+        && targetId == (data.campaignId + '_' + data.targetUid)
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 140
+        && data.body is string && data.body.size() >= 1 && data.body.size() <= 2000
+        && isValidPopupThemeId(data.themeId)
+        && isValidPopupStyle(data.style)
+        && isSafeImageOrHttpsOrEmpty(data.bannerImageUrl, 250000)
+        && isValidPopupFrequency(data.frequency)
+        && data.storedStatus in ['draft', 'active', 'paused']
+        && data.startAtMs is int && data.startAtMs >= 0
+        && data.expiresAtMs is int && data.expiresAtMs >= 0
+        && data.updatedAtMs is int && data.updatedAtMs >= 0
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidPopupNotificationReceipt(data, receiptId) {
+      return data.keys().hasAll([
+          'campaignId', 'uid', 'viewed', 'dismissed', 'viewedAtMs', 'dismissedAtMs',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'campaignId', 'uid', 'viewed', 'dismissed', 'viewedAtMs', 'dismissedAtMs',
+          'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.campaignId)
+        && isValidId(data.uid)
+        && receiptId == ('pnr_' + data.campaignId + '_' + data.uid)
+        && data.viewed is bool
+        && data.dismissed is bool
+        && data.viewedAtMs is int && data.viewedAtMs >= 0
+        && data.dismissedAtMs is int && data.dismissedAtMs >= 0
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+
     // 0. Health Connection Test Path (Read-only doc lookup)
     match /test/{docId} {
       allow get: if docId == 'connection';
@@ -1602,11 +1784,15 @@ service cloud.firestore {
                 && incoming().status == 'reserved'
                 && incoming().activeDealId is string
                 && isValidId(incoming().activeDealId)
+                && !('reservedUntilMs' in incoming())
+                && !('reservationExpiresAtMs' in incoming())
+                && !('reservationSessionId' in incoming())
                 && existsAfter(/databases/$(database)/documents/deals/$(incoming().activeDealId))
                 && getAfter(/databases/$(database)/documents/deals/$(incoming().activeDealId)).data.listingId == listingId
                 && incoming().updatedAt == request.time
                 && incoming().diff(existing()).affectedKeys().hasOnly([
-                  'status', 'activeDealId', 'acceptedBidAmountMinor', 'reservedBuyerId', 'updatedAt'
+                  'status', 'activeDealId', 'acceptedBidAmountMinor', 'reservedBuyerId',
+                  'reservedUntilMs', 'reservationExpiresAtMs', 'reservationSessionId', 'updatedAt'
                 ])
               )
               || (
@@ -1621,26 +1807,51 @@ service cloud.firestore {
                 && !('activeDealId' in incoming())
                 && !('acceptedBidAmountMinor' in incoming())
                 && !('reservedBuyerId' in incoming())
+                && !('reservedUntilMs' in incoming())
+                && !('reservationExpiresAtMs' in incoming())
+                && !('reservationSessionId' in incoming())
                 && !exists(/databases/$(database)/documents/walletLedger/$('led_pay_' + existing().activeDealId))
                 && getAfter(/databases/$(database)/documents/deals/$(existing().activeDealId)).data.status == 'cancelled'
                 && incoming().updatedAt == request.time
                 && incoming().diff(existing()).affectedKeys().hasOnly([
-                  'status', 'activeDealId', 'acceptedBidAmountMinor', 'reservedBuyerId', 'updatedAt'
+                  'status', 'activeDealId', 'acceptedBidAmountMinor', 'reservedBuyerId',
+                  'reservedUntilMs', 'reservationExpiresAtMs', 'reservationSessionId', 'updatedAt'
                 ])
               )
               || (
                 // Buyer completing atomic Buy Now or Reserved Deal Payment transitions listing -> sold
-                existing().status in ['active', 'reserved']
-                && (existing().status == 'active' || !('reservedBuyerId' in existing()) || existing().reservedBuyerId == request.auth.uid)
+                (
+                  existing().status == 'active'
+                  || (
+                    existing().status == 'reserved'
+                    && (
+                      ('reservedBuyerId' in existing() && existing().reservedBuyerId == request.auth.uid)
+                      || !('reservedBuyerId' in existing())
+                      || (
+                        !('activeDealId' in existing())
+                        && (
+                          ('reservationExpiresAtMs' in existing() && existing().reservationExpiresAtMs <= request.time.toMillis())
+                          || ('reservedUntilMs' in existing() && existing().reservedUntilMs <= request.time.toMillis())
+                        )
+                      )
+                    )
+                  )
+                )
                 && incoming().status == 'sold'
                 && incoming().activeDealId is string
-                && (existing().status == 'active' || incoming().activeDealId == existing().activeDealId)
+                && (existing().status == 'active' || !('activeDealId' in existing()) || incoming().activeDealId == existing().activeDealId)
+                && !('reservedBuyerId' in incoming())
+                && !('reservedUntilMs' in incoming())
+                && !('reservationExpiresAtMs' in incoming())
+                && !('reservationSessionId' in incoming())
                 && existsAfter(/databases/$(database)/documents/deals/$(incoming().activeDealId))
                 && getAfter(/databases/$(database)/documents/deals/$(incoming().activeDealId)).data.listingId == listingId
                 && getAfter(/databases/$(database)/documents/deals/$(incoming().activeDealId)).data.buyerId == request.auth.uid
                 && existsAfter(/databases/$(database)/documents/walletLedger/$('led_pay_' + incoming().activeDealId))
                 && incoming().updatedAt == request.time
-                && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'activeDealId', 'updatedAt'])
+                && incoming().diff(existing()).affectedKeys().hasOnly([
+                  'status', 'activeDealId', 'reservedBuyerId', 'reservedUntilMs', 'reservationExpiresAtMs', 'reservationSessionId', 'updatedAt'
+                ])
               )
             )
           )
@@ -1904,8 +2115,10 @@ service cloud.firestore {
       allow get: if isSignedIn() && isValidId(dealId) && (
         resource == null
         || isAdmin()
-        || existing().buyerId == request.auth.uid
-        || existing().sellerId == request.auth.uid
+        || (
+          (existing().buyerId == request.auth.uid || existing().sellerId == request.auth.uid)
+          && (!('isDeleted' in existing()) || existing().isDeleted != true)
+        )
       );
       allow list: if isSignedIn() && (
         resource.data.buyerId == request.auth.uid
@@ -1918,6 +2131,10 @@ service cloud.firestore {
         && incoming().buyerId != incoming().sellerId
         && incoming().confirmedAtMs == 0
         && incoming().originalDeadlineMs == 0
+        && (!('isDeleted' in incoming()) || incoming().isDeleted == false)
+        && !('deletedAtMs' in incoming())
+        && !('deletedBy' in incoming())
+        && !('deletionReason' in incoming())
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time
         && (
@@ -1945,7 +2162,27 @@ service cloud.firestore {
             && !hasActiveRestrictionFlag(request.auth.uid, 'restrictPurchasing')
             && incoming().status in ['paid_deal_room_active', 'awaiting_buyer_confirmation']
             && exists(/databases/$(database)/documents/listings/$(incoming().listingId))
-            && get(/databases/$(database)/documents/listings/$(incoming().listingId)).data.status == 'active'
+            && (
+              get(/databases/$(database)/documents/listings/$(incoming().listingId)).data.status == 'active'
+              || (
+                get(/databases/$(database)/documents/listings/$(incoming().listingId)).data.status == 'reserved'
+                && !('activeDealId' in get(/databases/$(database)/documents/listings/$(incoming().listingId)).data)
+                && (
+                  (
+                    'reservedBuyerId' in get(/databases/$(database)/documents/listings/$(incoming().listingId)).data
+                    && get(/databases/$(database)/documents/listings/$(incoming().listingId)).data.reservedBuyerId == request.auth.uid
+                  )
+                  || (
+                    'reservationExpiresAtMs' in get(/databases/$(database)/documents/listings/$(incoming().listingId)).data
+                    && get(/databases/$(database)/documents/listings/$(incoming().listingId)).data.reservationExpiresAtMs <= request.time.toMillis()
+                  )
+                  || (
+                    'reservedUntilMs' in get(/databases/$(database)/documents/listings/$(incoming().listingId)).data
+                    && get(/databases/$(database)/documents/listings/$(incoming().listingId)).data.reservedUntilMs <= request.time.toMillis()
+                  )
+                )
+              )
+            )
             && get(/databases/$(database)/documents/listings/$(incoming().listingId)).data.sellerId == incoming().sellerId
             && incoming().baseAmountMinor == get(/databases/$(database)/documents/listings/$(incoming().listingId)).data.priceMinor
             && incoming().currency == get(/databases/$(database)/documents/listings/$(incoming().listingId)).data.currency
@@ -1963,6 +2200,9 @@ service cloud.firestore {
       allow update: if isSignedIn()
         && isValidId(dealId)
         && isValidDeal(incoming())
+        && (isAdmin() || (!('isDeleted' in existing()) || existing().isDeleted != true))
+        && (isAdmin() || !('isDeleted' in incoming()) || incoming().isDeleted == false)
+        && (isAdmin() || (!('dealCode' in incoming()) && !('dealCode' in existing())) || ('dealCode' in incoming() && 'dealCode' in existing() && incoming().dealCode == existing().dealCode))
         // Fee snapshot & identities are strictly immutable after creation
         && incoming().listingId == existing().listingId
         && incoming().buyerId == existing().buyerId
@@ -2104,7 +2344,8 @@ service cloud.firestore {
       match /messages/{msgId} {
         function isDealParticipant() {
           let d = get(/databases/$(database)/documents/deals/$(dealId)).data;
-          return request.auth.uid == d.buyerId || request.auth.uid == d.sellerId || isAdmin();
+          let deleted = ('isDeleted' in d) && d.isDeleted == true;
+          return isAdmin() || (!deleted && (request.auth.uid == d.buyerId || request.auth.uid == d.sellerId));
         }
         allow get: if isSignedIn() && isValidId(dealId) && isValidId(msgId) && isDealParticipant();
         allow list: if isSignedIn() && isValidId(dealId) && isDealParticipant();
@@ -2142,7 +2383,8 @@ service cloud.firestore {
         }
         function isTransferDealViewer() {
           let d = getParentDeal();
-          return request.auth.uid == d.buyerId || request.auth.uid == d.sellerId || isAdmin();
+          let deleted = ('isDeleted' in d) && d.isDeleted == true;
+          return isAdmin() || (!deleted && (request.auth.uid == d.buyerId || request.auth.uid == d.sellerId));
         }
         allow get: if isSignedIn() && isValidId(dealId) && isValidId(submissionId) && isTransferDealViewer();
         allow list: if isSignedIn() && isValidId(dealId) && isTransferDealViewer();
@@ -2154,7 +2396,8 @@ service cloud.firestore {
           && incoming().status == 'submitted'
           && incoming().createdAt == request.time
           && incoming().updatedAt == request.time
-          && getParentDeal().sellerId == request.auth.uid;
+          && getParentDeal().sellerId == request.auth.uid
+          && (!('isDeleted' in getParentDeal()) || getParentDeal().isDeleted != true);
         allow update: if isSignedIn()
           && isValidId(dealId)
           && isValidId(submissionId)
@@ -2175,6 +2418,7 @@ service cloud.firestore {
               && incoming().status in ['approved', 'rejected']
               && incoming().buyerDecisionBy == request.auth.uid
               && getParentDeal().buyerId == request.auth.uid
+              && (!('isDeleted' in getParentDeal()) || getParentDeal().isDeleted != true)
               && incoming().diff(existing()).affectedKeys().hasOnly([
                 'status', 'buyerDecisionBy', 'buyerDecisionReason', 'decidedAtMs', 'updatedAt'
               ])
@@ -2186,7 +2430,8 @@ service cloud.firestore {
       match /reports/{reportId} {
         function isDealMember() {
           let d = get(/databases/$(database)/documents/deals/$(dealId)).data;
-          return request.auth.uid == d.buyerId || request.auth.uid == d.sellerId || isAdmin();
+          let deleted = ('isDeleted' in d) && d.isDeleted == true;
+          return isAdmin() || (!deleted && (request.auth.uid == d.buyerId || request.auth.uid == d.sellerId));
         }
         allow get: if isSignedIn() && isValidId(dealId) && isValidId(reportId) && isDealMember();
         allow list: if isSignedIn() && isValidId(dealId) && isDealMember();
@@ -2220,7 +2465,8 @@ service cloud.firestore {
       match /events/{eventId} {
         function isEventDealParticipant() {
           let d = get(/databases/$(database)/documents/deals/$(dealId)).data;
-          return request.auth.uid == d.buyerId || request.auth.uid == d.sellerId || isAdmin();
+          let deleted = ('isDeleted' in d) && d.isDeleted == true;
+          return isAdmin() || (!deleted && (request.auth.uid == d.buyerId || request.auth.uid == d.sellerId));
         }
         allow get: if isSignedIn() && isValidId(dealId) && isValidId(eventId) && isEventDealParticipant();
         allow list: if isSignedIn() && isValidId(dealId) && isEventDealParticipant();
@@ -2397,6 +2643,8 @@ service cloud.firestore {
           'wordpressPaymentEnabled', 'wordpressSiteUrl', 'wordpressBridgeEndpoint',
           'siteName', 'brandTagline', 'logoUrl',
           'noticeBannerEnabled', 'noticeBannerText', 'enabledLanguages',
+          'usdtToBdtRate', 'gatewayPaymentMethods', 'withdrawalMethods', 'manualPaymentConfig',
+          'countryRates', 'activeCountryCode', 'livePaymentLinksEnabled', 'manualPaymentEnabled',
           'updatedAt'
         ]);
       allow delete: if false;
@@ -2966,6 +3214,107 @@ service cloud.firestore {
         allow get, list: if isSignedIn() && isValidId(userId) && (request.auth.uid == userId || isAdmin());
         allow create, update, delete: if isSignedIn() && isValidId(userId) && (request.auth.uid == userId || isAdmin());
       }
+    }
+
+    // 35. Server-Managed Gateway Checkout & Wallet Top-Up Sessions
+    match /paymentSessions/{sessionId} {
+      allow get: if isSignedIn() && isValidId(sessionId) && (
+        isAdmin() || (resource != null && existing().buyerUid == request.auth.uid)
+      );
+      allow list: if isSignedIn() && (
+        resource.data.buyerUid == request.auth.uid
+        || isAdmin()
+      );
+      allow create, update, delete: if false;
+    }
+
+    // 36. Admin-Only Late Gateway Callback Reconciliation Records
+    match /paymentReconciliations/{sessionId} {
+      allow get: if isAdmin() && isValidId(sessionId);
+      allow list: if isAdmin() && resource.data.sessionId is string;
+      allow create, update, delete: if false;
+    }
+
+    // 37. Admin-Managed Website Popup Notifications (Global campaigns readable when active; Targeted strictly admin-only here)
+    match /popupNotifications/{campaignId} {
+      allow get: if isValidId(campaignId) && (
+        isAdmin()
+        || (resource != null && existing().deliveryMode == 'global' && existing().storedStatus == 'active')
+      );
+      allow list: if isAdmin() || (
+        resource.data.deliveryMode == 'global'
+        && resource.data.storedStatus == 'active'
+      );
+      allow create: if isAdmin()
+        && isValidId(campaignId)
+        && isValidPopupNotificationCampaign(incoming())
+        && incoming().createdBy == request.auth.uid
+        && incoming().viewCount == 0
+        && incoming().dismissCount == 0
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isAdmin()
+        && isValidId(campaignId)
+        && isValidPopupNotificationCampaign(incoming())
+        && incoming().createdBy == existing().createdBy
+        && incoming().createdAt == existing().createdAt
+        && incoming().createdAtMs == existing().createdAtMs
+        && incoming().updatedAt == request.time;
+      allow delete: if isAdmin() && isValidId(campaignId);
+    }
+
+    // 38. Strictly Single-Recipient Targeted Popup Notification Delivery Records
+    match /popupNotificationTargets/{targetId} {
+      allow get: if isValidId(targetId) && (
+        isAdmin()
+        || (isSignedIn() && resource != null && existing().targetUid == request.auth.uid && existing().storedStatus == 'active')
+      );
+      allow list: if isAdmin() || (
+        isSignedIn()
+        && resource.data.targetUid == request.auth.uid
+        && resource.data.storedStatus == 'active'
+      );
+      allow create: if isAdmin()
+        && isValidId(targetId)
+        && isValidPopupNotificationTarget(incoming(), targetId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isAdmin()
+        && isValidId(targetId)
+        && isValidPopupNotificationTarget(incoming(), targetId)
+        && incoming().campaignId == existing().campaignId
+        && incoming().targetUid == existing().targetUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+      allow delete: if isAdmin() && isValidId(targetId);
+    }
+
+    // 39. Per-User Cross-Device Popup Notification View & Dismissal Receipts
+    match /popupNotificationReceipts/{receiptId} {
+      allow get: if isSignedIn() && isValidId(receiptId) && (
+        isAdmin()
+        || (resource == null && receiptId.matches('^pnr_[a-zA-Z0-9_\\-]+_' + request.auth.uid + '$'))
+        || (resource != null && existing().uid == request.auth.uid)
+      );
+      allow list: if isSignedIn() && (
+        isAdmin()
+        || resource.data.uid == request.auth.uid
+      );
+      allow create: if isSignedIn()
+        && isValidId(receiptId)
+        && isValidPopupNotificationReceipt(incoming(), receiptId)
+        && incoming().uid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isSignedIn()
+        && isValidId(receiptId)
+        && isValidPopupNotificationReceipt(incoming(), receiptId)
+        && existing().uid == request.auth.uid
+        && incoming().uid == existing().uid
+        && incoming().campaignId == existing().campaignId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+      allow delete: if isAdmin() && isValidId(receiptId);
     }
   }
 }

@@ -303,3 +303,63 @@ test('Firestore Rules: supports others category across all platform allowlists a
   assert.match(rules, /getAfter\(\/databases\/\$\(database\)\/documents\/adminInvitations\/\$\('inv_'\s*\+\s*userId\)\)\.data\.status\s*==\s*'accepted'/);
 });
 
+test('Firestore Rules: enforces 15-min listing reservation metadata, non-admin deal soft-delete protection, wallet_topup ledger kind, gatewayPaymentMethods, and server-only payment sessions/reconciliations', () => {
+  // 1. Listing reservation expiry metadata & cleanup on sold
+  assert.match(rules, /'reservedUntilMs',\s*'reservationExpiresAtMs',\s*'reservationSessionId'/);
+  assert.match(rules, /!\('reservedUntilMs'\s+in\s+incoming\(\)\)\s*&&\s*!\('reservationExpiresAtMs'\s+in\s+incoming\(\)\)\s*&&\s*!\('reservationSessionId'\s+in\s+incoming\(\)\)/);
+
+  // 2. Deals block non-admin isDeleted/deletedAtMs/deletedBy/deletionReason forging and protect subcollections when deleted
+  assert.match(rules, /\(!\('isDeleted'\s+in\s+incoming\(\)\)\s*\|\|\s*incoming\(\)\.isDeleted\s*==\s*false\)/);
+  assert.match(rules, /!\('deletedAtMs'\s+in\s+incoming\(\)\)\s*&&\s*!\('deletedBy'\s+in\s+incoming\(\)\)\s*&&\s*!\('deletionReason'\s+in\s+incoming\(\)\)/);
+  assert.match(rules, /\(isAdmin\(\)\s*\|\|\s*\(!\('isDeleted'\s+in\s+existing\(\)\)\s*\|\|\s*existing\(\)\.isDeleted\s*!=\s*true\)\)/);
+  assert.match(rules, /let\s+deleted\s*=\s*\('isDeleted'\s+in\s+d\)\s*&&\s*d\.isDeleted\s*==\s*true;/);
+
+  // 3. wallet_topup allowed in walletLedger validation (server Admin SDK writes only; client rule restricts to escrow_debit/withdrawal_reserved/isAdmin)
+  assert.match(rules, /'wallet_topup'/);
+  const walletLedgerBlock = rules.slice(rules.indexOf('match /walletLedger/{entryId}'), rules.indexOf('match /reviews/{reviewId}'));
+  assert.doesNotMatch(walletLedgerBlock, /incoming\(\)\.kind\s*==\s*'wallet_topup'/);
+
+  // 4. publicConfig gatewayPaymentMethods bounded list with admin-only writes
+  assert.match(rules, /'gatewayPaymentMethods'/);
+  assert.match(rules, /data\.gatewayPaymentMethods\.size\(\)\s*>=\s*1\s*&&\s*data\.gatewayPaymentMethods\.size\(\)\s*<=\s*12/);
+
+  // 5. paymentSessions & paymentReconciliations strictly forbid client writes and lock reconciliations to admins
+  assert.match(rules, /match\s+\/paymentSessions\/\{sessionId\}[\s\S]*?allow\s+create,\s*update,\s*delete:\s*if\s+false;/);
+  assert.match(rules, /match\s+\/paymentReconciliations\/\{sessionId\}[\s\S]*?allow\s+get:\s*if\s+isAdmin\(\)/);
+  assert.match(rules, /match\s+\/paymentReconciliations\/\{sessionId\}[\s\S]*?allow\s+create,\s*update,\s*delete:\s*if\s+false;/);
+});
+
+test('Firestore Rules: enforces Admin-only popup campaign management, active-global-only public reads, and strict single-recipient targeted isolation', () => {
+  assert.match(rules, /function\s+isValidPopupStyle\(s\)/);
+  assert.match(rules, /function\s+isValidPopupNotificationCampaign\(data\)/);
+  assert.match(rules, /function\s+isValidPopupNotificationTarget\(data,\s*targetId\)/);
+  assert.match(rules, /function\s+isValidPopupNotificationReceipt\(data,\s*receiptId\)/);
+
+  // Targeted campaigns cannot be read via popupNotifications list/get by non-admins; only global + active is readable publicly
+  assert.match(
+    rules,
+    /match\s+\/popupNotifications\/\{campaignId\}[\s\S]*?allow\s+list:\s*if\s+isAdmin\(\)\s*\|\|\s*\(\s*resource\.data\.deliveryMode\s*==\s*'global'\s*&&\s*resource\.data\.storedStatus\s*==\s*'active'/
+  );
+  assert.match(
+    rules,
+    /match\s+\/popupNotifications\/\{campaignId\}[\s\S]*?allow\s+create:\s*if\s+isAdmin\(\)/
+  );
+
+  // Targeted deliveries are isolated strictly by targetUid == request.auth.uid
+  assert.match(
+    rules,
+    /match\s+\/popupNotificationTargets\/\{targetId\}[\s\S]*?resource\.data\.targetUid\s*==\s*request\.auth\.uid/
+  );
+  assert.match(
+    rules,
+    /match\s+\/popupNotificationTargets\/\{targetId\}[\s\S]*?allow\s+create:\s*if\s+isAdmin\(\)/
+  );
+
+  // Receipts strictly owner-scoped with deterministic ID pnr_{campaignId}_{uid}
+  assert.match(
+    rules,
+    /match\s+\/popupNotificationReceipts\/\{receiptId\}[\s\S]*?resource\.data\.uid\s*==\s*request\.auth\.uid/
+  );
+  assert.match(rules, /receiptId\s*==\s*\('pnr_'\s*\+\s*data\.campaignId\s*\+\s*'_'\s*\+\s*data\.uid\)/);
+});
+

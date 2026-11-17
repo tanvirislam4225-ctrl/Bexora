@@ -79,6 +79,7 @@ import { SellerAssetTransferBox } from './SellerAssetTransferBox';
 import { UserPresenceBadge } from './UserPresenceBadge';
 import { ActiveStatus } from './ActiveStatus';
 import { UserProfileLink } from './UserProfileLink';
+import { resolveDisplayDealCode } from '../lib/walletTopupAndReservationLogic';
 
 const ProtectionCountdown: React.FC<{
   originalDeadlineMs: number;
@@ -200,17 +201,21 @@ export const DealsView: React.FC<DealsViewProps> = ({
   const [errMsg, setErrMsg] = useState('');
   const autoReleaseAttemptedRef = useRef<Set<string>>(new Set());
 
+  const visibleDeals = useMemo(() => deals.filter((d) => !d.isDeleted), [deals]);
+
   useEffect(() => {
-    if (initialDealId) {
+    if (initialDealId && visibleDeals.some((d) => d.id === initialDealId)) {
       setSelectedDealId(initialDealId);
-    } else if (!selectedDealId && deals.length > 0) {
-      setSelectedDealId(deals[0].id);
+    } else if ((!selectedDealId || !visibleDeals.some((d) => d.id === selectedDealId)) && visibleDeals.length > 0) {
+      setSelectedDealId(visibleDeals[0].id);
     }
-  }, [initialDealId, deals.length, selectedDealId]);
+  }, [initialDealId, visibleDeals, selectedDealId]);
 
   const activeDeal = useMemo(
-    () => deals.find((d) => d.id === selectedDealId) || (deals.length > 0 ? deals[0] : null),
-    [deals, selectedDealId]
+    () =>
+      visibleDeals.find((d) => d.id === selectedDealId) ||
+      (visibleDeals.length > 0 ? visibleDeals[0] : null),
+    [visibleDeals, selectedDealId]
   );
 
   useEffect(() => {
@@ -1210,10 +1215,10 @@ export const DealsView: React.FC<DealsViewProps> = ({
         <p className="text-xs font-extrabold uppercase tracking-wider" style={{ color: 'var(--orange)' }}>
           Protected 3-Party Escrow
         </p>
-        <h1 className="text-2xl font-extrabold">Private Deal Rooms ({deals.length})</h1>
+        <h1 className="text-2xl font-extrabold">Private Deal Rooms ({visibleDeals.length})</h1>
       </div>
 
-      {deals.length === 0 ? (
+      {visibleDeals.length === 0 ? (
         <div className="bx-card p-10 text-center space-y-2">
           <Clock className="w-10 h-10 mx-auto" style={{ color: 'var(--text-3)' }} />
           <h2 className="text-lg font-extrabold">No deals yet</h2>
@@ -1225,7 +1230,7 @@ export const DealsView: React.FC<DealsViewProps> = ({
         <div className="grid grid-cols-1 lg:grid-cols-[320px_1fr] gap-5 items-start">
           {/* Deal Selector Sidebar */}
           <aside className="bx-card p-3 space-y-2">
-            {deals.map((d) => {
+            {visibleDeals.map((d) => {
               const selected = d.id === activeDeal?.id;
               return (
                 <button
@@ -1243,6 +1248,9 @@ export const DealsView: React.FC<DealsViewProps> = ({
                     border: selected ? '1.5px solid var(--border-strong)' : '1.5px solid transparent',
                   }}
                 >
+                  <div className="flex items-center justify-between gap-2 text-[11px] font-mono font-black" style={{ color: 'var(--orange)' }}>
+                    <span>{resolveDisplayDealCode(d)}</span>
+                  </div>
                   <div className="font-extrabold text-sm truncate">{d.listingTitle}</div>
                   <div className="flex items-center justify-between text-xs tabular-nums gap-2">
                     <span className="font-bold shrink-0">
@@ -1264,6 +1272,10 @@ export const DealsView: React.FC<DealsViewProps> = ({
               <div className="flex flex-wrap items-start justify-between gap-3 pb-4 border-b" style={{ borderColor: 'var(--border-soft)' }}>
                 <div className="space-y-1 min-w-0">
                   <div className="flex flex-wrap items-center gap-2 text-xs font-semibold" style={{ color: 'var(--text-2)' }}>
+                    <span className="px-2 py-0.5 rounded font-mono font-black bg-[#FF6500]/15 text-[#FF6500] border border-[#FF6500]/30">
+                      {resolveDisplayDealCode(activeDeal)}
+                    </span>
+                    <span aria-hidden="true">·</span>
                     <span className="font-mono">Ref #{activeDeal.id}</span>
                     <span aria-hidden="true">·</span>
                     <span>{PLATFORM_CATALOG[activeDeal.platform]?.name || activeDeal.platform}</span>

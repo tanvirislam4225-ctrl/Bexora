@@ -1,6 +1,15 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { addDoc, collection, doc, runTransaction, serverTimestamp } from 'firebase/firestore';
-import { ArrowDownLeft, ArrowLeft, ArrowUpRight, Check, CheckCircle2, Clock, Copy, ShieldCheck, Upload, Wallet } from 'lucide-react';
+import { collection, doc, runTransaction, serverTimestamp } from 'firebase/firestore';
+import {
+  ArrowLeft,
+  ArrowUpRight,
+  CheckCircle2,
+  Clock,
+  CreditCard,
+  Loader2,
+  ShieldCheck,
+  Wallet,
+} from 'lucide-react';
 import {
   CurrencyCode,
   DealRecord,
@@ -12,14 +21,20 @@ import {
 } from '../types';
 import {
   DEFAULT_WITHDRAWAL_METHODS,
-  DEFAULT_MANUAL_PAYMENT_METHODS,
   WithdrawalMethodSetting,
-  ManualPaymentMethodSetting,
 } from '../lib/countryCurrencyCatalog';
-import { db, validateAndProcessImageFile } from '../lib/firebase';
+import { db, fetchWithFreshBearerToken } from '../lib/firebase';
+import { buildApiUrl } from '../lib/apiClient';
 import { formatMoneyFromMinor } from '../lib/marketplaceLogic';
 import { summarizeUserPendingSellerDeals } from '../lib/adminFinanceLogic';
 import { emitUserNotification } from '../lib/notificationService';
+import {
+  MAX_WALLET_TOPUP_BDT,
+  MIN_WALLET_TOPUP_BDT,
+  normalizeGatewayPaymentMethods,
+  sanitizeCustomerGatewayError,
+  validateWalletTopupAmountBdt,
+} from '../lib/walletTopupAndReservationLogic';
 import type { UserRestrictionRecord } from '../types/moderation';
 
 interface WalletModalProps {
@@ -38,7 +53,13 @@ interface WalletModalProps {
   moderationRestriction?: UserRestrictionRecord | null;
   onOpenSafetyAppeals?: () => void;
   initialMode?: 'deposit' | 'withdraw' | 'history';
+  pendingTopupSessionId?: string | null;
+  pendingTopupStatus?: string | null;
+  pendingTopupTransactionId?: string | null;
+  onClearTopupReturn?: () => void;
 }
+
+const TOPUP_PRESETS_BDT = [500, 1000, 2500, 5000, 10000] as const;
 
 export const WalletModal: React.FC<WalletModalProps> = ({
   onClose,
@@ -56,6 +77,10 @@ export const WalletModal: React.FC<WalletModalProps> = ({
   moderationRestriction = null,
   onOpenSafetyAppeals,
   initialMode = 'deposit',
+  pendingTopupSessionId = null,
+  pendingTopupStatus = null,
+  pendingTopupTransactionId = null,
+  onClearTopupReturn,
 }) => {
   const [mode, setMode] = useState<'deposit' | 'withdraw' | 'history'>(initialMode);
 
@@ -67,25 +92,12 @@ export const WalletModal: React.FC<WalletModalProps> = ({
   useEffect(() => {
     setMode(initialMode);
   }, [initialMode]);
-  // Active manual payment methods from settings or defaults
-  const activeManualMethods: ManualPaymentMethodSetting[] = useMemo(() => {
-    const list =
-      settings.manualPaymentConfig && settings.manualPaymentConfig.length > 0
-        ? settings.manualPaymentConfig
-        : DEFAULT_MANUAL_PAYMENT_METHODS;
-    return list.filter((m) => m.enabled && m.receivingNumber && m.receivingNumber.trim().length > 0);
-  }, [settings.manualPaymentConfig]);
 
-  const [selectedManualId, setSelectedManualId] = useState<string>('bkash');
-
-  useEffect(() => {
-    if (activeManualMethods.length > 0 && !activeManualMethods.some((m) => m.id === selectedManualId)) {
-      setSelectedManualId(activeManualMethods[0].id);
-    }
-  }, [activeManualMethods, selectedManualId]);
-
-  const currentManualMethod =
-    activeManualMethods.find((m) => m.id === selectedManualId) || activeManualMethods[0];
+  const activeGatewayLabels = useMemo(
+    () =>
+      normalizeGatewayPaymentMethods(settings.gatewayPaymentMethods).filter((m) => m.enabled),
+    [settings.gatewayPaymentMethods]
+  );
 
   // Enabled withdrawal methods from settings or defaults
   const enabledWithdrawalMethods: WithdrawalMethodSetting[] = useMemo(() => {
@@ -107,11 +119,12 @@ export const WalletModal: React.FC<WalletModalProps> = ({
   const currentWithdrawMethod =
     enabledWithdrawalMethods.find((m) => m.id === selectedWithdrawId) || enabledWithdrawalMethods[0];
 
-  // Deposit inputs
-  const [amountInput, setAmountInput] = useState('');
-  const [senderNumber, setSenderNumber] = useState('');
-  const [transactionId, setTransactionId] = useState('');
-  const [screenshotData, setScreenshotData] = useState('');
+  // Live Gateway Add Balance state
+  const [topupAmountInput, setTopupAmountInput] = useState('');
+  const [topupVerifyState, setTopupVerifyState] = useState<{
+    status: 'idle' | 'verifying' | 'success' | 'cancelled' | 'error';
+    message: string;
+  }>({ status: 'idle', message: '' });
 
   // Withdrawal inputs
   const [payoutAccount, setPayoutAccount] = useState('');
@@ -119,101 +132,148 @@ export const WalletModal: React.FC<WalletModalProps> = ({
 
   const [busy, setBusy] = useState(false);
   const submitLockRef = useRef(false);
+  const verifiedTopupSessionRef = useRef<string | null>(null);
   const [error, setError] = useState('');
-  const fileRef = useRef<HTMLInputElement | null>(null);
 
-  const handleScreenshot = async (files: FileList | null) => {
-    if (!files || !files[0]) return;
-    setError('');
-    try {
-      const compressed = await validateAndProcessImageFile(files[0], 800, 0.72);
-      setScreenshotData(compressed);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Invalid screenshot.');
-    } finally {
-      if (fileRef.current) fileRef.current.value = '';
+  useEffect(() => {
+    if (!pendingTopupSessionId) return;
+    const dedupKey = `${pendingTopupSessionId}:${pendingTopupStatus || ''}:${pendingTopupTransactionId || ''}`;
+    if (verifiedTopupSessionRef.current === dedupKey) return;
+    verifiedTopupSessionRef.current = dedupKey;
+
+    if (pendingTopupStatus === 'cancelled') {
+      setMode('deposit');
+      setTopupVerifyState({
+        status: 'cancelled',
+        message: 'Wallet top-up was cancelled before payment completion. Your balance was not changed.',
+      });
+      onClearTopupReturn?.();
+      return;
     }
-  };
 
-  const handleSubmitDeposit = async (e: React.FormEvent) => {
+    let cancelled = false;
+    setMode('deposit');
+    setTopupVerifyState({
+      status: 'verifying',
+      message: 'Verifying your wallet top-up payment with the gateway…',
+    });
+
+    void (async () => {
+      try {
+        const res = await fetchWithFreshBearerToken(
+          buildApiUrl('/api/payments/wallet/verify-session'),
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              sessionId: pendingTopupSessionId,
+              transactionId: pendingTopupTransactionId || undefined,
+              paymentStatus: pendingTopupStatus || undefined,
+            }),
+          }
+        );
+        const data = (await res.json().catch(() => null)) as {
+          ok?: boolean;
+          isPaid?: boolean;
+          credited?: boolean;
+          amountBdt?: number;
+          message?: string;
+        } | null;
+
+        if (cancelled) return;
+
+        if (res.ok && data?.ok && data?.isPaid) {
+          const msg =
+            data.message ||
+            `৳${Number(data.amountBdt || 0).toLocaleString()} added to your BEXORA Wallet.`;
+          setTopupVerifyState({ status: 'success', message: msg });
+          onFlash(msg);
+        } else {
+          setTopupVerifyState({
+            status: 'error',
+            message: sanitizeCustomerGatewayError(
+              data?.message || 'Your top-up payment could not be confirmed yet.'
+            ),
+          });
+        }
+      } catch (err) {
+        if (cancelled) return;
+        setTopupVerifyState({
+          status: 'error',
+          message: sanitizeCustomerGatewayError(
+            err instanceof Error ? err.message : 'Unable to verify top-up payment right now.'
+          ),
+        });
+      } finally {
+        if (!cancelled) {
+          onClearTopupReturn?.();
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    pendingTopupSessionId,
+    pendingTopupStatus,
+    pendingTopupTransactionId,
+    onClearTopupReturn,
+    onFlash,
+  ]);
+
+  const handleStartLiveTopup = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (submitLockRef.current) return;
+    if (submitLockRef.current || busy) return;
     setError('');
-    if (!currentManualMethod || !currentManualMethod.receivingNumber) {
-      setError('Please select an active payment method configured by an administrator.');
-      return;
-    }
+    setTopupVerifyState({ status: 'idle', message: '' });
 
-    const amt = Number(amountInput);
-    const minAmt = currentManualMethod.minDeposit ?? 10;
-    const isCrypto = currentManualMethod.id === 'binance' || currentManualMethod.type === 'binance';
-    const sym = isCrypto ? 'USDT ' : '৳';
-    if (!Number.isFinite(amt) || amt < minAmt) {
-      setError(`Minimum manual deposit amount for ${currentManualMethod.name} is ${sym}${minAmt}.`);
-      return;
-    }
-    if (senderNumber.trim().length < 4) {
-      setError('Enter the sender account/phone or wallet address used to send the payment.');
-      return;
-    }
-    if (transactionId.trim().length < 4) {
-      setError('Enter the valid Transaction ID (TrxID) / Order ID from your payment receipt.');
+    const validation = validateWalletTopupAmountBdt(topupAmountInput);
+    if (!validation.valid) {
+      setError(validation.error || 'Enter a valid BDT top-up amount.');
       return;
     }
 
     submitLockRef.current = true;
     setBusy(true);
     try {
-      const effectiveRate = settings.usdtToBdtRate || settings.usdToBdtRate || 125;
-      const amountMinor = isCrypto ? Math.round(amt * effectiveRate * 100) : Math.round(amt * 100);
+      const res = await fetchWithFreshBearerToken(
+        buildApiUrl('/api/payments/wallet/create-session'),
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            amountBdt: validation.amountBdt,
+          }),
+        }
+      );
 
-      const payload: Record<string, unknown> = {
-        userId: userUid,
-        userName: profile.displayName,
-        method: currentManualMethod.id,
-        methodName: currentManualMethod.name,
-        amountMinor,
-        originalAmount: amt,
-        currency: isCrypto ? 'USDT' : 'BDT',
-        senderNumber: senderNumber.trim(),
-        transactionId: transactionId.trim(),
-        status: 'pending',
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      };
-      if (screenshotData) payload.screenshotData = screenshotData;
+      const data = (await res.json().catch(() => null)) as {
+        ok?: boolean;
+        paymentUrl?: string;
+        message?: string;
+        error?: string;
+      } | null;
 
-      const depDoc = await addDoc(collection(db, 'deposits'), payload);
-      const depFmt = isCrypto
-        ? `${amt} USDT (≈ ৳${Math.round(amt * effectiveRate)})`
-        : formatMoneyFromMinor(amountMinor, 'BDT', 'BDT');
+      if (!res.ok || !data?.ok || !data?.paymentUrl) {
+        setError(sanitizeCustomerGatewayError(data?.message || data?.error));
+        return;
+      }
 
-      await emitUserNotification({
-        recipientId: userUid,
-        eventKey: `deposit_submitted_${depDoc.id}`,
-        category: 'wallet',
-        severity: 'info',
-        title: `Deposit Request Submitted (${depFmt})`,
-        preview: `${currentManualMethod.name} TrxID ${transactionId.trim()} is pending admin verification.`,
-        body: `Your manual ${currentManualMethod.name} deposit request for ${depFmt} (TrxID: ${transactionId.trim()}) has been submitted with Pending status. Your wallet balance will update automatically once an administrator verifies the payment.`,
-        refType: 'wallet',
-        refId: depDoc.id,
-        referenceLabel: `${currentManualMethod.name} · ${depFmt}`,
-        destination: 'wallet',
-      });
-      setAmountInput('');
-      setSenderNumber('');
-      setTransactionId('');
-      setScreenshotData('');
-      onFlash('Deposit request submitted with PENDING status. Balance updates only after admin verification.');
-      setMode('history');
+      window.location.assign(data.paymentUrl);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not submit deposit request.');
+      setError(
+        sanitizeCustomerGatewayError(
+          err instanceof Error ? err.message : 'Unable to connect to live payment gateway.'
+        )
+      );
     } finally {
       submitLockRef.current = false;
       setBusy(false);
     }
   };
+
+
   const handleSubmitWithdrawal = async (e: React.FormEvent) => {
     e.preventDefault();
     if (submitLockRef.current) return;
@@ -488,223 +548,157 @@ export const WalletModal: React.FC<WalletModalProps> = ({
 
         {mode === 'deposit' && (
           <div className="space-y-4">
-            {activeManualMethods.length === 0 ? (
+            {topupVerifyState.status !== 'idle' && (
               <div
-                className="p-5 rounded-2xl border text-center space-y-2"
-                style={{ background: 'var(--surface-subtle)', borderColor: 'var(--border-soft)' }}
+                role={topupVerifyState.status === 'error' ? 'alert' : 'status'}
+                className="p-3.5 rounded-xl border text-xs font-bold flex items-start gap-2.5"
+                style={{
+                  background:
+                    topupVerifyState.status === 'success'
+                      ? 'var(--green-soft)'
+                      : topupVerifyState.status === 'error'
+                        ? 'var(--red-soft)'
+                        : 'var(--yellow-soft)',
+                  borderColor:
+                    topupVerifyState.status === 'success'
+                      ? 'var(--green)'
+                      : topupVerifyState.status === 'error'
+                        ? 'var(--red)'
+                        : 'var(--orange)',
+                  color:
+                    topupVerifyState.status === 'success'
+                      ? 'var(--green)'
+                      : topupVerifyState.status === 'error'
+                        ? 'var(--red)'
+                        : 'var(--text)',
+                }}
               >
-                <Wallet className="w-8 h-8 mx-auto opacity-40" />
-                <h3 className="text-sm font-bold">Manual Deposits Updating</h3>
-                <p className="text-xs" style={{ color: 'var(--text-2)' }}>
-                  Manual deposit methods are currently being configured by an administrator. Please check back shortly.
-                </p>
+                {topupVerifyState.status === 'verifying' ? (
+                  <Loader2 className="w-4 h-4 shrink-0 animate-spin mt-0.5" />
+                ) : (
+                  <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
+                )}
+                <span>{topupVerifyState.message}</span>
               </div>
-            ) : (
-              <form onSubmit={handleSubmitDeposit} className="space-y-4">
-                {/* Method selector cards in payment-gateway style */}
-                <div>
-                  <span className="bx-label">1. Select Payment Method</span>
-                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                    {activeManualMethods.map((m) => {
-                      const isSelected = m.id === currentManualMethod.id;
-                      return (
-                        <button
-                          key={m.id}
-                          type="button"
-                          onClick={() => {
-                            setSelectedManualId(m.id);
-                            setError('');
-                          }}
-                          className="p-3 rounded-xl border text-left transition-all relative flex flex-col justify-between"
-                          style={{
-                            borderColor: isSelected ? (m.color || 'var(--orange)') : 'var(--border-soft)',
-                            background: isSelected ? 'var(--surface-subtle)' : 'var(--surface)',
-                            boxShadow: isSelected ? `0 0 0 2px ${m.color || 'var(--orange)'}33` : 'none',
-                          }}
-                        >
-                          <div className="flex items-center justify-between gap-1 mb-1">
-                            <span className="text-xs font-black truncate">{m.name}</span>
-                            {isSelected && (
-                              <CheckCircle2
-                                className="w-4 h-4 flex-shrink-0"
-                                style={{ color: m.color || 'var(--orange)' }}
-                              />
-                            )}
-                          </div>
-                          {m.badge && (
-                            <span
-                              className="inline-block text-[10px] font-extrabold uppercase px-1.5 py-0.5 rounded w-max"
-                              style={{
-                                background: isSelected ? `${m.color || 'var(--orange)'}22` : 'var(--border-soft)',
-                                color: isSelected ? (m.color || 'var(--orange)') : 'var(--text-2)',
-                              }}
-                            >
-                              {m.badge}
-                            </span>
-                          )}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
+            )}
 
-                {/* Professional Step-by-Step Payment Instructions & Receiving Number */}
-                <div
-                  className="p-4 rounded-2xl border space-y-3"
-                  style={{
-                    background: 'var(--surface-subtle)',
-                    borderColor: currentManualMethod.color ? `${currentManualMethod.color}44` : 'var(--border-soft)',
-                  }}
-                >
-                  <div className="flex items-center justify-between gap-2 border-b pb-2.5" style={{ borderColor: 'var(--border-soft)' }}>
-                    <div>
-                      <span className="text-[11px] font-extrabold uppercase block" style={{ color: 'var(--text-2)' }}>
-                        Official Receiving Account ({currentManualMethod.name})
-                      </span>
-                      {currentManualMethod.accountHolder && (
-                        <span className="text-[11px] font-semibold opacity-80 block">
-                          {currentManualMethod.accountHolder}
-                        </span>
-                      )}
-                    </div>
-                    {currentManualMethod.badge && (
+            <form onSubmit={handleStartLiveTopup} className="space-y-4">
+              <div
+                className="p-4 rounded-2xl border space-y-2"
+                style={{
+                  background: 'var(--surface-subtle)',
+                  borderColor: 'var(--border-soft)',
+                }}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 text-xs font-black uppercase tracking-wide">
+                    <CreditCard className="w-4 h-4" style={{ color: 'var(--orange)' }} />
+                    <span>Live Payment Gateway Top-Up</span>
+                  </div>
+                  <span
+                    className="text-[10px] font-black uppercase px-2 py-0.5 rounded"
+                    style={{ background: 'var(--green-soft)', color: 'var(--green)' }}
+                  >
+                    Instant Credit
+                  </span>
+                </div>
+                <p className="text-xs leading-relaxed" style={{ color: 'var(--text-2)' }}>
+                  Enter your BDT amount and complete checkout securely via the BEXORA Live Payment Gateway. Your wallet balance credits automatically once verified.
+                </p>
+                {activeGatewayLabels.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5 pt-1">
+                    {activeGatewayLabels.map((label) => (
                       <span
-                        className="text-[10px] font-black uppercase px-2 py-0.5 rounded-full"
+                        key={label.id}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-[11px] font-extrabold"
                         style={{
-                          background: currentManualMethod.color ? `${currentManualMethod.color}22` : 'var(--surface)',
-                          color: currentManualMethod.color || 'var(--orange)',
+                          borderColor: `${label.color}55`,
+                          background: 'var(--surface)',
                         }}
                       >
-                        {currentManualMethod.badge}
+                        <span
+                          className="w-2 h-2 rounded-full shrink-0"
+                          style={{ background: label.color }}
+                        />
+                        <span>{label.name}</span>
                       </span>
-                    )}
+                    ))}
                   </div>
+                )}
+              </div>
 
-                  <div className="flex items-center justify-between gap-3 p-3 rounded-xl bg-[var(--surface)] border border-[var(--border-soft)]">
-                    <div className="truncate">
-                      <span className="text-[10px] uppercase font-bold tracking-wider block" style={{ color: 'var(--text-2)' }}>
-                        Number / Address to Send Money:
-                      </span>
-                      <strong className="text-base sm:text-lg font-black tracking-wide font-mono block select-all">
-                        {currentManualMethod.receivingNumber}
-                      </strong>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        navigator.clipboard?.writeText(currentManualMethod.receivingNumber);
-                        onFlash(`${currentManualMethod.name} receiving number copied to clipboard!`);
-                      }}
-                      className="bx-btn bx-btn-sm inline-flex items-center gap-1.5 flex-shrink-0"
-                    >
-                      <Copy className="w-3.5 h-3.5" />
-                      <span>Copy</span>
-                    </button>
-                  </div>
-
-                  {/* Step-by-step instructions box */}
-                  <div className="space-y-1.5 pt-1">
-                    <span className="text-[11px] font-black uppercase tracking-wider block" style={{ color: 'var(--text-2)' }}>
-                      How to Send Money:
-                    </span>
-                    <div className="text-xs space-y-1 whitespace-pre-line leading-relaxed" style={{ color: 'var(--text)' }}>
-                      {currentManualMethod.instructions}
-                    </div>
-                  </div>
+              <div>
+                <span className="bx-label">Quick Select Amount (BDT)</span>
+                <div className="grid grid-cols-3 sm:grid-cols-5 gap-2">
+                  {TOPUP_PRESETS_BDT.map((preset) => {
+                    const active = Number(topupAmountInput) === preset;
+                    return (
+                      <button
+                        key={preset}
+                        type="button"
+                        onClick={() => {
+                          setTopupAmountInput(String(preset));
+                          setError('');
+                        }}
+                        className="py-2 px-2 rounded-xl border text-xs font-black tabular-nums transition-colors"
+                        style={{
+                          borderColor: active ? 'var(--orange)' : 'var(--border-soft)',
+                          background: active ? 'var(--orange-soft)' : 'var(--surface)',
+                          color: active ? 'var(--orange)' : 'var(--text)',
+                        }}
+                      >
+                        ৳{preset.toLocaleString()}
+                      </button>
+                    );
+                  })}
                 </div>
+              </div>
 
-                {/* Form Inputs: Amount, Sender Number, TrxID, Screenshot */}
-                <div className="space-y-3">
-                  <div>
-                    <label htmlFor="dep-amount" className="bx-label">
-                      Deposit Amount (
-                      {currentManualMethod.id === 'binance' || currentManualMethod.type === 'binance' ? 'USDT' : 'BDT'}
-                      , Minimum{' '}
-                      {currentManualMethod.id === 'binance' || currentManualMethod.type === 'binance'
-                        ? `${currentManualMethod.minDeposit ?? 1} USDT`
-                        : `৳${currentManualMethod.minDeposit ?? 10}`}
-                      )
-                    </label>
-                    <input
-                      id="dep-amount"
-                      type="number"
-                      min={currentManualMethod.minDeposit ?? 10}
-                      step={currentManualMethod.id === 'binance' || currentManualMethod.type === 'binance' ? '0.01' : '1'}
-                      inputMode="decimal"
-                      value={amountInput}
-                      onChange={(e) => setAmountInput(e.target.value)}
-                      placeholder={`e.g. ${currentManualMethod.minDeposit ?? 500}`}
-                      className="bx-input"
-                    />
-                  </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div>
-                      <label htmlFor="dep-sender" className="bx-label">
-                        Sender Account / Phone / Wallet
-                      </label>
-                      <input
-                        id="dep-sender"
-                        type="text"
-                        value={senderNumber}
-                        onChange={(e) => setSenderNumber(e.target.value)}
-                        placeholder="e.g. 01XXXXXXXXX or Sender ID"
-                        className="bx-input"
-                      />
-                    </div>
-                    <div>
-                      <label htmlFor="dep-txid" className="bx-label">
-                        Transaction ID (TrxID) / Order ID
-                      </label>
-                      <input
-                        id="dep-txid"
-                        type="text"
-                        value={transactionId}
-                        onChange={(e) => setTransactionId(e.target.value)}
-                        placeholder="e.g. 9B2K8QA10"
-                        className="bx-input"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="flex items-center justify-between gap-2 pt-1">
-                    <input
-                      ref={fileRef}
-                      type="file"
-                      accept="image/jpeg,image/png,image/webp"
-                      onChange={(e) => handleScreenshot(e.target.files)}
-                      className="hidden"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => fileRef.current?.click()}
-                      className="bx-btn bx-btn-sm"
-                    >
-                      <Upload className="w-3.5 h-3.5" />
-                      <span>{screenshotData ? 'Replace Receipt Screenshot' : 'Attach Optional Screenshot'}</span>
-                    </button>
-                    {screenshotData && (
-                      <span className="text-xs font-bold inline-flex items-center gap-1" style={{ color: 'var(--green)' }}>
-                        <Check className="w-3.5 h-3.5" /> Screenshot attached
-                      </span>
-                    )}
-                  </div>
-                </div>
-
-                <button
-                  type="submit"
-                  disabled={busy}
-                  className="bx-btn bx-btn-primary w-full justify-center"
-                >
-                  <ArrowDownLeft className="w-4 h-4" />
-                  <span>
-                    {busy
-                      ? 'Submitting Request…'
-                      : `Submit Deposit Request (${currentManualMethod.name})`}
+              <div>
+                <label htmlFor="wallet-topup-amount" className="bx-label">
+                  Top-Up Amount (BDT · Min ৳{MIN_WALLET_TOPUP_BDT} · Max ৳
+                  {MAX_WALLET_TOPUP_BDT.toLocaleString()})
+                </label>
+                <div className="relative">
+                  <span
+                    className="absolute left-3.5 top-1/2 -translate-y-1/2 text-sm font-black"
+                    style={{ color: 'var(--text-2)' }}
+                  >
+                    ৳
                   </span>
-                </button>
-              </form>
-            )}
+                  <input
+                    id="wallet-topup-amount"
+                    type="number"
+                    min={MIN_WALLET_TOPUP_BDT}
+                    max={MAX_WALLET_TOPUP_BDT}
+                    step="1"
+                    inputMode="numeric"
+                    value={topupAmountInput}
+                    onChange={(e) => {
+                      setTopupAmountInput(e.target.value);
+                      if (error) setError('');
+                    }}
+                    placeholder="e.g. 1000"
+                    className="bx-input !pl-8 font-bold tabular-nums"
+                    disabled={busy}
+                    required
+                  />
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                disabled={busy}
+                className="bx-btn bx-btn-primary w-full justify-center"
+              >
+                {busy ? (
+                  <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
+                ) : (
+                  <CreditCard className="w-4 h-4" aria-hidden="true" />
+                )}
+                <span>{busy ? 'Connecting to Payment Gateway…' : 'Add Now'}</span>
+              </button>
+            </form>
           </div>
         )}
 
@@ -876,10 +870,10 @@ export const WalletModal: React.FC<WalletModalProps> = ({
           <div className="space-y-4">
             <div className="space-y-2">
               <h3 className="text-xs font-extrabold uppercase" style={{ color: 'var(--text-2)' }}>
-                Deposit Requests ({deposits.length})
+                Deposit &amp; Top-Up History ({deposits.length})
               </h3>
               {deposits.length === 0 ? (
-                <p className="bx-hint">No manual deposit requests yet.</p>
+                <p className="bx-hint">No prior wallet deposit records.</p>
               ) : (
                 deposits.map((d) => (
                   <div key={d.id} className="p-3 rounded-xl bx-soft flex items-center justify-between gap-2 text-xs tabular-nums">

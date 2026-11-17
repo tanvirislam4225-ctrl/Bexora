@@ -38,7 +38,10 @@ import {
   validateImageMagicBytes,
 } from './marketplaceLogic';
 import {
+  classifyGooglePopupAuthError,
   classifySessionErrorDisposition,
+  executeGooglePopupAuthWithReset,
+  extractFirebaseAuthErrorCode,
   resolveEffectiveFirebaseAuthDomain,
   shouldKeepProactiveTokenRefreshEnabled,
 } from './authDomainAndPersistenceLogic';
@@ -157,31 +160,71 @@ export function applyPreferredFirebaseAuthDomain(_preferredDomain?: string | nul
   return EFFECTIVE_FIREBASE_AUTH_DOMAIN;
 }
 
+export interface GooglePopupSignInOptions {
+  setLoading?: (loading: boolean) => void;
+  onSettled?: () => void;
+}
+
+let googlePopupAuthInFlight = false;
+
+export function isGooglePopupAuthInFlight(): boolean {
+  return googlePopupAuthInFlight;
+}
+
 /**
  * Executes Google Sign-In via the verified BEXORA authentication domain (`auth.bexora.com`, `bexora.com`,
- * or `bexora.ai.studio`). If a cross-origin brand relay has not yet been redeployed with updated headers
- * and triggers `auth/network-request-failed`, transparently falls back to same-origin `EFFECTIVE_FIREBASE_AUTH_DOMAIN`
- * so Google Sign-In succeeds immediately without ever exposing `responsive-dragon-tmn89.firebaseapp.com`.
+ * or `bexora.ai.studio`). Wraps `signInWithPopup` in an unconditional `try...finally` block so active
+ * popup/loading state always resets even if the user closes (`auth/popup-closed-by-user`) or cancels
+ * (`auth/cancelled-popup-request`) the popup, and only retries on `auth/network-request-failed`.
  */
-export async function signInWithGoogleResilient(customProvider?: GoogleAuthProvider) {
+export async function signInWithGoogleResilient(
+  customProvider?: GoogleAuthProvider,
+  options?: GooglePopupSignInOptions
+) {
   const providerToUse = customProvider || googleProvider;
+  googlePopupAuthInFlight = true;
   try {
-    return await signInWithPopup(auth, providerToUse, browserPopupRedirectResolver);
-  } catch (err) {
-    const code =
-      err && typeof err === 'object' && 'code' in err
-        ? String((err as { code?: unknown }).code || '')
-        : '';
-    const cfg = (auth as unknown as { config?: { authDomain?: string } }).config;
-    if (
-      code === 'auth/network-request-failed' &&
-      cfg?.authDomain &&
-      cfg.authDomain !== EFFECTIVE_FIREBASE_AUTH_DOMAIN
-    ) {
-      cfg.authDomain = EFFECTIVE_FIREBASE_AUTH_DOMAIN;
-      return signInWithPopup(auth, providerToUse, browserPopupRedirectResolver);
-    }
-    throw err;
+    return await executeGooglePopupAuthWithReset(
+      async () => {
+        try {
+          return await signInWithPopup(auth, providerToUse, browserPopupRedirectResolver);
+        } catch (err) {
+          const classified = classifyGooglePopupAuthError(err);
+          // User closed or cancelled popup — never retry popup; bubble up cleanly for UI reset.
+          if (classified.isCancellation) {
+            throw err;
+          }
+          const cfg = (auth as unknown as { config?: { authDomain?: string } }).config;
+          if (
+            classified.code === 'auth/network-request-failed' &&
+            cfg?.authDomain &&
+            cfg.authDomain !== EFFECTIVE_FIREBASE_AUTH_DOMAIN
+          ) {
+            cfg.authDomain = EFFECTIVE_FIREBASE_AUTH_DOMAIN;
+            try {
+              return await signInWithPopup(auth, providerToUse, browserPopupRedirectResolver);
+            } catch (retryErr) {
+              const retryCode = extractFirebaseAuthErrorCode(retryErr);
+              if (
+                retryCode === 'auth/popup-closed-by-user' ||
+                retryCode === 'auth/cancelled-popup-request' ||
+                retryCode === 'auth/user-cancelled'
+              ) {
+                throw retryErr;
+              }
+              throw retryErr;
+            }
+          }
+          throw err;
+        }
+      },
+      {
+        setLoading: options?.setLoading,
+        onSettled: options?.onSettled,
+      }
+    );
+  } finally {
+    googlePopupAuthInFlight = false;
   }
 }
 
@@ -853,7 +896,12 @@ export async function extendCurrentUserSessionInteractive(): Promise<'renewed' |
     if (current.email) {
       hintedProvider.setCustomParameters({ login_hint: current.email });
     }
-    await reauthenticateWithPopup(current, hintedProvider, browserPopupRedirectResolver);
+    googlePopupAuthInFlight = true;
+    try {
+      await reauthenticateWithPopup(current, hintedProvider, browserPopupRedirectResolver);
+    } finally {
+      googlePopupAuthInFlight = false;
+    }
     markAuthenticatedSessionActive(current);
     const caps = await detectFirebaseAuthCapabilities();
     syncProactiveRefreshWithCapabilities(current, caps.tokenServiceEnabled);

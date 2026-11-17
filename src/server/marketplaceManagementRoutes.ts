@@ -43,6 +43,11 @@ import {
 } from '../lib/activityTickerLogic';
 import { buildNotificationId } from '../lib/notificationLogic';
 import { formatMoneyFromMinor } from '../lib/marketplaceLogic';
+import {
+  buildSafeDealDeletionUpdate,
+  matchesAdminDealQuery,
+  resolveDisplayDealCode,
+} from '../lib/walletTopupAndReservationLogic';
 import { TtlCache } from './ttlCache';
 
 export interface VerifiedFirebaseRuntimeConfig {
@@ -3465,4 +3470,396 @@ export function registerMarketplaceManagementRoutes<
       // Silently ignore when Admin SDK IAM is not provisioned in local dev container
     }
   };
+
+  /**
+   * GET /api/admin/deals/search?q=...
+   * Server-side full-collection search across active (non-deleted) deals by dealCode (BXR-XXXXXX),
+   * deal ID, listing title, buyer/seller names/UIDs, or status.
+   */
+  app.get('/api/admin/deals/search', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const cfg = loadVerifiedFirebaseConfig();
+    if (!cfg.configValid) {
+      return res.status(503).json({ ok: false, error: 'Firebase configuration unavailable.' });
+    }
+    const adminCaller = await verifyAdminCaller(req, cfg);
+    if (!adminCaller) {
+      return res.status(403).json({ ok: false, error: 'Administrator authentication required.' });
+    }
+
+    const q = String(req.query.q || '').trim().slice(0, 120);
+    if (!q) {
+      return res.json({ ok: true, deals: [] });
+    }
+
+    try {
+      const adminApp = getOrInitFirebaseAdminApp(cfg.projectId);
+      const db = getAdminFirestore(adminApp, cfg.firestoreDatabaseId);
+      const matches: Array<Record<string, unknown>> = [];
+      let lastId: string | null = null;
+      let scanned = 0;
+
+      while (scanned < 2400) {
+        let qRef = db.collection('deals').orderBy(FieldPath.documentId()).limit(300);
+        if (lastId) {
+          qRef = qRef.startAfter(lastId);
+        }
+        const snap = await qRef.get();
+        if (snap.empty) break;
+
+        for (const docSnap of snap.docs) {
+          scanned += 1;
+          const dl = docSnap.data() || {};
+          if (dl.isDeleted === true) continue;
+          const createdAtMs =
+            typeof dl.createdAt?.toMillis === 'function'
+              ? dl.createdAt.toMillis()
+              : Number(dl.paidAtMs || 0);
+          const displayCode = resolveDisplayDealCode({
+            id: docSnap.id,
+            dealCode: dl.dealCode ? String(dl.dealCode) : undefined,
+            createdAtMs,
+          });
+          const candidate = {
+            id: docSnap.id,
+            dealCode: displayCode,
+            listingId: String(dl.listingId || ''),
+            listingTitle: String(dl.listingTitle || ''),
+            platform: String(dl.platform || 'others'),
+            acceptedBidId: dl.acceptedBidId ? String(dl.acceptedBidId) : undefined,
+            originalListingPriceMinor:
+              dl.originalListingPriceMinor !== undefined
+                ? Number(dl.originalListingPriceMinor)
+                : undefined,
+            buyerId: String(dl.buyerId || ''),
+            buyerName: String(dl.buyerName || ''),
+            sellerId: String(dl.sellerId || ''),
+            sellerName: String(dl.sellerName || ''),
+            baseAmountMinor: Number(dl.baseAmountMinor || 0),
+            buyerFeePct: Number(dl.buyerFeePct || 0),
+            sellerFeePct: Number(dl.sellerFeePct || 0),
+            buyerFeeMinor: Number(dl.buyerFeeMinor || 0),
+            sellerFeeMinor: Number(dl.sellerFeeMinor || 0),
+            buyerTotalMinor: Number(dl.buyerTotalMinor || 0),
+            sellerPayoutMinor: Number(dl.sellerPayoutMinor || 0),
+            platformCommissionMinor: Number(dl.platformCommissionMinor || 0),
+            refundBuyerMinor:
+              dl.refundBuyerMinor !== undefined ? Number(dl.refundBuyerMinor) : undefined,
+            refundPlatformRetainedMinor:
+              dl.refundPlatformRetainedMinor !== undefined
+                ? Number(dl.refundPlatformRetainedMinor)
+                : undefined,
+            currency: String(dl.currency || 'BDT') === 'USD' ? 'USD' : 'BDT',
+            protectionDurationHours: Number(dl.protectionDurationHours || 40),
+            confirmedAtMs: Number(dl.confirmedAtMs || 0),
+            originalDeadlineMs: Number(dl.originalDeadlineMs || 0),
+            unresolvedReportCount: Number(dl.unresolvedReportCount || 0),
+            paymentLedgerId: dl.paymentLedgerId ? String(dl.paymentLedgerId) : undefined,
+            paidAtMs: dl.paidAtMs ? Number(dl.paidAtMs) : undefined,
+            transferSubmissionCount:
+              dl.transferSubmissionCount !== undefined
+                ? Number(dl.transferSubmissionCount)
+                : 0,
+            latestTransferSubmissionId: dl.latestTransferSubmissionId
+              ? String(dl.latestTransferSubmissionId)
+              : undefined,
+            latestRejectionReason: dl.latestRejectionReason
+              ? String(dl.latestRejectionReason)
+              : undefined,
+            refundLedgerId: dl.refundLedgerId ? String(dl.refundLedgerId) : undefined,
+            settlementLedgerId: dl.settlementLedgerId ? String(dl.settlementLedgerId) : undefined,
+            adminHoldNote: dl.adminHoldNote ? String(dl.adminHoldNote) : undefined,
+            settledAtMs: dl.settledAtMs ? Number(dl.settledAtMs) : undefined,
+            refundedAtMs: dl.refundedAtMs ? Number(dl.refundedAtMs) : undefined,
+            status: String(dl.status || ''),
+            isDeleted: false,
+            createdAtMs,
+          };
+
+          if (matchesAdminDealQuery(candidate as never, q)) {
+            matches.push(candidate);
+          }
+        }
+
+        if (snap.docs.length < 300) break;
+        lastId = snap.docs[snap.docs.length - 1].id;
+      }
+
+      matches.sort((a, b) => Number(b.createdAtMs || 0) - Number(a.createdAtMs || 0));
+      return res.json({ ok: true, deals: matches.slice(0, 60) });
+    } catch (err) {
+      return res.status(500).json({
+        ok: false,
+        error: err instanceof Error ? err.message : 'Unable to search escrow deals.',
+      });
+    }
+  });
+
+  /**
+   * POST /api/admin/deals/:dealId/delete
+   * Admin-only safe deal soft-deletion:
+   * - Marks the deal deleted with audit metadata (isDeleted, deletedAtMs, deletedBy, deletionReason).
+   * - Preserves walletLedger, paymentSessions, and wallet balances completely intact.
+   * - If the deal was unpaid and still reserving its listing, safely restores the listing to 'active'.
+   */
+  app.post('/api/admin/deals/:dealId/delete', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const cfg = loadVerifiedFirebaseConfig();
+    if (!cfg.configValid) {
+      return res.status(503).json({ ok: false, error: 'Firebase configuration unavailable.' });
+    }
+    const adminCaller = await verifyAdminCaller(req, cfg);
+    if (!adminCaller) {
+      return res.status(403).json({ ok: false, error: 'Administrator authentication required.' });
+    }
+
+    const dealId = String(req.params.dealId || '').trim();
+    if (!VALID_ID_REGEX.test(dealId)) {
+      return res.status(400).json({ ok: false, error: 'Invalid deal ID.' });
+    }
+
+    const reason = String(req.body?.reason || '').trim().slice(0, 400);
+
+    try {
+      const nowMs = Date.now();
+      const deletionPatch = buildSafeDealDeletionUpdate({
+        actorUid: adminCaller.uid,
+        reason,
+        nowMs,
+      });
+
+      let txRes: {
+        found: boolean;
+        alreadyDeleted?: boolean;
+        restoredListing?: boolean;
+        dealCode?: string;
+      } | null = null;
+
+      try {
+        const adminApp = getOrInitFirebaseAdminApp(cfg.projectId);
+        const db = getAdminFirestore(adminApp, cfg.firestoreDatabaseId);
+        txRes = await db.runTransaction(async (tx) => {
+          const dealRef = db.collection('deals').doc(dealId);
+          const payLedgerRef = db.collection('walletLedger').doc(`led_pay_${dealId}`);
+          const [dSnap, payLedSnap] = await Promise.all([tx.get(dealRef), tx.get(payLedgerRef)]);
+
+          if (!dSnap.exists) {
+            return { found: false as const };
+          }
+          const dData = dSnap.data() || {};
+          if (dData.isDeleted === true) {
+            return { found: true as const, alreadyDeleted: true as const, restoredListing: false };
+          }
+
+          const listingId = String(dData.listingId || '').trim();
+          const acceptedBidId = String(dData.acceptedBidId || '').trim();
+          const listingRef =
+            listingId && VALID_ID_REGEX.test(listingId)
+              ? db.collection('listings').doc(listingId)
+              : null;
+          const bidRef =
+            acceptedBidId && VALID_ID_REGEX.test(acceptedBidId)
+              ? db.collection('bids').doc(acceptedBidId)
+              : null;
+
+          const [lSnap, bSnap] = await Promise.all([
+            listingRef ? tx.get(listingRef) : Promise.resolve(null),
+            bidRef ? tx.get(bidRef) : Promise.resolve(null),
+          ]);
+
+          const dealCode = resolveDisplayDealCode({
+            id: dealId,
+            dealCode: dData.dealCode ? String(dData.dealCode) : undefined,
+            createdAtMs:
+              typeof dData.createdAt?.toMillis === 'function'
+                ? dData.createdAt.toMillis()
+                : Number(dData.paidAtMs || nowMs),
+          });
+
+          tx.update(dealRef, {
+            ...deletionPatch,
+            dealCode,
+            updatedAt: FieldValue.serverTimestamp(),
+          });
+
+          let restoredListing = false;
+          if (listingRef && lSnap?.exists && !payLedSnap.exists) {
+            const lData = lSnap.data() || {};
+            if (lData.status === 'reserved' && lData.activeDealId === dealId) {
+              tx.update(listingRef, {
+                status: 'active',
+                activeDealId: FieldValue.delete(),
+                acceptedBidAmountMinor: FieldValue.delete(),
+                reservedBuyerId: FieldValue.delete(),
+                reservedUntilMs: FieldValue.delete(),
+                reservationExpiresAtMs: FieldValue.delete(),
+                reservationSessionId: FieldValue.delete(),
+                updatedAt: FieldValue.serverTimestamp(),
+              });
+              restoredListing = true;
+            }
+          }
+
+          if (bidRef && bSnap?.exists && !payLedSnap.exists) {
+            const bStatus = String(bSnap.data()?.status || '');
+            if (bStatus === 'accepted_pending_payment' || bStatus === 'accepted') {
+              tx.update(bidRef, {
+                status: 'cancelled',
+                updatedAt: FieldValue.serverTimestamp(),
+              });
+            }
+          }
+
+          const auditRef = db.collection('auditLogs').doc();
+          tx.set(auditRef, {
+            actorId: adminCaller.uid,
+            action: 'admin_delete_deal',
+            targetType: 'deal',
+            targetId: dealId,
+            details: `Soft-deleted deal ${dealCode} (${dealId}). Reason: ${deletionPatch.deletionReason}`.slice(
+              0,
+              1000
+            ),
+            createdAt: FieldValue.serverTimestamp(),
+          });
+
+          return {
+            found: true as const,
+            alreadyDeleted: false as const,
+            restoredListing,
+            dealCode,
+          };
+        });
+      } catch {
+        // Fallback to authenticated REST commit when local Admin ADC is unavailable
+        const dData = await restGetDoc(cfg, `deals/${dealId}`, adminCaller.idToken);
+        if (!dData) {
+          txRes = { found: false };
+        } else if (dData.isDeleted === true) {
+          txRes = { found: true, alreadyDeleted: true, restoredListing: false };
+        } else {
+          const listingId = String(dData.listingId || '').trim();
+          const acceptedBidId = String(dData.acceptedBidId || '').trim();
+          const [payLedDoc, lData, bData] = await Promise.all([
+            restGetDoc(cfg, `walletLedger/led_pay_${dealId}`, adminCaller.idToken).catch(() => null),
+            listingId && VALID_ID_REGEX.test(listingId)
+              ? restGetDoc(cfg, `listings/${listingId}`, adminCaller.idToken).catch(() => null)
+              : Promise.resolve(null),
+            acceptedBidId && VALID_ID_REGEX.test(acceptedBidId)
+              ? restGetDoc(cfg, `bids/${acceptedBidId}`, adminCaller.idToken).catch(() => null)
+              : Promise.resolve(null),
+          ]);
+
+          const dealCode = resolveDisplayDealCode({
+            id: dealId,
+            dealCode: dData.dealCode ? String(dData.dealCode) : undefined,
+            createdAtMs: extractTimestampMs(dData.createdAt) || Number(dData.paidAtMs || nowMs),
+          });
+
+          const writes: Array<Record<string, unknown>> = [
+            ...makeRestWriteWithServerTransforms(
+              cfg,
+              `deals/${dealId}`,
+              {
+                ...deletionPatch,
+                dealCode,
+              },
+              ['updatedAt'],
+              ['isDeleted', 'deletedAtMs', 'deletedBy', 'deletionReason', 'dealCode'],
+              true
+            ),
+          ];
+
+          let restoredListing = false;
+          if (lData && !payLedDoc && lData.status === 'reserved' && lData.activeDealId === dealId) {
+            writes.push(
+              ...makeRestWriteWithServerTransforms(
+                cfg,
+                `listings/${listingId}`,
+                { status: 'active' },
+                ['updatedAt'],
+                [
+                  'status',
+                  'activeDealId',
+                  'acceptedBidAmountMinor',
+                  'reservedBuyerId',
+                  'reservedUntilMs',
+                  'reservationExpiresAtMs',
+                  'reservationSessionId',
+                ],
+                true
+              )
+            );
+            restoredListing = true;
+          }
+
+          if (
+            bData &&
+            !payLedDoc &&
+            (bData.status === 'accepted_pending_payment' || bData.status === 'accepted')
+          ) {
+            writes.push(
+              ...makeRestWriteWithServerTransforms(
+                cfg,
+                `bids/${acceptedBidId}`,
+                { status: 'cancelled' },
+                ['updatedAt'],
+                ['status'],
+                true
+              )
+            );
+          }
+
+          const auditId = `aud_${Date.now().toString(36)}_${crypto.randomBytes(3).toString('hex')}`;
+          writes.push(
+            ...makeRestWriteWithServerTransforms(
+              cfg,
+              `auditLogs/${auditId}`,
+              {
+                actorId: adminCaller.uid,
+                action: 'admin_delete_deal',
+                targetType: 'deal',
+                targetId: dealId,
+                details: `Soft-deleted deal ${dealCode} (${dealId}). Reason: ${deletionPatch.deletionReason}`.slice(
+                  0,
+                  1000
+                ),
+              },
+              ['createdAt']
+            )
+          );
+
+          const ok = await restCommitWrites(cfg, writes, adminCaller.idToken);
+          if (!ok) {
+            throw new Error('Could not commit deal soft deletion.');
+          }
+          txRes = {
+            found: true,
+            alreadyDeleted: false,
+            restoredListing,
+            dealCode,
+          };
+        }
+      }
+
+      if (!txRes.found) {
+        return res.status(404).json({ ok: false, error: 'Deal not found.' });
+      }
+
+      invalidateFinanceOverviewCache();
+
+      return res.json({
+        ok: true,
+        dealId,
+        dealCode: txRes.dealCode,
+        alreadyDeleted: Boolean(txRes.alreadyDeleted),
+        restoredListing: Boolean(txRes.restoredListing),
+      });
+    } catch (err) {
+      return res.status(500).json({
+        ok: false,
+        error: err instanceof Error ? err.message : 'Unable to delete deal record.',
+      });
+    }
+  });
 }

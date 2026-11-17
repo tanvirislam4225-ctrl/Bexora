@@ -1,30 +1,18 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { doc, runTransaction, serverTimestamp } from 'firebase/firestore';
+import { deleteField, doc, runTransaction, serverTimestamp } from 'firebase/firestore';
 import {
   AlertCircle,
   ArrowLeft,
   ArrowRight,
   CheckCircle2,
-  Copy,
+  Clock,
   CreditCard,
   ExternalLink,
-  Globe,
-  Info,
-  Layers,
   Loader2,
   Lock,
-  RefreshCw,
-  Send,
   ShieldCheck,
-  Smartphone,
   Wallet,
 } from 'lucide-react';
-import {
-  calculateExactBdtSerial,
-  getDefaultManualPaymentMethods,
-  EXACT_LINK_UNAVAILABLE_MESSAGE,
-  ManualPaymentMethod,
-} from '../lib/paymentManagementLogic';
 import {
   CurrencyCode,
   DealRecord,
@@ -53,6 +41,14 @@ import {
   normalizeWordPressDiscovery,
   WordPressGatewayDiscoveryState,
 } from '../lib/checkoutAndIntentLogic';
+import {
+  canAcquireListingReservation,
+  computeReservationCountdown,
+  generateDealCode,
+  getListingReservationExpiryMs,
+  normalizeGatewayPaymentMethods,
+  sanitizeCustomerGatewayError,
+} from '../lib/walletTopupAndReservationLogic';
 import {
   appendDealAuditEvent,
   emitPaidDealRoomCreatedAlerts,
@@ -111,16 +107,43 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
   const [submitting, setSubmitting] = useState(false);
   const submittingLockRef = useRef(false);
   const [errorMessage, setErrorMessage] = useState('');
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
+  const expireTriggeredRef = useRef<string | null>(null);
 
-  // Secure Pay BD Gateway Configuration State
+  const enabledGatewayMethods = useMemo(
+    () => normalizeGatewayPaymentMethods(settings.gatewayPaymentMethods).filter((m) => m.enabled),
+    [settings.gatewayPaymentMethods]
+  );
+  const [selectedGatewayMethodId, setSelectedGatewayMethodId] = useState<string>(
+    () => enabledGatewayMethods[0]?.id || 'bkash'
+  );
+
+  useEffect(() => {
+    if (
+      enabledGatewayMethods.length > 0 &&
+      !enabledGatewayMethods.some((m) => m.id === selectedGatewayMethodId)
+    ) {
+      setSelectedGatewayMethodId(enabledGatewayMethods[0].id);
+    }
+  }, [enabledGatewayMethods, selectedGatewayMethodId]);
+
+  const selectedGatewayChannel = useMemo(
+    () =>
+      enabledGatewayMethods.find((m) => m.id === selectedGatewayMethodId) ||
+      enabledGatewayMethods[0] ||
+      null,
+    [enabledGatewayMethods, selectedGatewayMethodId]
+  );
+
+  // Live Gateway Configuration State
   const [securePayConfig, setSecurePayConfig] = useState<{
     isConfigured: boolean;
     provider: string;
     supportedMethods: string[];
   }>({
-    isConfigured: true,
-    provider: 'Secure Pay BD',
-    supportedMethods: ['bKash', 'Nagad', 'Rocket', 'Upay', 'Visa', 'Mastercard'],
+    isConfigured: false,
+    provider: 'Live Payment Gateway',
+    supportedMethods: ['bKash', 'Nagad', 'Rocket', 'Visa / Mastercard'],
   });
 
   useEffect(() => {
@@ -131,10 +154,10 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
         if (!isCancelled && data && data.ok) {
           setSecurePayConfig({
             isConfigured: Boolean(data.isConfigured),
-            provider: data.provider || 'Secure Pay BD',
+            provider: data.provider || 'Live Payment Gateway',
             supportedMethods: Array.isArray(data.supportedMethods)
               ? data.supportedMethods
-              : ['bKash', 'Nagad', 'Rocket', 'Upay', 'Visa', 'Mastercard'],
+              : ['bKash', 'Nagad', 'Rocket', 'Visa / Mastercard'],
           });
         }
       })
@@ -156,7 +179,7 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
     })
   );
 
-  // Optional WordPress Return Session Verification State
+  // Optional Return Session Verification State
   const [verifyingSession, setVerifyingSession] = useState(false);
   const [sessionVerificationNotice, setSessionVerificationNotice] = useState<{
     tone: 'info' | 'warning' | 'success';
@@ -174,7 +197,6 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
           return;
         }
       }
-      // Static-hosting fallback: derive safe unverified state from public settings (never fakes live readiness)
       setWpDiscovery(
         normalizeWordPressDiscovery({
           enabledInSettings: Boolean(settings.wordpressPaymentEnabled),
@@ -182,8 +204,6 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
           bridgeEndpoint: settings.wordpressBridgeEndpoint || '/wp-json/bexora/v1',
           liveVerified: false,
           webhookSecretConfigured: false,
-          errorHint:
-            'Live WordPress payment server verification is not active in this environment. Use your BEXORA Wallet Balance to complete checkout immediately.',
         })
       );
     } catch {
@@ -286,7 +306,6 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
           sessionId: spReturnSessionId,
         });
         if (spTransactionId) queryParams.set('transactionId', spTransactionId);
-        if (window.location.search.includes('mock_gateway=1')) queryParams.set('mock_gateway', '1');
         if (spPaymentStatus) queryParams.set('payment_status', spPaymentStatus);
 
         const resp = await fetch(
@@ -301,16 +320,20 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
         if (resp.ok && data?.isPaid && data?.dealId) {
           setSessionVerificationNotice({
             tone: 'success',
-            text: data.message || 'Secure Pay BD payment verified! 3-Party Escrow Deal Room activated.',
+            text: data.message || 'Live payment verified! 3-Party Escrow Deal Room activated.',
           });
           onFlash('Payment confirmed! Opening your private Escrow Deal Room…');
-          onDealFunded(data.dealId, 'Live payment verified via Secure Pay BD! Private 3-Party Deal Room is active.');
+          onDealFunded(
+            data.dealId,
+            'Live payment verified! Private 3-Party Deal Room is now active.'
+          );
         } else {
           setSessionVerificationNotice({
             tone: 'warning',
-            text:
+            text: sanitizeCustomerGatewayError(
               data?.message ||
-              'Payment has not been confirmed as completed by Secure Pay BD. You can retry payment or use BEXORA Wallet Balance.',
+                'Payment has not been confirmed as completed by the gateway. You can retry payment or pay with your BEXORA Wallet Balance.'
+            ),
           });
         }
       } catch {
@@ -329,6 +352,41 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
       cancelled = true;
     };
   }, [spReturnSessionId, spPaymentStatus, spTransactionId, onDealFunded, onFlash]);
+
+  const listingReservationExpiryMs = useMemo(
+    () => (listing ? getListingReservationExpiryMs(listing) : 0),
+    [listing]
+  );
+
+  useEffect(() => {
+    if (!listing || listing.status !== 'reserved' || listingReservationExpiryMs <= 0) return;
+    setNowMs(Date.now());
+    const id = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [listing?.id, listing?.status, listingReservationExpiryMs]);
+
+  const reservationCountdown = useMemo(
+    () => computeReservationCountdown(listingReservationExpiryMs, nowMs),
+    [listingReservationExpiryMs, nowMs]
+  );
+
+  useEffect(() => {
+    if (
+      !listing ||
+      listing.status !== 'reserved' ||
+      listing.activeDealId ||
+      listingReservationExpiryMs <= 0 ||
+      !reservationCountdown.expired
+    ) {
+      return;
+    }
+    const key = `${listing.id}:${listingReservationExpiryMs}`;
+    if (expireTriggeredRef.current === key) return;
+    expireTriggeredRef.current = key;
+    void fetch(buildApiUrl(`/api/listings/${encodeURIComponent(listing.id)}/expire-reservation`), {
+      method: 'POST',
+    }).catch(() => {});
+  }, [listing, listingReservationExpiryMs, reservationCountdown.expired]);
 
   const quote = useMemo(() => {
     if (mode === 'accepted_bid_deal' && deal) {
@@ -351,12 +409,30 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
 
   const dealEligibility = useMemo(() => {
     if (mode !== 'accepted_bid_deal') return { eligible: true };
+    if (deal?.isDeleted) {
+      return { eligible: false, reason: 'This deal record is no longer active.' };
+    }
     return canCheckoutDeal(deal, userUid);
   }, [mode, deal, userUid]);
 
+  const reservationAcquisition = useMemo(() => {
+    if (mode !== 'buy_now' || !listing) return { allowed: true, shouldExpireExisting: false };
+    return canAcquireListingReservation(listing, userUid || '__visitor__', nowMs);
+  }, [mode, listing, userUid, nowMs]);
+
+  const isOwnActiveTimedReservation = Boolean(
+    mode === 'buy_now' &&
+      listing &&
+      userUid &&
+      listing.status === 'reserved' &&
+      !listing.activeDealId &&
+      listing.reservedBuyerId === userUid &&
+      reservationCountdown.active
+  );
+
   const isSellerSelfPurchase = Boolean(userUid && quote && quote.sellerId === userUid);
   const buyNowUnavailable =
-    mode === 'buy_now' && Boolean(listing && listing.status !== 'active');
+    mode === 'buy_now' && Boolean(listing && !reservationAcquisition.allowed);
 
   const handleWalletEscrowCheckout = async () => {
     setErrorMessage('');
@@ -371,8 +447,11 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
       return;
     }
 
-    if (mode === 'buy_now' && (!listing || listing.status !== 'active')) {
-      setErrorMessage('This listing is currently reserved or sold and unavailable for Buy Now.');
+    if (mode === 'buy_now' && (!listing || !reservationAcquisition.allowed)) {
+      setErrorMessage(
+        reservationAcquisition.reason ||
+          'This listing is currently reserved or sold and unavailable for Buy Now.'
+      );
       return;
     }
 
@@ -419,8 +498,13 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
           if (existingLedSnap.exists()) {
             throw new Error('Payment has already been processed for this order.');
           }
-          if (!listingSnap.exists() || listingSnap.data()?.status !== 'active') {
-            throw new Error('This listing has just been reserved or sold.');
+          if (!listingSnap.exists()) {
+            throw new Error('Listing record no longer exists.');
+          }
+          const lData = listingSnap.data();
+          const lCheck = canAcquireListingReservation(lData, userUid, paidAtMs);
+          if (!lCheck.allowed) {
+            throw new Error(lCheck.reason || 'This listing has just been reserved or sold.');
           }
 
           const currentBalance = Number(buyerSnap.data()?.walletBalanceMinor) || 0;
@@ -433,7 +517,10 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
             updatedAt: serverTimestamp(),
           });
 
+          const dealCode = generateDealCode(dealId, paidAtMs);
+
           tx.set(dealRef, {
+            dealCode,
             listingId: listing.id,
             listingTitle: quote.title,
             platform: quote.platform,
@@ -460,6 +547,7 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
             paymentLedgerId: ledgerId,
             paidAtMs,
             transferSubmissionCount: 0,
+            isDeleted: false,
             status: 'paid_deal_room_active',
             createdAt: serverTimestamp(),
             updatedAt: serverTimestamp(),
@@ -468,6 +556,10 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
           tx.update(listingRef, {
             status: 'sold',
             activeDealId: dealId,
+            reservedBuyerId: deleteField(),
+            reservedUntilMs: deleteField(),
+            reservationExpiresAtMs: deleteField(),
+            reservationSessionId: deleteField(),
             updatedAt: serverTimestamp(),
           });
 
@@ -549,7 +641,7 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
           if (ledSnap.exists()) {
             throw new Error('This deal has already been paid. Duplicate payment blocked.');
           }
-          if (!dSnap.exists() || !isDealUnpaidStatus(String(dSnap.data()?.status || ''))) {
+          if (!dSnap.exists() || dSnap.data()?.isDeleted || !isDealUnpaidStatus(String(dSnap.data()?.status || ''))) {
             throw new Error('This deal is not awaiting payment.');
           }
           if (!lSnap.exists()) {
@@ -591,6 +683,10 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
           tx.update(listingRef, {
             status: 'sold',
             activeDealId: deal.id,
+            reservedBuyerId: deleteField(),
+            reservedUntilMs: deleteField(),
+            reservationExpiresAtMs: deleteField(),
+            reservationSessionId: deleteField(),
             updatedAt: serverTimestamp(),
           });
 
@@ -730,8 +826,11 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
       return;
     }
 
-    if (mode === 'buy_now' && (!listing || listing.status !== 'active')) {
-      setErrorMessage('This listing is currently reserved or sold and unavailable for Buy Now.');
+    if (mode === 'buy_now' && (!listing || !reservationAcquisition.allowed)) {
+      setErrorMessage(
+        reservationAcquisition.reason ||
+          'This listing is currently reserved or sold and unavailable for Buy Now.'
+      );
       return;
     }
 
@@ -754,6 +853,8 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
           mode,
           listingId: mode === 'buy_now' ? quote.listingId : undefined,
           dealId: mode === 'accepted_bid_deal' ? quote.dealId : undefined,
+          gatewayMethodId: selectedGatewayChannel?.id || undefined,
+          gatewayLabel: selectedGatewayChannel?.name || undefined,
           idempotencyKey: idemKey,
         }),
       });
@@ -761,18 +862,22 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
       const data = await resp.json().catch(() => null);
       if (!resp.ok || !data?.paymentUrl) {
         throw new Error(
-          data?.message ||
-            'Could not initiate live payment session. No funds were charged—you can pay safely via BEXORA Wallet Balance.'
+          sanitizeCustomerGatewayError(
+            data?.message || data?.error ||
+              'Live payment gateway is temporarily unavailable. Please try again shortly.'
+          )
         );
       }
 
-      onFlash('Redirecting to Secure Pay BD Gateway (bKash / Nagad / Rocket / Upay)…');
+      onFlash(
+        `Redirecting to ${selectedGatewayChannel?.name || 'Live Payment Gateway'}… Listing reserved for 15 minutes.`
+      );
       window.location.assign(data.paymentUrl);
     } catch (err) {
       setErrorMessage(
-        err instanceof Error
-          ? err.message
-          : 'Unable to start external payment gateway session.'
+        sanitizeCustomerGatewayError(
+          err instanceof Error ? err.message : 'Unable to start payment gateway session.'
+        )
       );
       submittingLockRef.current = false;
       setSubmitting(false);
@@ -845,7 +950,7 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
         </div>
       </div>
 
-      {/* WordPress Return Session Verification Banner */}
+      {/* Return Session Verification Banner */}
       {(verifyingSession || sessionVerificationNotice) && (
         <div
           className="bx-card p-4 flex items-start gap-3 text-xs font-bold"
@@ -862,7 +967,7 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
           {verifyingSession ? (
             <>
               <Loader2 className="w-4 h-4 animate-spin shrink-0 mt-0.5 text-[var(--orange)]" />
-              <span>Verifying WordPress gateway payment signature with server…</span>
+              <span>Verifying payment status with server…</span>
             </>
           ) : (
             <>
@@ -870,6 +975,36 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
               <span>{sessionVerificationNotice?.text}</span>
             </>
           )}
+        </div>
+      )}
+
+      {/* Active 15-Minute Checkout Reservation Banner */}
+      {isOwnActiveTimedReservation && (
+        <div
+          className="bx-card p-4 flex flex-wrap items-center justify-between gap-3 text-xs font-bold"
+          style={{
+            background: 'var(--surface-2)',
+            borderColor: 'var(--orange)',
+          }}
+          role="status"
+        >
+          <div className="flex items-start gap-2.5">
+            <Clock className="w-4 h-4 shrink-0 mt-0.5 text-[var(--orange)]" />
+            <div>
+              <p className="font-extrabold text-[var(--orange)]">
+                Listing Reserved for Your Checkout
+              </p>
+              <p className="font-semibold opacity-85">
+                Other buyers are blocked while your checkout reservation is active. Complete payment before the timer expires.
+              </p>
+            </div>
+          </div>
+          <span
+            className="px-3 py-1.5 rounded-xl font-black text-sm tabular-nums"
+            style={{ background: 'var(--yellow-soft)', color: '#191919' }}
+          >
+            {reservationCountdown.formatted}
+          </span>
         </div>
       )}
 
@@ -1027,28 +1162,28 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
             </label>
           </div>
 
-          {/* Payment Method 2: External Live Payment Gateway (Secure Pay BD — bKash, Nagad, Rocket, Upay, Cards) */}
+          {/* Payment Method 2: Live Payment Gateway (Dynamic Admin Display Labels) */}
           <div className="bx-card p-5 sm:p-6 space-y-4">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div className="flex items-center gap-2.5">
                 <CreditCard className="w-5 h-5 text-[var(--orange)]" />
                 <div>
                   <h2 className="text-base sm:text-lg font-extrabold">
-                    2. Live External Payment Gateway (Direct)
+                    2. Live Payment Gateway
                   </h2>
                   <p className="bx-hint">
-                    Pay securely using bKash, Nagad, Rocket, Upay, or Cards. Directly verified by server.
+                    Reserves this listing for 15 minutes during payment and opens your Deal Room automatically after verification.
                   </p>
                 </div>
               </div>
               <span
                 className="px-2.5 py-1 rounded-lg text-[11px] font-black uppercase"
                 style={{
-                  background: 'var(--green-soft)',
-                  color: 'var(--green)',
+                  background: securePayConfig.isConfigured ? 'var(--green-soft)' : 'var(--surface-2)',
+                  color: securePayConfig.isConfigured ? 'var(--green)' : 'var(--text-2)',
                 }}
               >
-                Instant Escrow Lock
+                {securePayConfig.isConfigured ? 'Instant Escrow Lock' : 'Live Gateway'}
               </span>
             </div>
 
@@ -1074,7 +1209,7 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
                     className="w-4 h-4 accent-[#FF6500]"
                   />
                   <span className="font-extrabold text-sm">
-                    {securePayConfig.provider} (Mobile Banking & Cards)
+                    {securePayConfig.provider || 'Live Payment Gateway'}
                   </span>
                 </div>
                 <span className="text-[11px] font-extrabold px-2 py-0.5 rounded bx-soft">
@@ -1082,27 +1217,41 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
                 </span>
               </div>
 
-              {/* Supported Payment Channel Badges */}
-              <div className="flex flex-wrap items-center gap-1.5 pt-1 pl-6">
-                <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-black bg-[#E2136E]/15 text-[#E2136E] border border-[#E2136E]/30">
-                  bKash
-                </span>
-                <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-black bg-[#F7941D]/15 text-[#F7941D] border border-[#F7941D]/30">
-                  Nagad
-                </span>
-                <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-black bg-[#8C3494]/15 text-[#8C3494] border border-[#8C3494]/30">
-                  Rocket
-                </span>
-                <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-black bg-[#005BAC]/15 text-[#005BAC] border border-[#005BAC]/30">
-                  Upay
-                </span>
-                <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-black bg-emerald-500/15 text-emerald-600 border border-emerald-500/30">
-                  Visa / Mastercard
-                </span>
-              </div>
+              {/* Dynamic Admin-Configured Payment Channel Badges */}
+              {enabledGatewayMethods.length > 0 && (
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1 pl-6">
+                  {enabledGatewayMethods.map((method) => {
+                    const isActiveChannel =
+                      selectedMethod.type === 'securepay_live' &&
+                      selectedGatewayChannel?.id === method.id;
+                    return (
+                      <button
+                        key={method.id}
+                        type="button"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          setSelectedMethod({ type: 'securepay_live' });
+                          setSelectedGatewayMethodId(method.id);
+                          setErrorMessage('');
+                        }}
+                        className="p-2 rounded-lg border text-left transition-all"
+                        style={{
+                          borderColor: isActiveChannel ? method.color : 'var(--border-soft)',
+                          background: isActiveChannel ? `${method.color}18` : 'var(--surface)',
+                        }}
+                      >
+                        <div className="text-xs font-black truncate" style={{ color: method.color }}>
+                          {method.name}
+                        </div>
+                        <div className="text-[10px] font-bold opacity-75 truncate">{method.badge}</div>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
 
               <p className="bx-hint pl-6 text-xs leading-relaxed">
-                Clicking Pay Now opens the gateway payment portal. You will select your preferred payment method (bKash, Nagad, Rocket, Upay, or Cards) to complete payment. Upon server verification, your funds are placed immediately into BEXORA Escrow and the 3-Party Deal Room is activated.
+                Starts a server-verified payment session and locks this listing for 15 minutes while you complete payment. Only confirmed gateway settlements create your private 3-Party Deal Room.
               </p>
             </label>
 
@@ -1162,7 +1311,8 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
               </div>
             ) : buyNowUnavailable ? (
               <div className="p-3.5 rounded-xl bx-soft text-xs font-bold text-center">
-                This listing is currently reserved or sold and unavailable for Buy Now checkout.
+                {reservationAcquisition.reason ||
+                  'This listing is currently reserved or sold and unavailable for Buy Now checkout.'}
               </div>
             ) : mode === 'accepted_bid_deal' && userUid && !dealEligibility.eligible ? (
               <div className="p-3.5 rounded-xl bx-soft text-xs font-bold text-center">
@@ -1191,8 +1341,8 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
                 )}
                 <span>
                   {submitting
-                    ? 'Connecting to Secure Pay BD Gateway…'
-                    : `Pay with Live Gateway (bKash, Nagad, Rocket, Upay) — ${formatMoneyFromMinor(
+                    ? 'Connecting to Live Payment Gateway…'
+                    : `Pay with ${selectedGatewayChannel?.name || 'Live Gateway'} — ${formatMoneyFromMinor(
                         quote.buyerTotalMinor,
                         displayCurrency,
                         quote.currency,

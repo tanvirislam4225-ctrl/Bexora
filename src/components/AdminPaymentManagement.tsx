@@ -1,19 +1,17 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import {
-  ArrowDownLeft,
+  ArrowDown,
+  ArrowUp,
   ArrowUpRight,
   Check,
   CheckCircle2,
-  Copy,
-  DollarSign,
+  CreditCard,
   Globe,
-  Info,
   Plus,
   RefreshCw,
   Search,
   Trash2,
   X,
-  XCircle,
   AlertTriangle,
   ArrowRight,
   ShieldCheck,
@@ -23,11 +21,17 @@ import {
   CountryCurrencyItem,
   filterCountries,
   DEFAULT_WITHDRAWAL_METHODS,
-  DEFAULT_MANUAL_PAYMENT_METHODS,
   WithdrawalMethodSetting,
-  ManualPaymentMethodSetting,
   convertCurrency,
 } from '../lib/countryCurrencyCatalog';
+import type { GatewayPaymentMethodSetting } from '../types';
+import {
+  DEFAULT_GATEWAY_DISPLAY_METHODS,
+  moveGatewayDisplayMethod,
+  normalizeGatewayPaymentMethods,
+  toggleGatewayDisplayMethod,
+  upsertGatewayDisplayMethod,
+} from '../lib/walletTopupAndReservationLogic';
 import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { buildApiUrl } from '../lib/apiClient';
@@ -37,8 +41,8 @@ interface AdminPaymentManagementProps {
 }
 
 export function AdminPaymentManagement({ getIdToken }: AdminPaymentManagementProps) {
-  // 3 Primary Sub-Options mandated by user prompt: 1) Withdraw, 2) Manual Payment, 3) Currency
-  const [subOption, setSubOption] = useState<'withdraw' | 'manual' | 'currency'>('withdraw');
+  // 3 Primary Sub-Options: 1) Withdraw, 2) Checkout Gateways, 3) Currency
+  const [subOption, setSubOption] = useState<'withdraw' | 'gateways' | 'currency'>('withdraw');
 
   // Flash Notifications
   const [successMsg, setSuccessMsg] = useState('');
@@ -72,20 +76,16 @@ export function AdminPaymentManagement({ getIdToken }: AdminPaymentManagementPro
   });
 
   // -------------------------------------------------------------
-  // 2. MANUAL PAYMENT (ADD BALANCE) STATE
+  // 2. LIVE GATEWAY CHECKOUT LABELS STATE
   // -------------------------------------------------------------
-  const [manualMethods, setManualMethods] = useState<ManualPaymentMethodSetting[]>(DEFAULT_MANUAL_PAYMENT_METHODS);
-  const [showAddManualModal, setShowAddManualModal] = useState(false);
-  const [newManualForm, setNewManualForm] = useState({
-    id: '',
+  const [gatewayMethods, setGatewayMethods] = useState<GatewayPaymentMethodSetting[]>(
+    DEFAULT_GATEWAY_DISPLAY_METHODS
+  );
+  const [showAddGatewayModal, setShowAddGatewayModal] = useState(false);
+  const [newGatewayForm, setNewGatewayForm] = useState({
     name: '',
-    type: 'custom',
-    receivingNumber: '',
-    accountHolder: '',
-    instructions: '1. Transfer the exact amount to the number above.\n2. Note down your Transaction ID.\n3. Enter the TrxID and your sender account number in the verification form.',
-    minDeposit: 10,
-    badge: 'Manual Gateway',
-    color: '#005BAC',
+    badge: 'Instant Pay',
+    color: '#FF6500',
   });
 
   // -------------------------------------------------------------
@@ -122,18 +122,8 @@ export function AdminPaymentManagement({ getIdToken }: AdminPaymentManagementPro
         if (Array.isArray(d.withdrawalMethods) && d.withdrawalMethods.length > 0) {
           setWithdrawalMethods(d.withdrawalMethods);
         }
-        if (Array.isArray(d.manualPaymentConfig) && d.manualPaymentConfig.length > 0) {
-          setManualMethods(d.manualPaymentConfig);
-        } else if (d.bkashNumber || d.nagadNumber || d.rocketNumber) {
-          // Merge legacy numbers into defaults
-          setManualMethods((prev) =>
-            prev.map((m) => {
-              if (m.id === 'bkash' && d.bkashNumber) return { ...m, receivingNumber: String(d.bkashNumber) };
-              if (m.id === 'nagad' && d.nagadNumber) return { ...m, receivingNumber: String(d.nagadNumber) };
-              if (m.id === 'rocket' && d.rocketNumber) return { ...m, receivingNumber: String(d.rocketNumber) };
-              return m;
-            })
-          );
+        if (Array.isArray(d.gatewayPaymentMethods) && d.gatewayPaymentMethods.length > 0) {
+          setGatewayMethods(normalizeGatewayPaymentMethods(d.gatewayPaymentMethods));
         }
         if (d.countryRates && typeof d.countryRates === 'object') {
           setCountryRates((prev) => ({ ...prev, ...d.countryRates }));
@@ -202,45 +192,40 @@ export function AdminPaymentManagement({ getIdToken }: AdminPaymentManagementPro
     }
   };
 
-  const handleSaveManualPaymentSettings = async () => {
+  const handleSaveGatewayPaymentSettings = async () => {
     setSaving(true);
     try {
+      const normalized = normalizeGatewayPaymentMethods(gatewayMethods);
+      setGatewayMethods(normalized);
       const token = await getIdToken();
-      // Sync legacy top-level numbers
-      const bkash = manualMethods.find((m) => m.type === 'bkash');
-      const nagad = manualMethods.find((m) => m.type === 'nagad');
-      const rocket = manualMethods.find((m) => m.type === 'rocket');
 
-      await fetch(buildApiUrl('/api/admin/payments/settings'), {
+      const resp = await fetch(buildApiUrl('/api/admin/payments/settings'), {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          manualPaymentConfig: manualMethods,
-          bkashNumber: bkash?.receivingNumber || '',
-          nagadNumber: nagad?.receivingNumber || '',
-          rocketNumber: rocket?.receivingNumber || '',
+          gatewayPaymentMethods: normalized,
         }),
       });
+      if (!resp.ok) {
+        const body = (await resp.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(body?.error || 'Backend failed to save gateway display settings.');
+      }
 
-      // Also persist directly to Firestore
       await setDoc(
         doc(db, 'publicConfig', 'settings'),
         {
-          manualPaymentConfig: manualMethods,
-          bkashNumber: bkash?.receivingNumber || '',
-          nagadNumber: nagad?.receivingNumber || '',
-          rocketNumber: rocket?.receivingNumber || '',
+          gatewayPaymentMethods: normalized,
           updatedAt: serverTimestamp(),
         },
         { merge: true }
       );
 
-      notify('Manual Payment (Add Balance) methods saved! Active methods are now displayed to users.');
+      notify('Live Checkout Gateway payment labels saved! Enabled labels appear dynamically in Checkout & Wallet.');
     } catch (err) {
-      notify('Failed to save manual payment settings.', true);
+      notify(err instanceof Error ? err.message : 'Failed to save gateway display labels.', true);
     } finally {
       setSaving(false);
     }
@@ -384,17 +369,17 @@ export function AdminPaymentManagement({ getIdToken }: AdminPaymentManagementPro
           <button
             type="button"
             onClick={() => {
-              setSubOption('manual');
+              setSubOption('gateways');
               setSelectedCountry(null);
             }}
             className={`py-3 px-3 sm:px-4 rounded-xl text-xs sm:text-sm font-black transition-all flex flex-col sm:flex-row items-center justify-center gap-2 text-center ${
-              subOption === 'manual'
+              subOption === 'gateways'
                 ? 'bg-[var(--accent)] text-white shadow-md shadow-[var(--accent)]/20'
                 : 'hover:bg-[var(--surface-2)] text-[var(--text-2)] hover:text-white'
             }`}
           >
-            <ArrowDownLeft className="w-4 h-4 shrink-0" />
-            <span>2. Manual Payment</span>
+            <CreditCard className="w-4 h-4 shrink-0" />
+            <span>2. Checkout Gateways</span>
           </button>
 
           <button
@@ -704,248 +689,235 @@ export function AdminPaymentManagement({ getIdToken }: AdminPaymentManagementPro
       )}
 
       {/* ------------------------------------------------------------- */}
-      {/* SUB-OPTION 2: MANUAL PAYMENT (HOW USERS ADD BALANCE)          */}
+      {/* SUB-OPTION 2: LIVE CHECKOUT GATEWAY DISPLAY LABELS            */}
       {/* ------------------------------------------------------------- */}
-      {subOption === 'manual' && (
+      {subOption === 'gateways' && (
         <div className="space-y-6">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <h2 className="text-lg font-black text-white">Manual Payment (Add Balance Destinations)</h2>
+              <h2 className="text-lg font-black text-white">
+                Live Checkout Payment Method Labels
+              </h2>
               <p className="text-xs text-[var(--text-2)]">
-                Check which payment methods are available. Enter your receiving number and step-by-step instructions for each checked method.
+                Add, rename, enable/disable, or reorder the payment labels displayed under Live Payment Gateway in Checkout &amp; Wallet.
               </p>
             </div>
             <div className="flex items-center gap-2">
               <button
                 type="button"
-                onClick={() => setShowAddManualModal(true)}
+                onClick={() => setShowAddGatewayModal(true)}
                 className="bx-btn px-3 py-2 text-xs font-black bg-[var(--surface-2)] hover:bg-[var(--surface-3)] text-white flex items-center gap-1.5"
               >
                 <Plus className="w-4 h-4" />
-                <span>Add Payment Method</span>
+                <span>Add Payment Label</span>
               </button>
               <button
                 type="button"
                 disabled={saving}
-                onClick={handleSaveManualPaymentSettings}
+                onClick={handleSaveGatewayPaymentSettings}
                 className="bx-btn bx-btn-primary px-5 py-2 text-xs font-black flex items-center gap-2"
               >
                 {saving ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
-                <span>Save Manual Payment Settings</span>
+                <span>Save Gateway Labels</span>
               </button>
             </div>
           </div>
 
-          {/* Methods List */}
-          <div className="space-y-4">
-            {manualMethods.map((m, idx) => {
-              const isChecked = m.enabled;
-              return (
-                <div
-                  key={m.id}
-                  className={`bx-card p-5 space-y-4 border-2 transition-all ${
-                    isChecked
-                      ? 'border-[var(--accent)]/40 bg-[var(--surface-2)]/30'
-                      : 'border-[var(--border-soft)] opacity-60 bg-[var(--surface-1)]'
-                  }`}
-                >
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <label className="flex items-center gap-3 cursor-pointer select-none">
-                      <input
-                        type="checkbox"
-                        checked={isChecked}
-                        onChange={(e) => {
-                          const updated = [...manualMethods];
-                          updated[idx] = { ...m, enabled: e.target.checked };
-                          setManualMethods(updated);
-                        }}
-                        className="w-5 h-5 accent-[var(--accent)] rounded cursor-pointer"
-                      />
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <span className="text-base font-black text-white">{m.name}</span>
-                          {m.badge && (
-                            <span className="text-[10px] font-black uppercase px-2 py-0.5 rounded-full bg-[var(--surface-2)] text-[var(--accent)] border border-[var(--border-soft)]">
-                              {m.badge}
-                            </span>
-                          )}
-                        </div>
-                        <span className="text-[11px] text-[var(--text-2)]">
-                          {isChecked ? 'Active on user Add Balance page' : 'Disabled (Hidden on user side)'}
-                        </span>
-                      </div>
-                    </label>
-
-                    <div className="flex items-center gap-2">
-                      <span
-                        className={`text-[10px] font-black uppercase px-2.5 py-1 rounded-full border ${
-                          isChecked && m.receivingNumber.trim()
-                            ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
-                            : 'bg-zinc-500/10 text-zinc-400 border-zinc-500/30'
-                        }`}
-                      >
-                        {isChecked && m.receivingNumber.trim() ? 'Active Receiving Number' : 'Incomplete / Disabled'}
+          <div className="space-y-3">
+            {gatewayMethods.map((m, idx) => (
+              <div
+                key={m.id}
+                className={`bx-card p-4 border-2 transition-all space-y-3 ${
+                  m.enabled
+                    ? 'border-[var(--accent)]/40 bg-[var(--surface-2)]/30'
+                    : 'border-[var(--border-soft)] opacity-65'
+                }`}
+              >
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <label className="flex items-center gap-3 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={m.enabled}
+                      onChange={() => setGatewayMethods((prev) => toggleGatewayDisplayMethod(prev, m.id))}
+                      className="w-5 h-5 accent-[var(--accent)] rounded cursor-pointer"
+                    />
+                    <span
+                      className="w-3 h-3 rounded-full shrink-0 border border-white/20"
+                      style={{ background: m.color || '#FF6500' }}
+                    />
+                    <div>
+                      <span className="text-sm font-black text-white block">{m.name}</span>
+                      <span className="text-[11px] text-[var(--text-2)]">
+                        {m.enabled ? 'Visible on Checkout & Wallet' : 'Hidden from Checkout & Wallet'}
                       </span>
-                      {m.id.startsWith('custom_') && (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            if (window.confirm(`Delete manual payment method "${m.name}"?`)) {
-                              setManualMethods(manualMethods.filter((x) => x.id !== m.id));
-                            }
-                          }}
-                          className="p-1.5 text-rose-400 hover:bg-rose-500/10 rounded-lg"
-                          title="Delete Method"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      )}
+                    </div>
+                  </label>
+
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      disabled={idx === 0}
+                      onClick={() => setGatewayMethods((prev) => moveGatewayDisplayMethod(prev, m.id, 'up'))}
+                      className="p-1.5 rounded-lg bg-[var(--surface-2)] hover:bg-[var(--surface-3)] disabled:opacity-40"
+                      title="Move Up"
+                      aria-label={`Move ${m.name} up`}
+                    >
+                      <ArrowUp className="w-4 h-4" />
+                    </button>
+                    <button
+                      type="button"
+                      disabled={idx === gatewayMethods.length - 1}
+                      onClick={() => setGatewayMethods((prev) => moveGatewayDisplayMethod(prev, m.id, 'down'))}
+                      className="p-1.5 rounded-lg bg-[var(--surface-2)] hover:bg-[var(--surface-3)] disabled:opacity-40"
+                      title="Move Down"
+                      aria-label={`Move ${m.name} down`}
+                    >
+                      <ArrowDown className="w-4 h-4" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setGatewayMethods((prev) =>
+                          prev
+                            .filter((x) => x.id !== m.id)
+                            .map((item, nextOrder) => ({ ...item, order: nextOrder }))
+                        );
+                      }}
+                      className="p-1.5 text-rose-400 hover:bg-rose-500/10 rounded-lg"
+                      title="Remove Label"
+                      aria-label={`Remove ${m.name}`}
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2 border-t border-[var(--border-soft)]">
+                  <div>
+                    <label className="block text-[11px] font-extrabold mb-1 text-white">
+                      Display Name
+                    </label>
+                    <input
+                      type="text"
+                      value={m.name}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setGatewayMethods((prev) =>
+                          prev.map((item) => (item.id === m.id ? { ...item, name: val } : item))
+                        );
+                      }}
+                      className="bx-input w-full px-3 py-1.5 text-xs font-bold"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-extrabold mb-1 text-white">
+                      Badge Subtitle
+                    </label>
+                    <input
+                      type="text"
+                      value={m.badge}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setGatewayMethods((prev) =>
+                          prev.map((item) => (item.id === m.id ? { ...item, badge: val } : item))
+                        );
+                      }}
+                      className="bx-input w-full px-3 py-1.5 text-xs"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-extrabold mb-1 text-white">
+                      Accent Color (Hex)
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="color"
+                        value={/^#[0-9a-fA-F]{6}$/.test(m.color) ? m.color : '#FF6500'}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setGatewayMethods((prev) =>
+                            prev.map((item) => (item.id === m.id ? { ...item, color: val } : item))
+                          );
+                        }}
+                        className="w-9 h-8 rounded border border-[var(--border-soft)] bg-transparent cursor-pointer shrink-0"
+                        aria-label={`Accent color for ${m.name}`}
+                      />
+                      <input
+                        type="text"
+                        value={m.color}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setGatewayMethods((prev) =>
+                            prev.map((item) => (item.id === m.id ? { ...item, color: val } : item))
+                          );
+                        }}
+                        className="bx-input w-full px-3 py-1.5 text-xs font-mono"
+                      />
                     </div>
                   </div>
-
-                  {/* Input fields appear when method is checked */}
-                  {isChecked && (
-                    <div className="space-y-4 pt-3 border-t border-[var(--border-soft)]">
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <div>
-                          <label className="block text-xs font-extrabold mb-1 text-white">
-                            Receiving Number / Wallet Address <span className="text-rose-500">*</span>
-                          </label>
-                          <div className="flex items-center gap-2">
-                            <input
-                              type="text"
-                              value={m.receivingNumber}
-                              onChange={(e) => {
-                                const updated = [...manualMethods];
-                                updated[idx] = { ...m, receivingNumber: e.target.value };
-                                setManualMethods(updated);
-                              }}
-                              placeholder="018XXXXXXXX or Binance Pay ID / USDT TRC20"
-                              className="bx-input w-full px-3.5 py-2 text-xs font-mono font-bold text-white select-all"
-                            />
-                            {m.receivingNumber && (
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  void navigator.clipboard.writeText(m.receivingNumber);
-                                  notify('Receiving number copied to clipboard!');
-                                }}
-                                className="p-2 rounded-xl bg-[var(--surface-2)] hover:bg-[var(--surface-3)] text-white shrink-0"
-                                title="Test Copy Button"
-                              >
-                                <Copy className="w-4 h-4" />
-                              </button>
-                            )}
-                          </div>
-                          <p className="text-[10px] text-[var(--text-2)] mt-1">
-                            Users will see this number with a one-tap Copy button.
-                          </p>
-                        </div>
-
-                        <div>
-                          <label className="block text-xs font-extrabold mb-1 text-white">
-                            Account Holder Name / Desk Reference
-                          </label>
-                          <input
-                            type="text"
-                            value={m.accountHolder || ''}
-                            onChange={(e) => {
-                              const updated = [...manualMethods];
-                              updated[idx] = { ...m, accountHolder: e.target.value };
-                              setManualMethods(updated);
-                            }}
-                            placeholder="e.g. Bexora Official Escrow Desk"
-                            className="bx-input w-full px-3.5 py-2 text-xs"
-                          />
-                        </div>
-                      </div>
-
-                      <div>
-                        <label className="block text-xs font-extrabold mb-1 text-white">
-                          Step-by-Step Instructions on how to Send Money (Editable)
-                        </label>
-                        <textarea
-                          rows={4}
-                          value={m.instructions}
-                          onChange={(e) => {
-                            const updated = [...manualMethods];
-                            updated[idx] = { ...m, instructions: e.target.value };
-                            setManualMethods(updated);
-                          }}
-                          placeholder="Write step-by-step instructions for the user..."
-                          className="bx-input w-full p-3 text-xs leading-relaxed font-sans"
-                        />
-                        <span className="text-[10px] text-[var(--text-2)] block mt-0.5">
-                          Formatted with numbered steps on the user&apos;s deposit page.
-                        </span>
-                      </div>
-                    </div>
-                  )}
                 </div>
-              );
-            })}
+              </div>
+            ))}
           </div>
 
-          {/* Add Custom Manual Method Modal */}
-          {showAddManualModal && (
+          {showAddGatewayModal && (
             <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
-              <div className="bx-card p-6 max-w-lg w-full space-y-4 border border-[var(--accent)]/40">
+              <div className="bx-card p-6 max-w-md w-full space-y-4 border border-[var(--accent)]/40">
                 <div className="flex items-center justify-between">
-                  <h3 className="text-base font-black text-white">Add New Manual Payment Method</h3>
-                  <button onClick={() => setShowAddManualModal(false)} className="p-1 text-[var(--text-2)] hover:text-white">
+                  <h3 className="text-base font-black text-white">Add Live Gateway Payment Label</h3>
+                  <button
+                    type="button"
+                    onClick={() => setShowAddGatewayModal(false)}
+                    className="p-1 text-[var(--text-2)] hover:text-white"
+                  >
                     <X className="w-4 h-4" />
                   </button>
                 </div>
 
                 <div className="space-y-3">
                   <div>
-                    <label className="block text-xs font-extrabold mb-1">Method Name</label>
+                    <label className="block text-xs font-extrabold mb-1">Display Name</label>
                     <input
                       type="text"
-                      value={newManualForm.name}
-                      onChange={(e) => setNewManualForm({ ...newManualForm, name: e.target.value })}
-                      placeholder="e.g. Upay Personal, Cellfin, Cash App"
+                      value={newGatewayForm.name}
+                      onChange={(e) => setNewGatewayForm({ ...newGatewayForm, name: e.target.value })}
+                      placeholder="e.g. Upay, Visa / Mastercard, Apple Pay"
                       className="bx-input w-full px-3 py-2 text-xs"
                     />
                   </div>
-
                   <div>
-                    <label className="block text-xs font-extrabold mb-1">Receiving Number / Address</label>
+                    <label className="block text-xs font-extrabold mb-1">Badge Subtitle</label>
                     <input
                       type="text"
-                      value={newManualForm.receivingNumber}
-                      onChange={(e) => setNewManualForm({ ...newManualForm, receivingNumber: e.target.value })}
-                      placeholder="01XXXXXXXXX"
-                      className="bx-input w-full px-3 py-2 text-xs font-mono"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-extrabold mb-1">Account Holder / Desk Note</label>
-                    <input
-                      type="text"
-                      value={newManualForm.accountHolder}
-                      onChange={(e) => setNewManualForm({ ...newManualForm, accountHolder: e.target.value })}
-                      placeholder="e.g. Bexora Official"
+                      value={newGatewayForm.badge}
+                      onChange={(e) => setNewGatewayForm({ ...newGatewayForm, badge: e.target.value })}
+                      placeholder="e.g. Mobile Wallet or Instant Cards"
                       className="bx-input w-full px-3 py-2 text-xs"
                     />
                   </div>
-
                   <div>
-                    <label className="block text-xs font-extrabold mb-1">Step-by-Step Instructions</label>
-                    <textarea
-                      rows={3}
-                      value={newManualForm.instructions}
-                      onChange={(e) => setNewManualForm({ ...newManualForm, instructions: e.target.value })}
-                      className="bx-input w-full p-2.5 text-xs"
-                    />
+                    <label className="block text-xs font-extrabold mb-1">Accent Color</label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="color"
+                        value={newGatewayForm.color}
+                        onChange={(e) => setNewGatewayForm({ ...newGatewayForm, color: e.target.value })}
+                        className="w-10 h-9 rounded border border-[var(--border-soft)] bg-transparent cursor-pointer"
+                      />
+                      <input
+                        type="text"
+                        value={newGatewayForm.color}
+                        onChange={(e) => setNewGatewayForm({ ...newGatewayForm, color: e.target.value })}
+                        className="bx-input w-full px-3 py-2 text-xs font-mono"
+                      />
+                    </div>
                   </div>
                 </div>
 
                 <div className="flex items-center justify-end gap-2 pt-2">
                   <button
                     type="button"
-                    onClick={() => setShowAddManualModal(false)}
+                    onClick={() => setShowAddGatewayModal(false)}
                     className="bx-btn px-4 py-2 text-xs bg-[var(--surface-2)]"
                   >
                     Cancel
@@ -953,42 +925,30 @@ export function AdminPaymentManagement({ getIdToken }: AdminPaymentManagementPro
                   <button
                     type="button"
                     onClick={() => {
-                      if (!newManualForm.name.trim() || !newManualForm.receivingNumber.trim()) {
-                        notify('Method name and receiving number are required.', true);
+                      if (!newGatewayForm.name.trim()) {
+                        notify('Gateway display name is required.', true);
                         return;
                       }
-                      const id = `custom_${Date.now()}`;
-                      setManualMethods([
-                        ...manualMethods,
-                        {
-                          id,
-                          name: newManualForm.name.trim(),
-                          type: 'custom',
+                      const cleanId = `${newGatewayForm.name
+                        .trim()
+                        .toLowerCase()
+                        .replace(/[^a-z0-9]+/g, '_')}_${Date.now().toString(36).slice(-4)}`;
+                      setGatewayMethods((prev) =>
+                        upsertGatewayDisplayMethod(prev, {
+                          id: cleanId,
+                          name: newGatewayForm.name.trim(),
+                          badge: newGatewayForm.badge.trim() || 'Instant Pay',
+                          color: newGatewayForm.color,
                           enabled: true,
-                          receivingNumber: newManualForm.receivingNumber.trim(),
-                          accountHolder: newManualForm.accountHolder.trim(),
-                          instructions: newManualForm.instructions.trim(),
-                          minDeposit: newManualForm.minDeposit,
-                          badge: 'Manual Gateway',
-                        },
-                      ]);
-                      setShowAddManualModal(false);
-                      setNewManualForm({
-                        id: '',
-                        name: '',
-                        type: 'custom',
-                        receivingNumber: '',
-                        accountHolder: '',
-                        instructions: '1. Transfer the exact amount to the number above.\n2. Note down your Transaction ID.\n3. Enter the TrxID and your sender account number in the verification form.',
-                        minDeposit: 10,
-                        badge: 'Manual Gateway',
-                        color: '#005BAC',
-                      });
-                      notify(`Added "${newManualForm.name.trim()}". Click "Save Manual Payment Settings" to make it live!`);
+                        })
+                      );
+                      setShowAddGatewayModal(false);
+                      setNewGatewayForm({ name: '', badge: 'Instant Pay', color: '#FF6500' });
+                      notify('Label added. Click "Save Gateway Labels" to publish to Checkout & Wallet.');
                     }}
                     className="bx-btn bx-btn-primary px-4 py-2 text-xs font-black"
                   >
-                    Add Method
+                    Add Label
                   </button>
                 </div>
               </div>

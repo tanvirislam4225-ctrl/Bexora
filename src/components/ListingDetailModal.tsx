@@ -17,6 +17,7 @@ import {
   Check,
   ChevronDown,
   ChevronUp,
+  Clock,
   CreditCard,
   Edit3,
   ExternalLink,
@@ -78,6 +79,14 @@ import {
 import { executeShareListing } from '../lib/engagementLogic';
 import { formatListingPublishedTime, formatViewCount } from '../lib/viewCountLogic';
 import { recordAssetDetailView } from '../lib/viewCountClient';
+import { buildApiUrl } from '../lib/apiClient';
+import {
+  canAcquireListingReservation,
+  computeReservationCountdown,
+  generateDealCode,
+  getListingReservationExpiryMs,
+  isListingReservationActive,
+} from '../lib/walletTopupAndReservationLogic';
 import type { ReportModalTarget } from '../lib/moderationClient';
 import { BidActionConfirmModal } from './BidActionConfirmModal';
 import { DeleteListingModal } from './DeleteListingModal';
@@ -168,8 +177,10 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
   const [bidError, setBidError] = useState('');
   const [busyAction, setBusyAction] = useState(false);
   const [shareFeedback, setShareFeedback] = useState<'idle' | 'copied' | 'shared'>('idle');
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
   const submittingBidRef = useRef(false);
   const viewCountedRef = useRef<string | null>(null);
+  const expireRequestedForRef = useRef<string | null>(null);
   const shareFeedbackTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -311,6 +322,51 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
     [listing.images]
   );
 
+  const reservationExpiryMs = useMemo(
+    () => getListingReservationExpiryMs(listing),
+    [listing]
+  );
+
+  useEffect(() => {
+    if (listing.status !== 'reserved' || reservationExpiryMs <= 0) return;
+    setNowMs(Date.now());
+    const id = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [listing.id, listing.status, reservationExpiryMs]);
+
+  const reservationCountdown = useMemo(
+    () => computeReservationCountdown(reservationExpiryMs, nowMs),
+    [reservationExpiryMs, nowMs]
+  );
+
+  useEffect(() => {
+    if (
+      listing.status !== 'reserved' ||
+      listing.activeDealId ||
+      reservationExpiryMs <= 0 ||
+      !reservationCountdown.expired
+    ) {
+      return;
+    }
+    const key = `${listing.id}:${reservationExpiryMs}`;
+    if (expireRequestedForRef.current === key) return;
+    expireRequestedForRef.current = key;
+    void fetch(buildApiUrl(`/api/listings/${encodeURIComponent(listing.id)}/expire-reservation`), {
+      method: 'POST',
+    }).catch(() => {});
+  }, [listing.id, listing.status, listing.activeDealId, reservationExpiryMs, reservationCountdown.expired]);
+
+  const isTimedCheckoutReservation = Boolean(
+    listing.status === 'reserved' && !listing.activeDealId && reservationExpiryMs > 0
+  );
+
+  const isListingReservedActiveNow = isListingReservationActive(listing, nowMs);
+
+  const reservationCheck = useMemo(
+    () => canAcquireListingReservation(listing, userUid || '__visitor__', nowMs),
+    [listing, userUid, nowMs]
+  );
+
   const canSellerEdit = isSellerOwner && canSellerEditListingStatus(listing.status, listing.activeDealId);
 
   const handleBuyNow = () => {
@@ -322,8 +378,11 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
       onFlash('You cannot buy your own listing.');
       return;
     }
-    if (listing.status !== 'active') {
-      onFlash('This listing is currently reserved or sold and unavailable for Buy Now.');
+    if (!reservationCheck.allowed) {
+      onFlash(
+        reservationCheck.reason ||
+          'This listing is currently reserved or sold and unavailable for Buy Now.'
+      );
       return;
     }
     onStartBuyNowCheckout(listing);
@@ -410,6 +469,10 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
     }
     if (isSellerOwner) {
       setBidError('Sellers cannot bid on their own listing.');
+      return;
+    }
+    if (listing.status !== 'active' && !(!listing.activeDealId && !isListingReservedActiveNow)) {
+      setBidError('This listing is currently reserved and cannot accept new bids.');
       return;
     }
     const val = Number(bidAmount);
@@ -558,7 +621,9 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
           updatedAt: serverTimestamp(),
         });
 
+        const dealCreatedMs = Date.now();
         tx.set(dealRef, {
+          dealCode: generateDealCode(dealId, dealCreatedMs),
           listingId: listing.id,
           listingTitle: listing.title,
           platform: listing.platform,
@@ -584,6 +649,7 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
           originalDeadlineMs: 0,
           unresolvedReportCount: 0,
           transferSubmissionCount: 0,
+          isDeleted: false,
           status: 'accepted_pending_payment',
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
@@ -594,6 +660,9 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
           activeDealId: dealId,
           acceptedBidAmountMinor: bid.amountMinor,
           reservedBuyerId: bid.buyerId,
+          reservedUntilMs: deleteField(),
+          reservationExpiresAtMs: deleteField(),
+          reservationSessionId: deleteField(),
           updatedAt: serverTimestamp(),
         });
       });
@@ -725,6 +794,9 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
           activeDealId: deleteField(),
           acceptedBidAmountMinor: deleteField(),
           reservedBuyerId: deleteField(),
+          reservedUntilMs: deleteField(),
+          reservationExpiresAtMs: deleteField(),
+          reservationSessionId: deleteField(),
           updatedAt: serverTimestamp(),
         });
       });
@@ -930,14 +1002,14 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
             <div className="pb-4 border-b space-y-1.5" style={{ borderColor: 'var(--border-soft)' }}>
               {listing.status === 'reserved' && (
                 <p className="text-xs font-extrabold mb-1" style={{ color: 'var(--orange)' }}>
-                  Reserved — Pending Buyer Payment (
-                  {formatMoneyFromMinor(
-                    effectiveBasePriceMinor,
-                    displayCurrency,
-                    listing.currency,
-                    settings.usdToBdtRate
-                  )}{' '}
-                  accepted bid)
+                  {isTimedCheckoutReservation && reservationCountdown.active
+                    ? `Reserved in Live Checkout — Expires in ${reservationCountdown.formatted}`
+                    : `Reserved — Pending Buyer Payment (${formatMoneyFromMinor(
+                        effectiveBasePriceMinor,
+                        displayCurrency,
+                        listing.currency,
+                        settings.usdToBdtRate
+                      )} accepted bid)`}
                 </p>
               )}
               <h1 className="text-xl sm:text-2xl lg:text-3xl font-black leading-snug">
@@ -1369,13 +1441,35 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
                 }}
               >
                 <div className="flex items-start gap-2.5">
-                  <Lock className="w-4 h-4 shrink-0 mt-0.5" style={{ color: 'var(--orange)' }} />
-                  <div className="space-y-1 text-xs">
-                    <div className="font-extrabold text-sm" style={{ color: 'var(--orange)' }}>
-                      Reserved — Pending Buyer Payment
+                  {isTimedCheckoutReservation ? (
+                    <Clock className="w-4 h-4 shrink-0 mt-0.5" style={{ color: 'var(--orange)' }} />
+                  ) : (
+                    <Lock className="w-4 h-4 shrink-0 mt-0.5" style={{ color: 'var(--orange)' }} />
+                  )}
+                  <div className="space-y-1 text-xs flex-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-extrabold text-sm" style={{ color: 'var(--orange)' }}>
+                        {isTimedCheckoutReservation
+                          ? isReservedBuyer
+                            ? 'Reserved for Your Checkout'
+                            : 'Reserved in Active Checkout'
+                          : 'Reserved — Pending Buyer Payment'}
+                      </span>
+                      {isTimedCheckoutReservation && reservationCountdown.active && (
+                        <span
+                          className="px-2 py-0.5 rounded font-black tabular-nums"
+                          style={{ background: 'var(--yellow-soft)', color: '#191919' }}
+                        >
+                          {reservationCountdown.formatted}
+                        </span>
+                      )}
                     </div>
                     <p style={{ color: 'var(--text-2)' }}>
-                      {isReservedBuyer
+                      {isTimedCheckoutReservation
+                        ? isReservedBuyer
+                          ? 'You have an active 15-minute checkout reservation on this asset. Complete payment in Checkout before the timer runs out.'
+                          : 'Another buyer is currently completing checkout payment for this listing. If unpaid after 15 minutes, the listing automatically reopens.'
+                        : isReservedBuyer
                         ? `Your bid was accepted! Proceed to Checkout to pay the exact agreed total (${formatMoneyFromMinor(
                             breakdown.buyerTotalMinor,
                             displayCurrency,
@@ -1389,7 +1483,21 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
                   </div>
                 </div>
 
-                {(isReservedBuyer || isSellerOwner) && (
+                {isTimedCheckoutReservation && isReservedBuyer && !isSellerOwner && (
+                  <div className="flex flex-wrap items-center gap-2 pt-1">
+                    <button
+                      type="button"
+                      disabled={busyAction}
+                      onClick={() => onStartBuyNowCheckout(listing)}
+                      className="bx-btn bx-btn-primary bx-btn-sm"
+                    >
+                      <span>Resume Checkout</span>
+                      <ArrowRight className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                )}
+
+                {!isTimedCheckoutReservation && (isReservedBuyer || isSellerOwner) && (
                   <div className="flex flex-wrap items-center gap-2 pt-1">
                     {resolvedActiveDealId && (
                       <button
@@ -1431,7 +1539,7 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
               </div>
             )}
 
-            {!isSellerOwner && listing.status === 'active' && (
+            {!isSellerOwner && (listing.status === 'active' || (isTimedCheckoutReservation && reservationCheck.allowed && !isReservedBuyer)) && (
               <div className="space-y-2">
                 <button
                   type="button"
@@ -1451,7 +1559,7 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
                   </span>
                 </button>
                 <p className="bx-hint text-center">
-                  Opens secure Escrow Checkout (BEXORA Wallet Balance &amp; Live Payment Methods)
+                  Opens secure Escrow Checkout (BEXORA Wallet Balance &amp; Live Payment Gateway)
                 </p>
               </div>
             )}

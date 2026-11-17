@@ -18,6 +18,10 @@ import {
   WithdrawalMethodSetting,
   ManualPaymentMethodSetting,
 } from '../lib/countryCurrencyCatalog';
+import {
+  DEFAULT_GATEWAY_DISPLAY_METHODS,
+  normalizeGatewayPaymentMethods,
+} from '../lib/walletTopupAndReservationLogic';
 import { finalizeDealEscrowPaymentInFirestore } from './securePayGatewayEngine';
 import type { CurrencyCode, DealRecord } from '../types';
 
@@ -78,7 +82,7 @@ export function registerPaymentManagementRoutes<
   function getFirestoreInstance() {
     const cfg = loadVerifiedFirebaseConfig();
     const adminApp = getOrInitFirebaseAdminApp(cfg.projectId);
-    return getAdminFirestore(adminApp);
+    return getAdminFirestore(adminApp, cfg.firestoreDatabaseId);
   }
 
   // -------------------------------------------------------------
@@ -103,6 +107,9 @@ export function registerPaymentManagementRoutes<
       const manualPaymentConfig = Array.isArray(settingsData.manualPaymentConfig)
         ? settingsData.manualPaymentConfig
         : DEFAULT_MANUAL_PAYMENT_METHODS;
+      const gatewayPaymentMethods = normalizeGatewayPaymentMethods(
+        settingsData.gatewayPaymentMethods
+      );
       const countryRates = settingsData.countryRates || { BD: usdtToBdtRate, US: 1, IN: 86.5, GB: 0.78, AE: 3.67, SA: 3.75, EU: 0.92 };
       const activeCountryCode = settingsData.activeCountryCode || 'BD';
 
@@ -130,6 +137,7 @@ export function registerPaymentManagementRoutes<
         manualPaymentEnabled,
         withdrawalMethods,
         manualPaymentConfig,
+        gatewayPaymentMethods,
         countryRates,
         activeCountryCode,
         activeManualMethods: activeMethods,
@@ -143,6 +151,7 @@ export function registerPaymentManagementRoutes<
         manualPaymentEnabled: true,
         withdrawalMethods: DEFAULT_WITHDRAWAL_METHODS,
         manualPaymentConfig: DEFAULT_MANUAL_PAYMENT_METHODS,
+        gatewayPaymentMethods: DEFAULT_GATEWAY_DISPLAY_METHODS,
         countryRates: { BD: 125, US: 1, IN: 86.5, GB: 0.78, AE: 3.67, SA: 3.75, EU: 0.92 },
         activeCountryCode: 'BD',
         activeManualMethods: getDefaultManualPaymentMethods(),
@@ -494,6 +503,7 @@ export function registerPaymentManagementRoutes<
       manualPaymentEnabled,
       withdrawalMethods,
       manualPaymentConfig,
+      gatewayPaymentMethods,
       countryRates,
       activeCountryCode,
     } = req.body || {};
@@ -520,6 +530,9 @@ export function registerPaymentManagementRoutes<
       if (livePaymentLinksEnabled !== undefined) updates.livePaymentLinksEnabled = Boolean(livePaymentLinksEnabled);
       if (manualPaymentEnabled !== undefined) updates.manualPaymentEnabled = Boolean(manualPaymentEnabled);
       if (Array.isArray(withdrawalMethods)) updates.withdrawalMethods = withdrawalMethods;
+      if (Array.isArray(gatewayPaymentMethods)) {
+        updates.gatewayPaymentMethods = normalizeGatewayPaymentMethods(gatewayPaymentMethods);
+      }
       if (Array.isArray(manualPaymentConfig)) {
         updates.manualPaymentConfig = manualPaymentConfig;
         // Sync legacy top-level numbers for backwards compatibility
